@@ -32,8 +32,20 @@
     "ENABLE_TOOL_SEARCH":           "auto"
   },
 
+  "extraKnownMarketplaces": {
+    "tdd-spike": {
+      "source": {
+        "source": "directory",
+        "path": "/tmp/tdd-spike/spike-plugin"
+      },
+      "installLocation": ".",
+      "lastUpdated": "2026-07-31T16:24:29.245Z"
+    }
+  },
+
   "enabledPlugins": {
     "remember@claude-plugins-official":    true,
-    "superpowers@claude-plugins-official": true
+    "superpowers@claude-plugins-official": true,
+    "tdd-spike@tdd-spike":                 true
   }
 }
