@@ -2008,18 +2008,34 @@ case "$_init_text" in
   *)        _bounded=yes ;;
 esac
 assert_eq "yes" "$_bounded" "the extracted block stops before step 8 (end anchor still matches)"
-for _k in version crapMode complexity mutation \
-          maxCrap duplicateThreshold maxFunctionLines \
-          greenAttempts violationRetries mutationRounds mutantsPerPass \
-          greenMaxNewUncovered refactorMaxNewUncovered ignore; do
-  # Match the JSON form `"key":`, not the bare word. Four key names also occur
-  # elsewhere inside this same block -- maxCrap and mutantsPerPass in the
-  # paragraph right after the JSON, mutation as a substring of mutationRounds,
-  # ignore as a substring of .gitignore on the end-anchor line -- so a bare-name
-  # needle passes even when the key is absent from the template. Verified: with
-  # the bare needle, deleting any of those four from the JSON left the suite
-  # fully green.
-  assert_contains "\"${_k}\":" "$_init_text" "tdd-init's config template names ${_k}"
+# DERIVE the expected keys from the fixture instead of hand-maintaining a
+# second list. The previous hardcoded list was a strict SUBSET of the keys the
+# fixture-side loop requires -- commands.test, commands.single,
+# commands.coverage, globs.test and globs.source were never pinned on the
+# template side at all, and both loops were green throughout. Renaming
+# `"coverage":` in the template left the suite fully passing, and that is the
+# key whose loss cascades into all three coverage gates.
+#
+# Two hand-maintained lists of the same thing drift. One derived from the other
+# cannot.
+#
+# Multiplicity matters: "test" occurs twice (commands.test and globs.test), so
+# a presence check would not prove both are declared.
+for _k in $(jq -r 'paths | .[-1] | select(type=="string")' "$_cfg" | sort -u); do
+  _want=$(jq -r --arg k "$_k" '[paths | .[-1] | select(. == $k)] | length' "$_cfg")
+  _have=$(printf '%s' "$_init_text" | grep -o "\"${_k}\":" | wc -l | tr -d ' ')
+  assert_eq "$_want" "$_have" "tdd-init's template declares ${_k} (${_want}x)"
+done
+
+# The spec holds a THIRD copy of this schema. Drift there misleads whoever
+# reads the design next, which is how the template drifted in the first place.
+_spec="$REPO_ROOT/docs/superpowers/specs/2026-07-30-tdd-subagent-workflow-design.md"
+_spec_text=$(sed -n '/"version": 1,/,/^}/p' "$_spec")
+assert_contains "crapMode" "$_spec_text" "the spec's schema block was located at all"
+for _k in $(jq -r 'paths | .[-1] | select(type=="string")' "$_cfg" | sort -u); do
+  _want=$(jq -r --arg k "$_k" '[paths | .[-1] | select(. == $k)] | length' "$_cfg")
+  _have=$(printf '%s' "$_spec_text" | grep -o "\"${_k}\":" | wc -l | tr -d ' ')
+  assert_eq "$_want" "$_have" "the spec's schema declares ${_k} (${_want}x)"
 done
 
 # The three glob lists must be arrays. A bare string would word-split in the
