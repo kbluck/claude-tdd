@@ -854,8 +854,6 @@ verdict=$(tdd_path_verdict "$phase" "$mode" "$rel" "$test_globs" "$source_globs"
 deny "$verdict"
 ```
 
-**Deliberate bug for Step 4 to catch:** `[ -n "$path" ] && exit 0` permits every path instead of skipping only empty ones. It must be `[ -z "$path" ] && exit 0`. Leave it in, watch the tests fail, then fix it — this is exactly the kind of inversion that would ship a silently-disabled guard, and the test suite existing to catch it is the point of the whole task.
-
 ```bash
 chmod +x hooks/guard.sh
 ```
@@ -882,17 +880,42 @@ chmod +x hooks/guard.sh
 }
 ```
 
-- [ ] **Step 4: Run tests, observe the path failures, fix the inversion**
-
-Run: `bash tests/run.sh`
-Expected: the path assertions FAIL (`red writing source exits 2` reports `0|`), the bash and no-phase assertions PASS.
-
-Change `[ -n "$path" ] && exit 0` to `[ -z "$path" ] && exit 0`.
-
-- [ ] **Step 5: Run to verify all pass**
+- [ ] **Step 4: Run to verify all pass**
 
 Run: `bash tests/run.sh`
 Expected: all assertions PASS, exit 0.
+
+- [ ] **Step 5: Prove the path assertions can actually fail**
+
+A guard that permits everything passes no test you have written *unless* those
+assertions genuinely bite. Verify by mutation — the same technique the plugin
+itself will use — rather than by trusting a green suite.
+
+Flip exactly one condition in `hooks/guard.sh`:
+
+```bash
+sed -i.bak 's/\[ -z "\$path" \] && exit 0/[ -n "$path" ] \&\& exit 0/' hooks/guard.sh
+bash tests/run.sh; echo "exit=$?"
+```
+
+Expected: **failures**, specifically the deny assertions (`red writing source
+exits 2` reporting `0|`), and a non-zero exit. That inversion permits every
+path instead of skipping only empty ones — a silently-disabled guard, and the
+exact failure mode nothing else in the design detects, since reads leave no
+trace in a diff.
+
+If the suite still passes, the assertions are not testing what they claim and
+must be fixed before proceeding.
+
+Restore:
+
+```bash
+mv hooks/guard.sh.bak hooks/guard.sh
+bash tests/run.sh
+```
+
+Expected: all passing again. Confirm `git status --porcelain` shows no `.bak`
+file left behind.
 
 - [ ] **Step 6: Verify hooks.json is valid and correctly shaped**
 
