@@ -32,8 +32,15 @@ done
 # maxCrap, mutationRounds, mutantsPerPass, commands.complexity and
 # commands.mutation, so an agent following it would have written a config whose
 # primary refactor trigger threshold was null -- a comparison that never fires.
+# Scope the haystack to the Step 7 JSON block, NOT the whole file. Seven of
+# these key names also appear in surrounding prose (the detection table, the
+# degradation table), so a whole-file grep passes even when the key is missing
+# from the template a model actually copies from. Verified: deleting crapMode
+# from the JSON block alone left the suite fully green under a whole-file
+# match. That is the same defect this test exists to catch, one level up.
 _init="$REPO_ROOT/commands/tdd-init.md"
-_init_text=$(cat "$_init")
+_init_text=$(sed -n '/^## 7\. Write the files/,/^Append to/p' "$_init")
+assert_contains "version" "$_init_text" "the Step 7 JSON block was located at all"
 for _k in version crapMode complexity mutation \
           maxCrap duplicateThreshold maxFunctionLines \
           greenAttempts violationRetries mutationRounds mutantsPerPass \

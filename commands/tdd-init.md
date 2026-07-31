@@ -89,6 +89,13 @@ Every tracked file must match exactly one of the three lists.
 For each path, check it against `test`, then `source`, then `ignore`. Report
 every unclassified file to the user and extend the globs until none remain.
 
+**This is a point-in-time check.** It classifies the files that exist right
+now. A new top-level directory added later matches none of the three globs, and
+because the read rule is a denylist, an unclassified source file is silently
+readable by Red. `/tdd`'s preflight re-runs this same check on every run and
+stops if drift appeared — so the guarantee is maintained there, not here. Say
+so, so the user knows re-running `/tdd-init` is needed after restructuring.
+
 **If `git ls-files` returns nothing, this check proved nothing.** An empty or
 freshly-initialised repo makes the partition vacuously exhaustive, and you
 would write a config whose globs have never been tested against a single real
@@ -122,10 +129,11 @@ For each configured command, the static prefix is everything before the first
    config would break every dispatch; catch it here where the error is
    explainable.
 2. **Warn if a template has content *after* its placeholder** — e.g.
-   `pytest -q {testId} --cov`. Only the static prefix constrains, so everything
-   the agent supplies after it becomes the delta, and the template's own
-   trailing text will be treated as agent input and rejected. Move such flags
-   before the placeholder.
+   `pytest -q {testId} --cov`. Only the static prefix constrains, and the guard
+   never checks the template's trailing text again. So that text is **not
+   enforced**: the agent may omit or alter `--cov` freely and the guard will not
+   notice. Move flags you actually want guaranteed to *before* the placeholder,
+   where they become part of the prefix the command must match.
 3. **Warn if a template contains shell metacharacters.** Those are trusted in
    the template itself, but the agent will not be able to append anything
    without tripping the metacharacter ban on the delta.
