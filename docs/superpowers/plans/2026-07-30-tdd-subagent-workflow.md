@@ -770,7 +770,13 @@ tdd-mutate                   → role mutation
 
 Tool → mode mapping: `Read` → `read`; `Write`, `Edit` → `write`; `Bash` → allowlist check. Any other tool → permit (the matcher should not deliver them; defensive).
 
-Paths from the payload are absolute; strip the `$root/` prefix before matching, since globs are repo-relative.
+Paths from the payload are absolute; strip the `$root/` prefix before matching, since globs are repo-relative. Three cases need care, and two of them fail open if missed:
+
+- **No `file_path` at all** — deny. A `Read`/`Write`/`Edit` the guard cannot classify is precisely the call it most needs to judge; permitting it leaves a hole the exact shape of the threat.
+- **A `..` segment** — deny before stripping. `$root/../<repo>/src/a.py` resolves back inside the project but does not begin with `$root/`, so it would survive the strip as an absolute path, match no glob, and be permitted on a read. Same silent fail-open shape as the Task 3 defect.
+- **Already-relative or genuinely outside the project** — pass through unstripped. An outside path matches no source glob, so a write is denied by the allowlist and a read is permitted, which is correct: the isolation being enforced is about *this* project's tests and source.
+
+**Known limitation, not fixed here:** an agent that could create a symlink inside its writable globs pointing at the other role's tree would read through it undetected. Creating one requires `Bash` (allowlisted to the test runner) or `Write` (cannot create symlinks), so it is not reachable today. Record it rather than building path-resolution machinery the threat model does not yet need.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -909,6 +915,24 @@ assert_eq "0|" "$out" "tdd-mutate may run the full suite"
 out=$(run_guard "tdd-bogus" payload_write "$SANDBOX/src/a.py")
 assert_eq "0|" "$out" "unrecognized tdd-* agent permits"
 
+# --- a payload the guard cannot classify must deny, not pass ---
+out=$(run_guard "tdd-red" payload_write "")
+assert_contains "2|" "$out" "empty file_path denies rather than permitting"
+
+# Traversal: this resolves back inside the project but does not start with
+# "$root/", so an unguarded strip would leave it absolute, match no glob, and
+# permit the read.
+out=$(run_guard "tdd-red" payload_read "$SANDBOX/../$(basename "$SANDBOX")/src/a.py")
+assert_contains "2|" "$out" "a .. segment denies rather than escaping classification"
+out=$(run_guard "tdd-green" payload_read "$SANDBOX/../$(basename "$SANDBOX")/tests/test_a.py")
+assert_contains "2|" "$out" "a .. segment denies for green too"
+
+# Repo-relative paths must classify identically to absolute ones.
+out=$(run_guard "tdd-red" payload_read "src/a.py")
+assert_contains "2|" "$out" "relative source path is still denied to red"
+out=$(run_guard "tdd-red" payload_write "tests/test_a.py")
+assert_eq "0|" "$out" "relative test path is still allowed to red"
+
 # --- fails closed once a role IS recognized ---
 mv "$SANDBOX/.tdd/config.json" "$SANDBOX/.tdd/config.json.bak"
 out=$(run_guard "tdd-red" payload_write "$SANDBOX/tests/test_a.py")
@@ -1026,9 +1050,25 @@ if [ "$mode" = "bash" ]; then
 fi
 
 path=$(printf '%s' "$input" | jq -r '.tool_input.file_path // empty')
-[ -n "$path" ] && exit 0   # no path to judge
 
-rel="${path#"$root"/}"
+# A Read/Write/Edit with no file_path cannot be classified. Permitting it
+# would be a hole shaped exactly like the tool call we most need to judge,
+# so an unreadable payload denies.
+[ -n "$path" ] || deny "tdd guard: this ${tool} call from ${agent} carries no file_path, so it cannot be checked; the guard fails closed"
+
+# Reject traversal BEFORE stripping the root prefix. "$root/../<repo>/src/a.py"
+# resolves back inside the project but does not start with "$root/", so it
+# would survive as an absolute path, match no glob, and be permitted on a
+# read -- the same silent fail-open shape as the Task 3 defect.
+case "/$path/" in
+  */../*) deny "tdd guard: path contains a '..' segment and cannot be classified safely: $path" ;;
+esac
+
+case "$path" in
+  "$root"/*) rel="${path#"$root"/}" ;;   # inside the project
+  *)         rel="$path" ;;              # already relative, or outside the project
+esac
+
 verdict=$(tdd_path_verdict "$role" "$mode" "$rel" "$test_globs" "$source_globs")
 [ "$verdict" = "allow" ] && exit 0
 deny "$verdict"
@@ -1071,18 +1111,29 @@ A guard that permits everything passes no test you have written *unless* those
 assertions genuinely bite. Verify by mutation — the same technique the plugin
 itself will use — rather than by trusting a green suite.
 
-Flip exactly one condition in `hooks/guard.sh`:
+Disable the verdict entirely — the canonical "guard is inert" mutation:
 
 ```bash
-sed -i.bak 's/\[ -z "\$path" \] && exit 0/[ -n "$path" ] \&\& exit 0/' hooks/guard.sh
+cp hooks/guard.sh hooks/guard.sh.bak
+sed -i '' 's/^\[ "\$verdict" = "allow" \] && exit 0$/exit 0/' hooks/guard.sh
 bash tests/run.sh; echo "exit=$?"
 ```
 
-Expected: **failures**, specifically the deny assertions (`red writing source
-exits 2` reporting `0|`), and a non-zero exit. That inversion permits every
-path instead of skipping only empty ones — a silently-disabled guard, and the
-exact failure mode nothing else in the design detects, since reads leave no
-trace in a diff.
+Expected: **failures**, specifically every deny assertion reporting `0|`
+instead of `2|`, and a non-zero exit. A guard that always permits is the exact
+failure mode nothing else in the design detects — reads leave no trace in a
+diff, so an inert guard looks identical to a well-behaved run.
+
+Then confirm the traversal and missing-path guards are individually live:
+
+```bash
+mv hooks/guard.sh.bak hooks/guard.sh
+cp hooks/guard.sh hooks/guard.sh.bak
+sed -i '' '/\*\/\.\.\/\*) deny/d' hooks/guard.sh
+bash tests/run.sh; echo "exit=$?"
+```
+
+Expected: the `..` assertion fails.
 
 If the suite still passes, the assertions are not testing what they claim and
 must be fixed before proceeding.
