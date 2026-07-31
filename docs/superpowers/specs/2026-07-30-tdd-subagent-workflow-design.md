@@ -91,6 +91,9 @@ Run state is separated from config so an interrupted `/tdd` resumes from disk, a
 3. **The full suite passes.** Refactor's stop condition is "all tests still pass" and Green's is "this test now passes"; both are meaningless against an already-red suite. If red, record the failing test IDs as a known-red allowlist and exclude them from every later comparison.
 4. **Spec file is readable and non-empty.**
 
+5. **The glob partition is still exhaustive** — `git ls-files` produces no file matching neither `test`, `source`, nor `ignore`. Catches drift from edits made between runs. See *Writes are an allowlist; reads are a denylist* below for why this is load-bearing.
+6. **`jq` is on `PATH`** — `guard.sh` parses its stdin with it.
+
 Preflight also clears any stale `.tdd/phase` left by an interrupted run, so the hook never evaluates against a phase from a previous session.
 
 ### Decompose
@@ -157,8 +160,16 @@ Guardrails are enforced twice, at different surfaces.
 | | May read | May write | May run |
 |---|---|---|---|
 | **Red** | spec, existing test files, runner output | test globs only | configured test + coverage commands |
-| **Green** | Red's handover report, source files, runner output | source globs only | configured single-test command |
-| **Refactor** | source files, runner output | source globs only | configured full-suite command |
+| **Green** | Red's handover report, source files, runner output | source globs only | configured single-test + coverage commands |
+| **Refactor** | source files, runner output | source globs only | configured full-suite + coverage commands |
+
+**Writes are an allowlist; reads are a denylist.** A write must *match* the phase's permitted globs; a read must merely *not match* the forbidden ones. The asymmetry is deliberate — agents legitimately read `README.md`, `pyproject.toml`, and type stubs, and an allowlist would fight them on every call.
+
+But it means the read rule fails *open*: if `globs.source` is incomplete, a source file that matches nothing is readable by Red, and read isolation quietly disappears. Since globs come from auto-detection, this is a live risk — `src/**` misses a root-level package, a Go repo with source at the root, or a monorepo's second module.
+
+**The globs must therefore form a proven-exhaustive partition.** `config.json` carries a third list, `globs.ignore`, for files that are neither test nor source (docs, manifests, CI config). `/tdd-init` runs `git ls-files` and refuses to write a config until every tracked file matches exactly one of the three. Preflight re-runs the same check, catching drift from edits made between runs.
+
+The invariant is self-reinforcing once established: new files can only be created by an agent, and the write allowlist already forces them into `test` or `source`.
 
 **Refactor's read carve-out.** "Only interface is the test runner's output" cannot mean literally no test information: a failing run prints test file paths, test names, assertion diffs, and often source excerpts. That is unavoidable and is not a violation. The boundary is precise: *open a test file, never; read what the runner prints, yes.* The same carve-out applies to Green.
 
@@ -167,6 +178,8 @@ Guardrails are enforced twice, at different surfaces.
 The diff audit can only observe writes. Read isolation — the property that actually makes Green's implementation independent of the test's internals — leaves no post-hoc signature. The hook is the only mechanism that can enforce it.
 
 **Hook** — `PreToolUse`, matching `Read|Write|Edit|Bash`. Reads `.tdd/phase` and `.tdd/config.json`, resolves the target path against the phase's allowed globs, denies on mismatch with a message naming the violated rule. Sole enforcement of read isolation. Safe against concurrency because the cycle is strictly sequential.
+
+**The hook fails closed.** If `jq` is missing, `.tdd/config.json` is unreadable, or `.tdd/phase` names an unknown phase, `guard.sh` denies. A guard that cannot evaluate must not default to permitting — that would disable read isolation silently, which is the exact failure this design is built to prevent. Failing closed instead breaks the run loudly on the first tool call. `/tdd-init` and preflight both check `jq` so the loud failure lands at setup, not mid-cycle.
 
 **Audit** — after each dispatch, `git diff HEAD~1 --name-only`, re-checking the write set against the phase's globs. Backstop for anything the hook missed: hook disabled, stale phase marker, an unanticipated mutation path.
 
@@ -207,6 +220,32 @@ Red returns this, and it is the entirety of what Green receives:
 
 `blocked` is deliberately distinct from `redundant`. `redundant` means Red wrote a test, it passed, and coverage did not move — the behavior is genuinely already covered. `blocked` means Red failed to do its job. Collapsing the two would let a spec item be silently dropped as "already covered" when in fact nothing verified it.
 
+## Coverage as a shared ratchet
+
+Coverage is not only Red's concern. All three roles are measurable against it, and in each case the measurement detects the same underlying failure: **code that exists without a test driving it.**
+
+| Role | Rule | What a violation means |
+|---|---|---|
+| **Red** | the test must fail, or raise coverage | the test is waste — it neither drives new code nor documents existing behavior |
+| **Green** | making the test pass must add no more than `greenMaxNewUncovered` uncovered lines | Green wrote more than the test demanded — speculative generality, unrequested error handling |
+| **Refactor** | must add **zero** uncovered lines | new uncovered paths are new behavior, which Refactor is categorically forbidden from adding |
+
+This turns "write the minimum code to pass" from prompt discipline into a measured property.
+
+**The metric is new uncovered lines, not coverage percentage.** Percentage moves with the denominator: a large, well-tested addition and a small, untested one can produce the same delta, and a big legitimate change can look like a regression. Uncovered-line count is the direct signal — it names the actual defect, and it points at the specific lines to delete.
+
+**The thresholds are asymmetric, because the roles are.**
+
+Refactor's gate is hard zero. A behavior-preserving change moves, renames, or collapses code; covered lines stay covered. Any new uncovered line is evidence it did something it was not allowed to do. Violation reverts.
+
+Green's gate cannot be zero. Legitimate cases exist: satisfying a divide-by-zero test requires writing the happy-path `return a / b`, which that test never executes. So Green gets a small allowance (`greenMaxNewUncovered`, default 2) and, on breach, a re-dispatch naming the uncovered lines and instructing it to delete what no test drives. A second breach is accepted but recorded as `overbuilt` on the checklist item, because the divide case proves the rule has honest exceptions and grinding on it would be worse than flagging it for review.
+
+**Who measures.** The orchestrator, at audit time, authoritatively — the same reason it independently re-runs the test rather than trusting Green's word. Green and Refactor are also permitted to run the coverage command themselves so they can self-correct before handing over, which is cheaper than a re-dispatch. This is the same prevent-and-verify split as the hook and the diff audit.
+
+**When coverage is unavailable** (`commands.coverage` is null), all three gates are skipped along with Red's three-way branch. The workflow degrades to strict red plus prompt discipline rather than refusing to run.
+
+**Baseline edge case:** on the first implementation in an empty project, or whenever the baseline reports zero total lines, skip the gate for that cycle — there is nothing meaningful to compare against.
+
 ## Configuration
 
 `.tdd/config.json` is committed and is the single source of truth shared by orchestrator, agents, and hook.
@@ -221,10 +260,12 @@ Red returns this, and it is the entirety of what Green receives:
   },
   "globs": {
     "test":   ["tests/**", "**/test_*.py"],
-    "source": ["src/**"]
+    "source": ["src/**"],
+    "ignore": ["docs/**", "*.md", "pyproject.toml", ".gitignore"]
   },
   "refactorTriggers": { "maxFunctionLines": 40, "duplicateThreshold": 3 },
-  "limits": { "greenAttempts": 3, "violationRetries": 1 }
+  "limits": { "greenAttempts": 3, "violationRetries": 1 },
+  "coverageGates": { "greenMaxNewUncovered": 2, "refactorMaxNewUncovered": 0 }
 }
 ```
 
@@ -251,6 +292,8 @@ Data-driven, so supporting a new toolchain is a table row rather than new code.
 Two unverified assumptions sit under the enforcement design. Both are cheap to test and expensive to discover late.
 
 1. **Do plugin `PreToolUse` hooks fire for tool calls made inside a subagent?** Not confirmable from local documentation. If they do not, the hook is inert, read isolation has no enforcement mechanism, and the audit cannot substitute — it cannot observe reads. This would require rework, not patching.
+
+   The spike must install a stub plugin and exercise `hooks/hooks.json` + `${CLAUDE_PLUGIN_ROOT}`. A hook registered through `.claude/settings.json` loads by a different path and format, so settings-format success would not prove the plugin-format case.
 2. **Does a hook denial reach the subagent as a correctable message, or does it fail the agent outright?** Determines whether "deny and let it self-correct" is real or whether every denial costs a full re-dispatch.
 
 A third, lower risk: the `PreToolUse` payload carries no agent identity (confirmed against `plugin-dev/skills/hook-development/SKILL.md`), which is why the phase marker file exists. The marker can go stale if a run is interrupted mid-phase; preflight must clear it.
