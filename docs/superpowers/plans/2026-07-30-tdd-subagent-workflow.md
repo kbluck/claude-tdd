@@ -19,7 +19,7 @@
 - Hook denial is JSON on **stderr** plus **exit 2**: `{"hookSpecificOutput": {"permissionDecision": "deny"}, "systemMessage": "<reason>"}`. Exit 0 permits.
 - **The hook fails closed.** Missing `jq`, unreadable config, unknown phase → deny.
 - Target Bash 3.2 — no associative arrays, no `${var,,}`, no `mapfile`.
-- Every shell script starts `#!/usr/bin/env bash` and `set -euo pipefail`, except `hooks/lib/rules.sh` which is sourced.
+- Every shell script starts `#!/usr/bin/env bash`. Use `set -euo pipefail` **except** in `hooks/guard.sh` and `tests/run.sh`, which use `set -uo pipefail` — both branch on non-zero exits as normal control flow, and `-e` would abort them mid-decision. `hooks/lib/rules.sh` is sourced and sets nothing.
 - Config schema is fixed by the spec. Do not add fields not listed there.
 - Commit after every task.
 
