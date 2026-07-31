@@ -2157,6 +2157,8 @@ Announce: "Using run-tdd-cycle to implement `<spec>`."
 
    If that read succeeds, the guard is not seeing `agent_type`, every subagent looks like the orchestrator, and **read isolation is silently absent**. Stop. Do not run unenforced — reads leave no trace in a diff, so nothing downstream would ever notice. `agent_type` is undocumented (found empirically on Claude Code 2.1.220) and this is the check that catches it disappearing.
 
+   **Only an observed denial passes this check.** If the probe cannot be dispatched, errors, or returns something you cannot interpret, that is not a pass — it is the same unknown state as a missing denial, and it fails closed. The one outcome that clears preflight is the agent reporting back that the read was denied, with the guard's message in it.
+
 There is no phase marker to clear — the guard identifies callers from the
 payload's `agent_type`.
 
@@ -2180,6 +2182,12 @@ earlier items do not depend on later ones.
 
 **Show the checklist to the user and get approval before the first dispatch.**
 Bad decomposition is cheap to fix here and expensive to fix on cycle 9.
+
+**A checklist with no items is a failed decomposition, not a finished run.**
+Completion below is "no item is `pending`", which an empty list satisfies
+immediately — so a spec you could not decompose would report success having
+built nothing. Require at least one item, state the count when you present it,
+and if the spec yields none, say so and stop rather than proceeding.
 
 `status`: `pending` → `red` → `green` → `done`, or terminating at `redundant`
 or `blocked`. Write the file after every transition — an interrupted run
@@ -2224,6 +2232,8 @@ measurement is the one that decides.
 
 1. Dispatch `tdd-red` with: the spec path, the one item, the configured commands, and the current coverage baseline.
 3. On return, **audit**: `git diff --name-only` plus `git status --porcelain`. Every touched path must match `globs.test`. Violation → `git checkout -- .`, re-dispatch once quoting the rule and the offending path. Second violation → stop, escalate.
+
+   **An empty diff is not a passing audit.** "Every touched path matched" is vacuously true when nothing was touched. If Red reports `failing`, `passing-covered`, or `passing-flat`, it claims to have written a test — so at least one path must have changed. Zero changed paths alongside any of those outcomes means the agent reported work it did not do: treat it as `blocked` and escalate rather than committing an empty commit and moving on. The same applies to Green's audit below.
 4. Branch on `outcome`:
    - `failing` → commit `red: <behavior>`, status `red`, continue to Green.
    - `passing-covered` → **re-measure coverage yourself before committing.** This branch writes a commit and skips Green entirely on the strength of a number the agent computed about its own work; it is the one place nothing else would catch a wrong answer. Delta confirmed → commit `test: <behavior>`, status `done`, next item. Delta not confirmed → treat as `passing-flat`.
@@ -2324,6 +2334,12 @@ asserting.
 If the pass skipped mutants because of `mutantsPerPass`, say how many. A capped
 pass that reports "no survivors" without mentioning the cap reads as a clean
 bill of health it did not earn.
+
+**`mutantsAttempted: 0` is a failed pass, not a clean one.** No targets ranked,
+a mutation tool that did not run, a CRAP computation that produced no scores —
+each yields zero survivors and looks identical to a suite whose tests are
+genuinely strong. Check `mutantsAttempted` before believing `survivors`, and if
+it is zero, report the pass as unable to run rather than as passing.
 
 ## Completion
 
