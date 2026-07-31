@@ -7,6 +7,12 @@ cp "$REPO_ROOT/tests/fixtures/config.json" "$SANDBOX/.tdd/config.json"
 
 # AGENT is the payload's agent_type. Empty means a main-thread call, which
 # omits the key entirely -- matching what the spike observed.
+#
+# Real dispatches carry the NAMESPACED form, "claude-tdd:tdd-red". Tests below
+# exercise both that and the bare name: the bare name is what a hand-written
+# payload or a differently-packaged install might send, and the namespaced one
+# is what actually arrives. Testing only the bare form is how the namespace
+# defect survived five tasks with a green suite.
 AGENT=""
 
 payload() { # <tool> <key> <value>
@@ -99,6 +105,16 @@ out=$(run_guard "tdd-mutate" payload_read "$SANDBOX/tests/test_a.py")
 assert_contains "2|" "$out" "tdd-mutate may not read tests"
 out=$(run_guard "tdd-mutate" payload_bash "pytest -q")
 assert_eq "0|" "$out" "tdd-mutate may run the full suite"
+
+# --- the namespaced form is what real dispatches actually send ---
+out=$(run_guard "claude-tdd:tdd-red" payload_write "$SANDBOX/src/a.py")
+assert_contains "2|" "$out" "namespaced tdd-red writing source is denied"
+out=$(run_guard "claude-tdd:tdd-red" payload_write "$SANDBOX/tests/test_a.py")
+assert_eq "0|" "$out" "namespaced tdd-red writing a test is allowed"
+out=$(run_guard "claude-tdd:tdd-green" payload_read "$SANDBOX/tests/test_a.py")
+assert_contains "2|" "$out" "namespaced tdd-green reading a test is denied"
+out=$(run_guard "claude-tdd:tdd-mutate" payload_bash "pytest -q")
+assert_eq "0|" "$out" "namespaced tdd-mutate may run the full suite"
 
 # An agent this plugin does not own is none of our business, even if its
 # name happens to start with tdd-. Permitting is correct here; the guard

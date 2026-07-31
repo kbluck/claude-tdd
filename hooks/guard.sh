@@ -37,7 +37,17 @@ fi
 agent=$(printf '%s' "$input" | jq -r '.agent_type // empty')
 [ -n "$agent" ] || exit 0        # main thread / orchestrator — never constrained
 
-case "$agent" in
+# Plugin-provided agents arrive NAMESPACED: "<plugin>:<agent>", verified
+# empirically as "claude-tdd:tdd-red" on Claude Code 2.1.220. Matching the
+# bare name alone misses every real dispatch, falls through to `*) exit 0`,
+# and renders the guard entirely inert -- while every test using a bare-name
+# payload still passes. Strip the namespace before matching.
+#
+# Stripping is deliberately broad: another plugin shipping its own `tdd-red`
+# would also be constrained here. That is a false denial -- loud and safe --
+# whereas matching too narrowly permits silently, which is the failure this
+# guard exists to prevent.
+case "${agent##*:}" in
   tdd-red)      role=red ;;
   tdd-green)    role=green ;;
   tdd-refactor) role=refactor ;;
