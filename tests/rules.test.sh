@@ -99,3 +99,51 @@ set +f
 tdd_matches_any "src/a.py" "$SG" || true
 case "$-" in *f*) _noglob_leaked=yes ;; *) _noglob_leaked=no ;; esac
 assert_eq "no" "$_noglob_leaked" "tdd_matches_any restores the caller's noglob flag"
+
+# --- bash allowlist ---
+T_SINGLE="pytest -q {testId}"
+T_FULL="pytest -q"
+T_COV="pytest -q --cov --cov-report=json:.tdd/coverage.json"
+
+assert_eq "allow" "$(tdd_bash_verdict "pytest -q tests/test_a.py::test_x" "$T_SINGLE")" \
+  "substituted test id is allowed"
+assert_eq "allow" "$(tdd_bash_verdict "pytest -q" "$T_FULL")" \
+  "exact template match is allowed"
+assert_eq "allow" "$(tdd_bash_verdict "$T_COV" "$T_COV")" \
+  "template containing a colon path is allowed verbatim"
+
+assert_contains "deny" "$(tdd_bash_verdict "rm -rf src" "$T_FULL")" \
+  "unrelated command is denied"
+assert_contains "deny" "$(tdd_bash_verdict "pytest -q; rm -rf src" "$T_FULL")" \
+  "semicolon in delta is denied"
+assert_contains "deny" "$(tdd_bash_verdict "pytest -q | tee out.txt" "$T_FULL")" \
+  "pipe in delta is denied"
+assert_contains "deny" "$(tdd_bash_verdict "pytest -q > out.txt" "$T_FULL")" \
+  "redirect in delta is denied"
+assert_contains "deny" "$(tdd_bash_verdict 'pytest -q $(whoami)' "$T_FULL")" \
+  "command substitution in delta is denied"
+assert_contains "deny" "$(tdd_bash_verdict "pytest -q && rm -rf src" "$T_FULL")" \
+  "and-chain in delta is denied"
+assert_contains "deny" "$(tdd_bash_verdict "sed -i s/a/b/ src/a.py" "$T_SINGLE")" \
+  "in-place edit via bash is denied"
+assert_contains "deny" "$(tdd_bash_verdict "pytest -q" "")" \
+  "empty template denies"
+
+# --- REGRESSION: glob characters in the agent-supplied portion are data,
+# not a pattern. `case` only reinterprets the pattern side of a match, never
+# the subject, but this pins it directly rather than trusting that reasoning
+# -- pytest parametrized node ids routinely contain `[` and `-k` expressions
+# routinely contain `*`.
+assert_eq "allow" "$(tdd_bash_verdict "pytest -q tests/test_a.py::test_x[case-1]" "$T_SINGLE")" \
+  "glob characters in a parametrized test id are treated as data, not a pattern"
+assert_eq "allow" "$(tdd_bash_verdict "pytest -q -k test_*" "$T_FULL")" \
+  "glob characters after the prefix are treated as literal data, not a pattern"
+
+# --- REGRESSION: a missing (not just empty) template must not crash the
+# sourcing script under `set -u`. An unset positional in a bare `$2` aborts
+# the caller with a non-blocking exit code, which lets the tool call through
+# instead of denying it -- the same fail-open class as Task 3's unquoted
+# glob bug. Run through a subshell so a crash here is visible as an empty
+# result rather than killing the whole suite.
+assert_contains "deny" "$(tdd_bash_verdict "pytest -q" 2>/dev/null)" \
+  "missing template argument denies rather than crashing"

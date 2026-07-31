@@ -80,3 +80,45 @@ tdd_path_verdict() {
       echo "deny: unknown role '${role}' or mode '${mode}'; the guard fails closed" ;;
   esac
 }
+
+# tdd_bash_verdict <command> <template>
+# Echoes "allow" or "deny: <reason>".
+#
+# The command must begin with the template's static prefix (everything
+# before the first `{` placeholder). Whatever the agent added beyond that
+# prefix — the delta — must contain no shell metacharacters. The template
+# itself is trusted and may contain them.
+#
+# Both parameters default to empty, matching tdd_path_verdict above: this
+# file is sourced under `set -u`, where an unset positional aborts the whole
+# sourcing script. An aborted guard exits non-zero-but-not-2, which is
+# treated as a non-blocking error and lets the tool call through. A caller
+# bug must degrade to deny, never to a crash that permits.
+tdd_bash_verdict() {
+  local cmd="${1:-}" template="${2:-}"
+
+  if [ -z "$template" ]; then
+    echo "deny: no command is configured for this phase; the guard fails closed"
+    return
+  fi
+
+  local prefix="${template%%\{*}"
+  # trim trailing whitespace from the prefix
+  while [ "${prefix% }" != "$prefix" ]; do prefix="${prefix% }"; done
+
+  case "$cmd" in
+    "$prefix"*) ;;
+    *) echo "deny: only the configured command for this phase may be run; expected it to start with '${prefix}'"
+       return ;;
+  esac
+
+  local delta="${cmd#"$prefix"}"
+  case "$delta" in
+    *";"*|*"|"*|*"&"*|*">"*|*"<"*|*'`'*|*'$('*|*"
+"*)
+      echo "deny: shell metacharacters are not permitted in arguments; got '${delta}'"
+      return ;;
+  esac
+
+  echo "allow"
+}
