@@ -1242,7 +1242,7 @@ git commit -m "feat: PreToolUse guard enforcing role boundaries"
 
 `outcome` is one of `failing`, `passing-covered`, `passing-flat`, `blocked`. `publicApi` is load-bearing — Green cannot read the test, so without an explicit signature it cannot know what to implement.
 
-All four files use frontmatter `name`, `description`, `tools`, `model`. `tools` is `Read, Write, Edit, Bash, Grep, Glob` for all of them — path scoping is the hook's job, not the frontmatter's.
+All four files use frontmatter `name`, `description`, `tools`, `model`, `color`. `tools` is `Read, Write, Edit, Bash, Grep, Glob` for all of them — path scoping is the hook's job, not the frontmatter's.
 
 **The `name:` field is load-bearing.** The guard's dispatch table matches on it via the payload's `agent_type`, so `name: tdd-red` must be exact. A typo does not fail loudly — it makes the guard fall through to "not our agent" and permit everything that agent does.
 
@@ -1255,6 +1255,7 @@ Word Q2's guidance from Task 1's spike into each agent's prompt: if denials are 
 ```markdown
 ---
 name: tdd-red
+color: red
 description: Authors exactly one failing test from a specification. Never reads or writes source code. Use only as part of the TDD cycle.
 tools: Read, Write, Edit, Bash, Grep, Glob
 model: sonnet
@@ -1320,6 +1321,7 @@ it pass. Do not refactor. Do not start the next item.
 ```markdown
 ---
 name: tdd-green
+color: green
 description: Writes the minimum source code to turn one failing test green. Never reads or writes test code. Use only as part of the TDD cycle.
 tools: Read, Write, Edit, Bash, Grep, Glob
 model: sonnet
@@ -1404,6 +1406,7 @@ tests. Do not start the next item.
 ```markdown
 ---
 name: tdd-refactor
+color: blue
 description: Improves existing source code while holding public interfaces and test results constant. Never reads or writes test code, never adds behavior. Use only as part of the TDD cycle.
 tools: Read, Write, Edit, Bash, Grep, Glob
 model: sonnet
@@ -1495,6 +1498,7 @@ command, and neither should hold the other's.
 ```markdown
 ---
 name: tdd-mutate
+color: magenta
 description: Probes test strength by deliberately breaking source code and observing whether tests notice. Reverts every change. Never reads or writes test code, never fixes anything. Use only as part of the TDD cycle's hardening pass.
 tools: Read, Write, Edit, Bash, Grep, Glob
 model: sonnet
@@ -1573,7 +1577,11 @@ V=/Users/kbluck/.claude/plugins/marketplaces/claude-plugins-official/plugins/plu
 for a in agents/*.md; do bash "$V" "$a" || echo "FAILED: $a"; done
 ```
 
-Expected: each reports frontmatter valid. The validator also checks for `model` and `color`; `color` is optional for our purposes — if it warns, that is acceptable, but an error on `name`, `description`, or frontmatter structure must be fixed.
+Expected: **exit 0** for all four, with warnings only.
+
+The validator treats `color` as required and runs under `set -euo pipefail`, so a file without it dies on the failed `grep '^color:'` at line 142 — before it can even print "Missing required field: color". It exits 1 with no explanation of why. That is why each agent carries a `color:` field: without one this step is a gate that can never pass, which is worse than no gate.
+
+Two warnings are expected and acceptable — the validator wants `<example>` blocks and a description starting with "Use this agent when". Our descriptions are written for the dispatch table's benefit, not the validator's. An **error** on `name`, `description`, `model`, or frontmatter structure must be fixed.
 
 - [ ] **Step 5: Verify the handover contract is consistent across files**
 
