@@ -1889,12 +1889,26 @@ Confirm each command is actually runnable as written.
 
     {
       "version": 1,
-      "commands": { "test": "...", "single": "...", "coverage": "..." },
+      "commands": {
+        "test": "...", "single": "...", "coverage": "...",
+        "complexity": "...", "mutation": null
+      },
+      "crapMode": "computed",
       "globs": { "test": [...], "source": [...], "ignore": [...] },
-      "refactorTriggers": { "maxFunctionLines": 40, "duplicateThreshold": 3 },
-      "limits": { "greenAttempts": 3, "violationRetries": 1 },
+      "refactorTriggers": { "maxCrap": 30, "duplicateThreshold": 3, "maxFunctionLines": 40 },
+      "limits": {
+        "greenAttempts": 3, "violationRetries": 1,
+        "mutationRounds": 2, "mutantsPerPass": 20
+      },
       "coverageGates": { "greenMaxNewUncovered": 2, "refactorMaxNewUncovered": 0 }
     }
+
+**Write every key, including the ones whose value is `null`.** An omitted key is
+not a smaller config, it is a broken one: `jq` returns `null`, and a `null`
+threshold compares as "never exceeded". Omit `refactorTriggers.maxCrap` and the
+primary refactor trigger silently never fires; omit `limits.mutantsPerPass` and
+the mutation pass has no bound. A `null` value means "this project has no such
+tool, degrade explicitly"; an absent key means nobody decided.
 
 Append to `.gitignore` if not already present:
 
@@ -1955,6 +1969,20 @@ done
 for _k in coverage complexity mutation; do
   assert_eq "true" "$(jq -r ".commands | has(\"${_k}\")" "$_cfg")" \
     "config declares commands.${_k} (null is allowed, absent is not)"
+done
+
+# The template inside commands/tdd-init.md is a SECOND copy of this schema, and
+# two copies drift. It already did once: the template omitted crapMode,
+# maxCrap, mutationRounds, mutantsPerPass, commands.complexity and
+# commands.mutation, so an agent following it would have written a config whose
+# primary refactor trigger threshold was null -- a comparison that never fires.
+_init="$REPO_ROOT/commands/tdd-init.md"
+_init_text=$(cat "$_init")
+for _k in version crapMode complexity mutation \
+          maxCrap duplicateThreshold maxFunctionLines \
+          greenAttempts violationRetries mutationRounds mutantsPerPass \
+          greenMaxNewUncovered refactorMaxNewUncovered ignore; do
+  assert_contains "$_k" "$_init_text" "tdd-init's config template names ${_k}"
 done
 
 # The three glob lists must be arrays. A bare string would word-split in the
