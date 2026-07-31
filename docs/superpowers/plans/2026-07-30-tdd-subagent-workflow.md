@@ -36,7 +36,7 @@
 | `hooks/hooks.json` | registers `guard.sh` on `PreToolUse` for `Read\|Write\|Edit\|Bash` |
 | `agents/tdd-red.md` | Red role definition + handover schema |
 | `agents/tdd-green.md` | Green role definition |
-| `agents/tdd-refactor.md` | Refactor role definition |
+| `agents/tdd-refactor.md` | Refactor role definition, plus its mutation mode |
 | `commands/tdd-init.md` | detect toolchain, verify partition, write + commit config |
 | `commands/tdd.md` | thin entry point invoking the orchestrator skill |
 | `skills/run-tdd-cycle/SKILL.md` | preflight, decompose, per-item loop, audit, triggers |
@@ -341,7 +341,14 @@ The phase × mode × path matrix. Pure functions, no I/O.
 | `green` | `read` | deny iff matches test globs |
 | `refactor` | `write` | allow iff matches source globs |
 | `refactor` | `read` | deny iff matches test globs |
+| `mutation` | `write` | allow iff matches source globs |
+| `mutation` | `read` | deny iff matches test globs |
 | anything else | any | deny — fail closed |
+
+`mutation` shares Refactor's path rules. Its distinguishing rule — every write
+must be reverted before handover — is a *temporal* property the guard cannot
+see from a single tool call. The orchestrator enforces it with a diff check
+after the dispatch returns.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -392,6 +399,15 @@ assert_eq "allow" "$(tdd_path_verdict refactor write src/a.py "$TG" "$SG")" \
   "refactor may write source"
 assert_contains "deny" "$(tdd_path_verdict refactor read tests/test_a.py "$TG" "$SG")" \
   "refactor may not read tests"
+
+# --- mutation: same path rules as refactor; the revert discipline is the
+# agent's and the orchestrator's job, not the guard's ---
+assert_eq "allow" "$(tdd_path_verdict mutation write src/a.py "$TG" "$SG")" \
+  "mutation may write source"
+assert_contains "deny" "$(tdd_path_verdict mutation write tests/test_a.py "$TG" "$SG")" \
+  "mutation may not write tests"
+assert_contains "deny" "$(tdd_path_verdict mutation read tests/test_a.py "$TG" "$SG")" \
+  "mutation may not read tests"
 
 # --- fail closed ---
 assert_contains "deny" "$(tdd_path_verdict "" write src/a.py "$TG" "$SG")" \
@@ -446,10 +462,10 @@ tdd_path_verdict() {
       if tdd_matches_any "$path" $source_globs; then
         echo "deny: Red may not read source files; $path is under the configured source globs"
       else echo "allow"; fi ;;
-    green:write|refactor:write)
+    green:write|refactor:write|mutation:write)
       if tdd_matches_any "$path" $source_globs; then echo "allow"
       else echo "deny: ${phase} may only write source files; $path is not under the configured source globs"; fi ;;
-    green:read|refactor:read)
+    green:read|refactor:read|mutation:read)
       if tdd_matches_any "$path" $test_globs; then
         echo "deny: ${phase} may not read test files; $path is under the configured test globs. Work from the handover report and the test runner's output."
       else echo "allow"; fi ;;
@@ -630,15 +646,18 @@ Paths from the payload are absolute; strip the `$root/` prefix before matching, 
   "commands": {
     "test": "pytest -q",
     "single": "pytest -q {testId}",
-    "coverage": "pytest -q --cov --cov-report=json:.tdd/coverage.json"
+    "coverage": "pytest -q --cov --cov-report=json:.tdd/coverage.json",
+    "complexity": "radon cc -j -s src",
+    "mutation": null
   },
   "globs": {
     "test": ["tests/**", "**/test_*.py"],
     "source": ["src/**"],
     "ignore": ["docs/**", "*.md"]
   },
-  "refactorTriggers": { "maxFunctionLines": 40, "duplicateThreshold": 3 },
-  "limits": { "greenAttempts": 3, "violationRetries": 1 },
+  "crapMode": "computed",
+  "refactorTriggers": { "maxCrap": 30, "duplicateThreshold": 3, "maxFunctionLines": 40 },
+  "limits": { "greenAttempts": 3, "violationRetries": 1, "mutationRounds": 2, "mutantsPerPass": 20 },
   "coverageGates": { "greenMaxNewUncovered": 2, "refactorMaxNewUncovered": 0 }
 }
 ```
@@ -712,6 +731,20 @@ assert_eq "0|" "$out" "refactor may run the coverage command"
 # but the phase's own test command is still scoped
 out=$(run_guard green "$(payload_bash "pytest -q --cov; rm -rf src")")
 assert_contains "2|" "$out" "metacharacters after a coverage prefix are still denied"
+
+# phase-scoped measurement commands
+out=$(run_guard refactor "$(payload_bash "radon cc -j -s src")")
+assert_eq "0|" "$out" "refactor may run the complexity command"
+out=$(run_guard green "$(payload_bash "radon cc -j -s src")")
+assert_contains "2|" "$out" "green may not run the complexity command"
+
+# mutation phase writes source like refactor does
+out=$(run_guard mutation "$(payload_write "$SANDBOX/src/a.py")")
+assert_eq "0|" "$out" "mutation phase may write source"
+out=$(run_guard mutation "$(payload_read "$SANDBOX/tests/test_a.py")")
+assert_contains "2|" "$out" "mutation phase may not read tests"
+out=$(run_guard mutation "$(payload_bash "pytest -q")")
+assert_eq "0|" "$out" "mutation phase may run the full suite"
 
 # fails closed on bad state
 out=$(run_guard bogus "$(payload_write "$SANDBOX/src/a.py")")
@@ -791,17 +824,23 @@ if [ "$mode" = "bash" ]; then
 
   # The phase's own runner command, plus the coverage command — every role is
   # measured on coverage, so every role may measure itself.
+  # Each phase gets its own runner command plus the measurement commands it
+  # is judged on. Every role is measured on coverage, so every role may
+  # measure itself.
   case "$phase" in
-    red|green) primary=$(jq -r '.commands.single // ""' "$config") ;;
-    refactor)  primary=$(jq -r '.commands.test // ""' "$config") ;;
+    red|green) extra="single coverage" ;;
+    refactor)  extra="test coverage complexity" ;;
+    mutation)  extra="test mutation" ;;
     *)         deny "tdd guard: unknown phase '${phase}'" ;;
   esac
-  coverage=$(jq -r '.commands.coverage // ""' "$config")
 
-  verdict=$(tdd_bash_verdict "$cmd" "$primary")
-  if [ "$verdict" != "allow" ] && [ -n "$coverage" ] && [ "$coverage" != "null" ]; then
-    verdict=$(tdd_bash_verdict "$cmd" "$coverage")
-  fi
+  verdict="deny: no configured command for phase '${phase}' matches"
+  for key in $extra; do
+    template=$(jq -r ".commands.${key} // \"\"" "$config")
+    [ -n "$template" ] && [ "$template" != "null" ] || continue
+    v=$(tdd_bash_verdict "$cmd" "$template")
+    if [ "$v" = "allow" ]; then verdict="allow"; break; fi
+  done
   [ "$verdict" = "allow" ] && exit 0
   deny "$verdict"
 fi
@@ -1132,6 +1171,73 @@ the dispatch — a gratuitous refactor is worse than none.
 
 Stop when the suite matches its starting state and the trigger is addressed.
 Do not expand scope to code the trigger did not name.
+
+---
+
+# Mutation mode
+
+When your dispatch says **mode: mutation**, everything above is suspended and
+these rules apply instead.
+
+## What you are doing and why
+
+Coverage proves a line *ran*. It does not prove any test would notice if that
+line were wrong — a test that executes code without asserting on its result
+gives full coverage and zero protection. You are going to find those tests by
+breaking the source on purpose and seeing whether anything complains.
+
+## The contract
+
+**Every mutation you make, you revert.** You are the only role that can write
+source and is forbidden from keeping a behavior change, which is why this job
+is yours. Mutate, run, record, revert. The tree you hand back must be
+byte-identical to the tree you received.
+
+**You detect; you never fix.** A surviving mutant is a defect in a *test*, and
+you may not read or write tests. Report it and stop. The orchestrator turns
+each survivor into a new item for the agent that writes tests.
+
+## Procedure
+
+1. Run the full suite. It must be green. If not, stop and report `blocked` — you cannot tell a killed mutant from a pre-existing failure.
+2. `git status --porcelain` must be empty. If not, stop and report `blocked`; you cannot safely revert onto a dirty tree.
+3. If a mutation tool is configured, run it and collect results. Otherwise hand-mutate, working through the target methods you were given in CRAP order, highest first — that is where untested complexity is concentrated.
+4. For each mutant, up to the cap you were given:
+   - Apply exactly one small semantic change: flip a comparison (`>` ↔ `>=`), invert a boolean, swap an operator (`+` ↔ `-`), replace a return value with a constant, remove a statement.
+   - Run the full suite.
+   - Suite fails → **killed**. The tests caught it. Good.
+   - Suite passes → **survived**. Record file, line, the original code, the mutation, and which method it was in.
+   - `git checkout -- <file>` before the next mutant. Always. Do not batch mutations.
+5. After the last mutant, verify the tree is clean and the suite is green again. Report.
+
+## Report
+
+    {
+      "outcome": "completed" | "blocked",
+      "mutantsAttempted": <int>,
+      "killed": <int>,
+      "survivors": [
+        {
+          "file": "<path>",
+          "line": <int>,
+          "method": "<name>",
+          "original": "<the code as written>",
+          "mutation": "<what you changed it to>",
+          "missingBehavior": "<one sentence: what a test would have to assert to catch this>"
+        }
+      ],
+      "treeClean": true,
+      "reason": "<only when blocked>"
+    }
+
+`missingBehavior` is the field that matters. It becomes a checklist item for the
+agent that writes tests, and that agent cannot see your work — write it as a
+testable behavior, not as a description of your mutation.
+
+## Stop conditions
+
+Stop at the mutant cap, or when the target methods are exhausted. Never leave a
+mutation in place. Never write a test. Never fix a survivor.
 ```
 
 - [ ] **Step 4: Validate all three**
@@ -1208,17 +1314,48 @@ guard hook on every subsequent tool call.
 
 No marker matches, or several do → ask the user rather than guessing.
 
-If the detected coverage tool is not actually installed, set `coverage` to
-`null` and tell the user **what they lose**, because it is more than it looks:
-Red's three-way branch collapses to strict red, and the Green and Refactor
-coverage gates are skipped entirely. Those gates are what make "write the
-minimum code" a measured property rather than prompt discipline. Recommend
-installing the coverage tool rather than proceeding without it.
+## 2c. Report every degradation explicitly
+
+Each missing tool removes a mechanical check and silently replaces it with
+prompt discipline. Tell the user which guarantees they are actually getting:
+
+| Missing | Lost |
+|---|---|
+| `commands.coverage` | Red's three-way branch collapses to strict red; both coverage gates skipped; `crapMode` forced to `unavailable` |
+| `crapMode: "unavailable"` | CRAP trigger gone; refactor falls back to `maxFunctionLines` |
+| `commands.mutation` | hardening pass uses agent hand-mutation instead of a tool; slower, less systematic, still runs |
+
+Coverage is the one worth pressing on — losing it cascades into all three
+gates. Recommend installing it rather than proceeding without it.
 
 The command must report **uncovered line counts**, not just a percentage —
 `--cov-report=json`, `--coverageReporters=json-summary`, and equivalents. The
 gates count uncovered lines because percentage moves with the denominator and
 cannot distinguish a large tested addition from a small untested one.
+
+## 2b. Detect complexity and mutation tooling
+
+**Complexity**, for CRAP scores:
+
+| Toolchain | Command | Notes |
+|---|---|---|
+| pytest | `radon cc -j -s src` | JSON, per-function complexity |
+| jest / vitest | `npx eslint --format json --rule '{"complexity":["error",0]}' src` | complexity reported as violations |
+| cargo | `cargo clippy --message-format=json` | `cognitive_complexity` lint |
+| dotnet | native CRAP via Cobertura report | set `crapMode: "native"` |
+| go | `gocyclo -json ./...` | |
+
+Set `crapMode`:
+
+- `native` if the coverage report already carries CRAP (Cobertura, PHPUnit)
+- `computed` if both a complexity command and line-level coverage are available
+- `unavailable` otherwise
+
+**Mutation**, for the hardening pass: `mutmut` (Python), `Stryker` (JS/TS/C#),
+`PIT` (Java), `cargo-mutants` (Rust), `go-mutesting` (Go). Set
+`commands.mutation` if one is installed; `null` otherwise — the pass falls back
+to agent-driven hand-mutation, which still works but is slower and less
+systematic.
 
 ## 3. Propose globs
 
@@ -1435,13 +1572,29 @@ Red failed to do its job. Collapsing them would silently drop a spec item as
 
 ### Refactor trigger check
 
-Read the accumulated source diff and Green's `mess` field. Dispatch
-`tdd-refactor` only on a hit:
+Dispatch `tdd-refactor` only on a hit:
 
+- **any method scores above `refactorTriggers.maxCrap`** — the primary trigger. Scope the dispatch to that method.
 - the same shape appears `refactorTriggers.duplicateThreshold` times
-- a function exceeds `refactorTriggers.maxFunctionLines`
 - a name drifted from the spec's vocabulary
 - Green reported a non-empty `mess`
+- a function exceeds `refactorTriggers.maxFunctionLines` — **only** when `crapMode` is `unavailable`
+
+**Computing CRAP.** `CRAP(m) = comp(m)² × (1 − cov(m))³ + comp(m)`, with `cov`
+as a fraction. At full coverage it reduces to plain complexity; as coverage
+falls the penalty grows cubically. Threshold 30 means a 5-complexity untested
+method and a 30-complexity fully-tested one rank equally — which is the point.
+
+By `crapMode`:
+
+- `native` — read the score straight from the coverage report (PHPUnit, Cobertura).
+- `computed` — run `commands.complexity` for per-method cyclomatic complexity, take per-file line coverage from the coverage report, map covered lines onto each method's line range to get `cov(m)`, then apply the formula.
+- `unavailable` — skip; use `maxFunctionLines`.
+
+The line-range mapping is the fiddly part and the most likely thing to be
+quietly wrong. If a method's computed coverage is `1.0` for every method in a
+file you know is partly untested, the mapping is broken — say so rather than
+reporting no triggers.
 
 No hit → status `done`, next item. This avoids paying for a subagent to
 conclude "nothing to do", which is the common case in early cycles.
@@ -1461,13 +1614,43 @@ not a quality issue. There is no re-dispatch — reverting is the correct outcom
 
 Then status `done`, next item.
 
+## Mutation pass
+
+**An empty checklist does not end the run.** When no item is `pending`, run the
+hardening pass — unless you have already run `limits.mutationRounds` of them.
+
+Coverage gates prove code was executed. They cannot prove any test would notice
+if that code were wrong. This pass finds the tests that execute without
+asserting.
+
+1. Write `mutation` to `.tdd/phase`.
+2. Compute CRAP for every method and rank descending. Dispatch `tdd-refactor` with **mode: mutation**, the ranked target list, `limits.mutantsPerPass`, and the mutation command if one is configured.
+3. On return, **verify the tree is clean**: `git status --porcelain` must be empty and `git diff HEAD` must be empty. Not clean → `git reset --hard HEAD`, record it, and do not trust the report — an agent that failed to revert may also have failed to run the suite honestly between mutants.
+4. Re-run the full suite. It must be green.
+5. For each survivor, append a checklist item:
+
+       { "id": <next>, "behavior": "<the survivor's missingBehavior>",
+         "status": "pending", "origin": "mutation",
+         "mutant": { "file": ..., "line": ..., "mutation": ... } }
+
+6. Survivors found → clear `.tdd/phase`, report the count, and **resume the per-item loop**. The new items run as ordinary Red→Green cycles.
+7. No survivors, or `limits.mutationRounds` reached → done.
+
+If the pass skipped mutants because of `mutantsPerPass`, say how many. A capped
+pass that reports "no survivors" without mentioning the cap reads as a clean
+bill of health it did not earn.
+
 ## Completion
 
-Done when no item is `pending`.
+Done when no item is `pending` **and** the mutation pass has either produced no
+survivors or exhausted `limits.mutationRounds`.
 
-**Not** "every item went red then green" — the `passing-covered` branch
-completes an item without Green ever running. Report the tally: how many went
-red→green, how many were `passing-covered`, how many `redundant`.
+Report the tally: how many items went red→green, how many were
+`passing-covered`, how many `redundant`, how many originated from mutation
+survivors, and how many mutants were skipped by the cap.
+
+Note that "every item went red then green" was never the completion condition —
+the `passing-covered` branch completes an item without Green ever running.
 
 Finally, clear `.tdd/phase` so the guard goes inert.
 
@@ -1714,6 +1897,129 @@ Expected: all passing, exit 0.
 
 ---
 
+## Task 10: Mutation hardening pass end-to-end
+
+Task 9 verified the Red/Green/Refactor loop. This verifies the pass that runs
+after it, and the CRAP trigger that targets it.
+
+**Files:**
+- Modify: `tests/fixtures/e2e-project/tests/test_calc.py`
+- Create: `docs/superpowers/spikes/2026-07-30-mutation-findings.md`
+
+**Interfaces:**
+- Consumes: everything, plus a completed Task 9 run
+- Produces: findings only
+
+- [ ] **Step 1: Plant a test that covers without asserting**
+
+This is the exact defect mutation testing exists to find, and the one coverage
+cannot see. In the fixture, replace the `divide` test with one that executes the
+happy path but asserts nothing about it:
+
+```python
+def test_divide_runs():
+    divide(10, 2)          # executes the line, asserts nothing
+
+
+def test_divide_by_zero():
+    with pytest.raises(ValueError):
+        divide(1, 0)
+```
+
+```bash
+cd tests/fixtures/e2e-project
+python -m pytest -q --cov --cov-report=json:.tdd/coverage.json
+jq '.files["src/calc/__init__.py"].summary.percent_covered' .tdd/coverage.json
+```
+
+Expected: coverage reports the `return a / b` line as **covered**, because
+`test_divide_runs` executes it. Coverage is satisfied; the behavior is
+unprotected. Record this number — it is the baseline claim the mutation pass is
+about to refute.
+
+- [ ] **Step 2: Confirm CRAP ranks the right method**
+
+```bash
+radon cc -j -s src | jq .
+```
+
+Cross-reference with per-method coverage and compute
+`comp² × (1 − cov)³ + comp` by hand for `divide`. Confirm the orchestrator's
+computation matches yours.
+
+**If every method comes back at coverage 1.0**, the line-range mapping is
+broken — that is the specific failure this step exists to catch, and it would
+otherwise present as "no triggers fired," indistinguishable from healthy code.
+
+- [ ] **Step 3: Run the mutation pass and confirm the survivor**
+
+Run `/tdd spec.md` to completion. When the checklist empties, the mutation pass
+should fire.
+
+Expected: mutating `return a / b` to `return a * b` (or similar) **survives** —
+`test_divide_runs` calls it and asserts nothing, `test_divide_by_zero` never
+reaches that line. The pass reports one survivor with a `missingBehavior` along
+the lines of "divide returns the quotient."
+
+- [ ] **Step 4: Verify the revert discipline**
+
+The single most important check in this task. An agent that mutates and fails
+to revert corrupts the source tree, and the corruption looks like ordinary
+implementation drift.
+
+```bash
+git -C tests/fixtures/e2e-project status --porcelain
+git -C tests/fixtures/e2e-project diff HEAD --stat
+```
+
+Expected: both empty after the pass returns, before any new items are worked.
+
+- [ ] **Step 5: Confirm the survivor becomes a Red item and closes the loop**
+
+Expected: a new checklist item with `"origin": "mutation"`, which then runs a
+normal Red→Green cycle. Red writes a test asserting the quotient; Green may need
+no change at all, since the code was already correct — so this item plausibly
+resolves via `passing-covered`.
+
+That outcome is correct and worth confirming rather than treating as a bug: the
+mutant proved the *test* was weak, not the code. The workflow's response to a
+weak test is a better test, not new source.
+
+- [ ] **Step 6: Verify termination**
+
+Run the pass again. Expected: no survivors, and the run completes. Confirm the
+orchestrator stops rather than looping, and that it respects
+`limits.mutationRounds` if survivors persist.
+
+Also confirm it reports how many mutants `mutantsPerPass` skipped. A capped pass
+reporting "no survivors" without naming the cap is a clean bill of health it did
+not earn.
+
+- [ ] **Step 7: Record findings and commit**
+
+Write `docs/superpowers/spikes/2026-07-30-mutation-findings.md`: whether the
+planted weak test was caught, whether CRAP ranked it, whether the tree stayed
+clean, wall-clock for the pass, and whether hand-mutation or a tool was used.
+
+Wall-clock matters most for whether this ships enabled by default. If a
+three-function fixture takes minutes, the pass needs to be opt-in on real
+projects.
+
+```bash
+git add tests/fixtures docs/superpowers/spikes
+git commit -m "test: mutation hardening pass end-to-end"
+```
+
+- [ ] **Step 8: Full suite green**
+
+```bash
+bash tests/run.sh
+```
+
+Expected: all passing, exit 0.
+
+---
+
 ## Deferred to v0.2
 
 Named here so they are visible decisions rather than oversights:
@@ -1721,5 +2027,7 @@ Named here so they are visible decisions rather than oversights:
 - **Parallel cycles.** The phase marker is a single global file; two concurrent cycles would race. The design is sequential by construction.
 - **Resume UX.** `checklist.json` makes resume *possible*; `/tdd` does not yet detect a partial run and offer to continue.
 - **Coverage baseline caching.** Coverage now runs several times per cycle — preflight, before and after each Green, before and after each Refactor. On a large suite that dominates wall-clock. Incremental or per-file coverage would fix it.
-- **Portable coverage parsing.** Each toolchain reports uncovered lines in its own JSON shape. v0.1 handles them ad hoc in the orchestrator skill; a small extractor per toolchain, unit-tested against captured fixtures, belongs in `hooks/lib/`.
+- **Portable coverage and complexity parsing.** Each toolchain reports uncovered lines, and per-method complexity, in its own JSON shape. v0.1 handles both ad hoc in the orchestrator skill; a small extractor per toolchain, unit-tested against captured fixtures, belongs in `hooks/lib/`. This is the largest single source of silent-failure risk in the design.
+- **Mutation pass cost control.** `mutantsPerPass` is a blunt cap. Incremental mutation — only methods whose source changed since the last pass — would make the pass affordable on a real codebase.
+- **Mutation operators as config.** v0.1 hardcodes the operator list in the agent prompt. Projects with domain-specific invariants may want their own.
 - **Non-git projects.** The audit requires git. No fallback is planned.
