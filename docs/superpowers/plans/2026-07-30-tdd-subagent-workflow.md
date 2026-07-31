@@ -88,7 +88,7 @@ It must be a real plugin loaded via `hooks/hooks.json` and `${CLAUDE_PLUGIN_ROOT
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Read|Write|Edit|Bash",
+        "matcher": "Read|Write|Edit|MultiEdit|NotebookEdit|Bash",
         "hooks": [
           { "type": "command", "command": "${CLAUDE_PLUGIN_ROOT}/hooks/probe.sh" }
         ]
@@ -111,7 +111,8 @@ input=$(cat)
 
 # Deny any Read of a path containing "FORBIDDEN" so we can also observe
 # what a denial looks like from inside a subagent.
-path=$(printf '%s' "$input" | jq -r '.tool_input.file_path // empty')
+# NotebookEdit uses notebook_path, not file_path.
+path=$(printf '%s' "$input" | jq -r '.tool_input.file_path // .tool_input.notebook_path // empty')
 if [ "${path}" != "${path/FORBIDDEN/}" ]; then
   printf '%s\n' '{"hookSpecificOutput":{"permissionDecision":"deny"},"systemMessage":"probe: FORBIDDEN path"}' >&2
   exit 2
@@ -915,6 +916,27 @@ assert_eq "0|" "$out" "tdd-mutate may run the full suite"
 out=$(run_guard "tdd-bogus" payload_write "$SANDBOX/src/a.py")
 assert_eq "0|" "$out" "unrecognized tdd-* agent permits"
 
+# --- every file-writing tool must be judged, not just Write/Edit ---
+#
+# Hook matchers are unanchored regex, so `Edit` also delivers `MultiEdit` and
+# `NotebookEdit`. A tool that fell through to `exit 0` would let Red write
+# source with no check at all -- invisible, because nothing downstream can
+# tell a permitted write from one that was never attempted.
+for _t in Write Edit MultiEdit; do
+  out=$(AGENT="tdd-red"; printf '{"hook_event_name":"PreToolUse","agent_id":"a123","agent_type":"tdd-red","tool_name":"%s","tool_input":{"file_path":"%s"}}' "$_t" "$SANDBOX/src/a.py" \
+        | TDD_PROJECT_DIR="$SANDBOX" bash "$GUARD" 2>&1 >/dev/null; printf '%s' "|$?")
+  assert_contains "2" "$out" "red writing source via $_t is denied"
+done
+
+# NotebookEdit carries notebook_path, not file_path.
+out=$(printf '{"hook_event_name":"PreToolUse","agent_id":"a123","agent_type":"tdd-red","tool_name":"NotebookEdit","tool_input":{"notebook_path":"%s"}}' "$SANDBOX/src/nb.ipynb" \
+      | TDD_PROJECT_DIR="$SANDBOX" bash "$GUARD" 2>&1 >/dev/null; printf '%s' "|$?")
+assert_contains "2" "$out" "red writing source via NotebookEdit is denied"
+
+out=$(printf '{"hook_event_name":"PreToolUse","agent_id":"a123","agent_type":"tdd-red","tool_name":"SomeFutureTool","tool_input":{"file_path":"%s"}}' "$SANDBOX/src/a.py" \
+      | TDD_PROJECT_DIR="$SANDBOX" bash "$GUARD" 2>&1 >/dev/null; printf '%s' "|$?")
+assert_contains "2" "$out" "an unrecognized tool denies rather than passing through"
+
 # --- a payload the guard cannot classify must deny, not pass ---
 out=$(run_guard "tdd-red" payload_write "")
 assert_contains "2|" "$out" "empty file_path denies rather than permitting"
@@ -924,8 +946,11 @@ assert_contains "2|" "$out" "empty file_path denies rather than permitting"
 # permit the read.
 out=$(run_guard "tdd-red" payload_read "$SANDBOX/../$(basename "$SANDBOX")/src/a.py")
 assert_contains "2|" "$out" "a .. segment denies rather than escaping classification"
-out=$(run_guard "tdd-green" payload_read "$SANDBOX/../$(basename "$SANDBOX")/tests/test_a.py")
-assert_contains "2|" "$out" "a .. segment denies for green too"
+# Use a SOURCE path for green's traversal case. A traversal to a *test* path
+# would be denied by the ordinary "green may not read tests" rule even with the
+# traversal guard removed, so it would not prove the guard is live.
+out=$(run_guard "tdd-green" payload_read "$SANDBOX/../$(basename "$SANDBOX")/src/a.py")
+assert_contains "2|" "$out" "a .. segment denies for green even on a path it could otherwise read"
 
 # Repo-relative paths must classify identically to absolute ones.
 out=$(run_guard "tdd-red" payload_read "src/a.py")
@@ -978,8 +1003,13 @@ input=$(cat)
 # every call in the session. Deny only once we know a tdd-* agent is
 # calling; use a cheap grep to make that determination without jq.
 if ! command -v jq >/dev/null 2>&1; then
+  # Match the role names themselves rather than a compact-JSON key/value
+  # spelling: `"agent_type": "tdd-red"` with a space would slip past a
+  # pattern anchored on `"agent_type":"tdd-`, and slipping past means
+  # permitting. A false positive here only denies during an already-broken
+  # setup, so err wide.
   case "$input" in
-    *'"agent_type":"tdd-'*)
+    *tdd-red*|*tdd-green*|*tdd-refactor*|*tdd-mutate*)
       deny "tdd guard: jq is not on PATH; cannot evaluate tool calls safely. Run /tdd-init." ;;
     *) exit 0 ;;
   esac
@@ -1016,11 +1046,17 @@ source_globs=$(jq -r '.globs.source | join(" ")' "$config" 2>/dev/null) \
 
 tool=$(printf '%s' "$input" | jq -r '.tool_name // empty')
 
+# Every file-writing tool must map to a mode. Hook matchers are unanchored
+# regex, so `Edit` in the matcher also delivers `MultiEdit` and
+# `NotebookEdit` -- and an unmapped tool that fell through to `exit 0` would
+# be silently permitted to write source. Unknown tools deny: if the matcher
+# delivered something this case does not know, the safe answer is no.
 case "$tool" in
-  Read)        mode=read ;;
-  Write|Edit)  mode=write ;;
-  Bash)        mode=bash ;;
-  *)           exit 0 ;;
+  Read)                          mode=read ;;
+  Write|Edit|MultiEdit)          mode=write ;;
+  NotebookEdit)                  mode=write ;;
+  Bash)                          mode=bash ;;
+  *) deny "tdd guard: ${agent} called an unrecognized tool '${tool}'; the guard cannot classify it and fails closed" ;;
 esac
 
 if [ "$mode" = "bash" ]; then
@@ -1028,9 +1064,10 @@ if [ "$mode" = "bash" ]; then
 
   # The phase's own runner command, plus the coverage command — every role is
   # measured on coverage, so every role may measure itself.
-  # Each phase gets its own runner command plus the measurement commands it
-  # is judged on. Every role is measured on coverage, so every role may
-  # measure itself.
+  # Each role gets its own runner command plus the measurement commands it is
+  # judged on. Red, Green, and Refactor are gated on coverage and may measure
+  # themselves. Mutate is not -- it is judged on whether mutants survive the
+  # suite -- so it gets the mutation command instead.
   case "$role" in
     red|green) extra="single coverage" ;;
     refactor)  extra="test coverage complexity" ;;
@@ -1049,7 +1086,8 @@ if [ "$mode" = "bash" ]; then
   deny "$verdict"
 fi
 
-path=$(printf '%s' "$input" | jq -r '.tool_input.file_path // empty')
+# NotebookEdit uses notebook_path, not file_path.
+path=$(printf '%s' "$input" | jq -r '.tool_input.file_path // .tool_input.notebook_path // empty')
 
 # A Read/Write/Edit with no file_path cannot be classified. Permitting it
 # would be a hole shaped exactly like the tool call we most need to judge,
@@ -1086,7 +1124,7 @@ chmod +x hooks/guard.sh
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Read|Write|Edit|Bash",
+        "matcher": "Read|Write|Edit|MultiEdit|NotebookEdit|Bash",
         "hooks": [
           {
             "type": "command",
@@ -1115,9 +1153,13 @@ Disable the verdict entirely — the canonical "guard is inert" mutation:
 
 ```bash
 cp hooks/guard.sh hooks/guard.sh.bak
-sed -i '' 's/^\[ "\$verdict" = "allow" \] && exit 0$/exit 0/' hooks/guard.sh
+sed -i '' 's/\[ "\$verdict" = "allow" \] && exit 0/exit 0/' hooks/guard.sh
 bash tests/run.sh; echo "exit=$?"
 ```
+
+That line appears **twice** — once in the Bash branch, once in the path branch
+— so the pattern is deliberately unanchored to hit both. Verify with
+`grep -c 'exit 0' hooks/guard.sh` that both were replaced.
 
 Expected: **failures**, specifically every deny assertion reporting `0|`
 instead of `2|`, and a non-zero exit. A guard that always permits is the exact
