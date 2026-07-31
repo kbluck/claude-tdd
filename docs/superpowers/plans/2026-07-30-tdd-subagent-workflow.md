@@ -1992,12 +1992,34 @@ done
 # match. That is the same defect this test exists to catch, one level up.
 _init="$REPO_ROOT/commands/tdd-init.md"
 _init_text=$(sed -n '/^## 7\. Write the files/,/^Append to/p' "$_init")
+
+# Both anchors have to be checked, and they fail differently.
+#
+# Start anchor broken -> sed returns empty -> every assertion below fails in a
+# heap, which is loud but confusing. The first assertion names the real cause.
+#
+# End anchor broken -> sed runs to EOF instead, silently re-widening the
+# haystack toward the whole-file behaviour this scoping was added to remove.
+# That one passes quietly, so it needs its own check: nothing from step 8
+# onward may appear in the extracted block.
 assert_contains "version" "$_init_text" "the Step 7 JSON block was located at all"
+case "$_init_text" in
+  *"## 8"*) _bounded=no ;;
+  *)        _bounded=yes ;;
+esac
+assert_eq "yes" "$_bounded" "the extracted block stops before step 8 (end anchor still matches)"
 for _k in version crapMode complexity mutation \
           maxCrap duplicateThreshold maxFunctionLines \
           greenAttempts violationRetries mutationRounds mutantsPerPass \
           greenMaxNewUncovered refactorMaxNewUncovered ignore; do
-  assert_contains "$_k" "$_init_text" "tdd-init's config template names ${_k}"
+  # Match the JSON form `"key":`, not the bare word. Four key names also occur
+  # elsewhere inside this same block -- maxCrap and mutantsPerPass in the
+  # paragraph right after the JSON, mutation as a substring of mutationRounds,
+  # ignore as a substring of .gitignore on the end-anchor line -- so a bare-name
+  # needle passes even when the key is absent from the template. Verified: with
+  # the bare needle, deleting any of those four from the JSON left the suite
+  # fully green.
+  assert_contains "\"${_k}\":" "$_init_text" "tdd-init's config template names ${_k}"
 done
 
 # The three glob lists must be arrays. A bare string would word-split in the
