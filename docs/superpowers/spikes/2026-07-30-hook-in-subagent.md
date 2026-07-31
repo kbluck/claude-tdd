@@ -67,6 +67,21 @@ This eliminates:
 
 1. **`agent_type` is undocumented.** It could change or disappear. If it vanished, every subagent call would look like a main-thread call and the guard would fail **open** — the worst failure mode in this design, since reads leave no trace in a diff. Mitigation: preflight dispatches a trivial probe subagent and confirms the guard observed an `agent_type`, failing loudly if not. A startup check, not a per-call one.
 
-2. **Unverified: does a plugin's own custom agent report its own name?** This spike used the built-in `general-purpose` and got `"general-purpose"` back. The design assumes dispatching `tdd-red` yields `agent_type: "tdd-red"`. Plausible but untested, and load-bearing. **Task 6 must verify this before the agent definitions are considered done.** If custom agents report something else, the guard's dispatch table is wrong.
+2. ~~**Unverified: does a plugin's own custom agent report its own name?**~~ **RESOLVED 2026-07-31, and the assumption was wrong.**
+
+   Plugin-provided agents report **`agent_type: "claude-tdd:tdd-red"`** — namespaced as `<plugin>:<agent>`, not the bare `tdd-red` the guard's dispatch table matched on.
+
+   Consequence, reproduced offline against the shipped guard:
+
+   ```
+   agent_type=tdd-red             exit=2  denied (Red may only write test files)
+   agent_type=claude-tdd:tdd-red  exit=0  PERMITTED — Red writing source
+   ```
+
+   The bare name missed, fell through to `*) exit 0`, and **the guard was entirely inert for every real dispatch** — while all 93 tests passed, because every test payload used the bare name the design assumed.
+
+   This is the single most consequential defect found in the project: the plugin would have shipped with its central mechanism doing nothing, and no test, review, or run would have revealed it. Only dispatching a real plugin agent and reading the raw payload exposed it.
+
+   Fix: match on `${agent##*:}`, stripping any namespace. Deliberately broad — another plugin's own `tdd-red` would also be constrained, which is a false denial (loud, safe) rather than a silent permit.
 
 3. Denials surface as `PreToolUse:Read hook error: [...]` with the JSON embedded. Agents parse it fine, but the prefix is harness-controlled and not worth matching on.
