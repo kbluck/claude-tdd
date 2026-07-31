@@ -1785,6 +1785,11 @@ Set `crapMode`:
 - `computed` if both a complexity command and line-level coverage are available
 - `unavailable` otherwise
 
+**Run the complexity command before setting `computed`.** A command that is
+configured but not installed produces no scores, and a CRAP computation over no
+scores yields no triggers — indistinguishable from healthy code. If it does not
+run, set `unavailable` and tell the user which tool to install.
+
 **Mutation**, for the hardening pass: `mutmut` (Python), `Stryker` (JS/TS/C#),
 `PIT` (Java), `cargo-mutants` (Rust), `go-mutesting` (Go). Set
 `commands.mutation` if one is installed; `null` otherwise — the pass falls back
@@ -1808,6 +1813,12 @@ Every tracked file must match exactly one of the three lists.
 For each path, check it against `test`, then `source`, then `ignore`. Report
 every unclassified file to the user and extend the globs until none remain.
 
+**If `git ls-files` returns nothing, this check proved nothing.** An empty or
+freshly-initialised repo makes the partition vacuously exhaustive, and you
+would write a config whose globs have never been tested against a single real
+path. Say so explicitly and ask the user to confirm the globs by hand — do not
+report the partition as verified.
+
 This matters more than it looks. Writes are checked against an allowlist, so a
 bad glob merely blocks a legal write — noisy but safe. Reads are checked against
 a denylist, so an unclassified source file is *readable by Red*, and read
@@ -1824,11 +1835,26 @@ Present every field. Let them correct anything. Do not write until they agree.
 
 ## 6. Verify each command parses under the guard's Bash rule
 
-For each of `test`, `single`, and `coverage`, the static prefix is everything
-before the first `{`. Confirm the command is runnable as written. A template
-*may* contain shell metacharacters — those are trusted — but warn the user if
-one does, because the agent will not be able to add arguments beyond the
-static prefix without tripping the metacharacter ban on the delta.
+For each configured command, the static prefix is everything before the first
+`{`. Three checks, in order of severity:
+
+1. **Refuse any command whose static prefix is empty or whitespace-only** — one
+   that starts with its placeholder, or is only a placeholder. The guard would
+   have nothing to match against and its allowlist would degrade to "any
+   command without shell metacharacters", which is the single input that turns
+   the whole Bash guard off. The guard denies this at runtime, so such a
+   config would break every dispatch; catch it here where the error is
+   explainable.
+2. **Warn if a template has content *after* its placeholder** — e.g.
+   `pytest -q {testId} --cov`. Only the static prefix constrains, so everything
+   the agent supplies after it becomes the delta, and the template's own
+   trailing text will be treated as agent input and rejected. Move such flags
+   before the placeholder.
+3. **Warn if a template contains shell metacharacters.** Those are trusted in
+   the template itself, but the agent will not be able to append anything
+   without tripping the metacharacter ban on the delta.
+
+Confirm each command is actually runnable as written.
 
 ## 7. Write the files
 
@@ -1953,6 +1979,14 @@ resumes from this file, not from your context.
 
 All three roles are gated on coverage, and every gate compares against a
 baseline you capture. Skip all of this if `commands.coverage` is null.
+
+**A measurement you cannot parse is unavailable, never zero.** Every gate in
+this workflow compares a number against a threshold, so an extractor that
+returns `0` on a report shape it does not recognise silently satisfies all of
+them: Green's overbuild check passes, Refactor's hard-zero check passes, and
+CRAP finds no triggers. Nothing else in the design would notice. If a report
+cannot be parsed, say so, skip the gate explicitly, and record it in the run
+summary as unenforced — do not let a parse failure read as a clean result.
 
 Run the coverage command and record the uncovered-line count:
 
