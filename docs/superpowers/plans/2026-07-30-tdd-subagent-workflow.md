@@ -88,7 +88,7 @@ It must be a real plugin loaded via `hooks/hooks.json` and `${CLAUDE_PLUGIN_ROOT
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Read|Write|Edit|MultiEdit|NotebookEdit|Bash",
+        "matcher": "Read|Write|Edit|MultiEdit|NotebookEdit|NotebookRead|Bash",
         "hooks": [
           { "type": "command", "command": "${CLAUDE_PLUGIN_ROOT}/hooks/probe.sh" }
         ]
@@ -111,8 +111,7 @@ input=$(cat)
 
 # Deny any Read of a path containing "FORBIDDEN" so we can also observe
 # what a denial looks like from inside a subagent.
-# NotebookEdit uses notebook_path, not file_path.
-path=$(printf '%s' "$input" | jq -r '.tool_input.file_path // .tool_input.notebook_path // empty')
+path=$(printf '%s' "$input" | jq -r --arg k "$path_key" '.tool_input[$k] // empty')
 if [ "${path}" != "${path/FORBIDDEN/}" ]; then
   printf '%s\n' '{"hookSpecificOutput":{"permissionDecision":"deny"},"systemMessage":"probe: FORBIDDEN path"}' >&2
   exit 2
@@ -925,17 +924,25 @@ assert_eq "0|" "$out" "unrecognized tdd-* agent permits"
 for _t in Write Edit MultiEdit; do
   out=$(AGENT="tdd-red"; printf '{"hook_event_name":"PreToolUse","agent_id":"a123","agent_type":"tdd-red","tool_name":"%s","tool_input":{"file_path":"%s"}}' "$_t" "$SANDBOX/src/a.py" \
         | TDD_PROJECT_DIR="$SANDBOX" bash "$GUARD" 2>&1 >/dev/null; printf '%s' "|$?")
-  assert_contains "2" "$out" "red writing source via $_t is denied"
+  assert_contains "|2" "$out" "red writing source via $_t is denied"
 done
+
+# The path key must be chosen by tool. A NotebookEdit payload carrying a
+# benign file_path alongside a real-target notebook_path must be judged on the
+# field the tool actually acts on -- otherwise the guard validates something
+# the tool ignores and permits the write it should have caught.
+out=$(printf '{"hook_event_name":"PreToolUse","agent_id":"a123","agent_type":"tdd-red","tool_name":"NotebookEdit","tool_input":{"file_path":"%s","notebook_path":"%s"}}' "$SANDBOX/tests/test_a.py" "$SANDBOX/src/nb.ipynb" \
+      | TDD_PROJECT_DIR="$SANDBOX" bash "$GUARD" 2>&1 >/dev/null; printf '%s' "|$?")
+assert_contains "|2" "$out" "NotebookEdit is judged on notebook_path, not a decoy file_path"
 
 # NotebookEdit carries notebook_path, not file_path.
 out=$(printf '{"hook_event_name":"PreToolUse","agent_id":"a123","agent_type":"tdd-red","tool_name":"NotebookEdit","tool_input":{"notebook_path":"%s"}}' "$SANDBOX/src/nb.ipynb" \
       | TDD_PROJECT_DIR="$SANDBOX" bash "$GUARD" 2>&1 >/dev/null; printf '%s' "|$?")
-assert_contains "2" "$out" "red writing source via NotebookEdit is denied"
+assert_contains "|2" "$out" "red writing source via NotebookEdit is denied"
 
 out=$(printf '{"hook_event_name":"PreToolUse","agent_id":"a123","agent_type":"tdd-red","tool_name":"SomeFutureTool","tool_input":{"file_path":"%s"}}' "$SANDBOX/src/a.py" \
       | TDD_PROJECT_DIR="$SANDBOX" bash "$GUARD" 2>&1 >/dev/null; printf '%s' "|$?")
-assert_contains "2" "$out" "an unrecognized tool denies rather than passing through"
+assert_contains "|2" "$out" "an unrecognized tool denies rather than passing through"
 
 # --- a payload the guard cannot classify must deny, not pass ---
 out=$(run_guard "tdd-red" payload_write "")
@@ -1051,19 +1058,23 @@ tool=$(printf '%s' "$input" | jq -r '.tool_name // empty')
 # `NotebookEdit` -- and an unmapped tool that fell through to `exit 0` would
 # be silently permitted to write source. Unknown tools deny: if the matcher
 # delivered something this case does not know, the safe answer is no.
+# `path_key` names which tool_input field actually carries the target. Select
+# it by tool rather than falling back through `file_path // notebook_path`:
+# that precedence would validate `file_path` on a NotebookEdit call, which
+# acts on `notebook_path` -- checking a field the tool ignores is the
+# permissive kind of wrong.
 case "$tool" in
-  Read)                          mode=read ;;
-  Write|Edit|MultiEdit)          mode=write ;;
-  NotebookEdit)                  mode=write ;;
-  Bash)                          mode=bash ;;
+  Read)                  mode=read;  path_key=file_path ;;
+  NotebookRead)          mode=read;  path_key=notebook_path ;;
+  Write|Edit|MultiEdit)  mode=write; path_key=file_path ;;
+  NotebookEdit)          mode=write; path_key=notebook_path ;;
+  Bash)                  mode=bash;  path_key= ;;
   *) deny "tdd guard: ${agent} called an unrecognized tool '${tool}'; the guard cannot classify it and fails closed" ;;
 esac
 
 if [ "$mode" = "bash" ]; then
   cmd=$(printf '%s' "$input" | jq -r '.tool_input.command // empty')
 
-  # The phase's own runner command, plus the coverage command — every role is
-  # measured on coverage, so every role may measure itself.
   # Each role gets its own runner command plus the measurement commands it is
   # judged on. Red, Green, and Refactor are gated on coverage and may measure
   # themselves. Mutate is not -- it is judged on whether mutants survive the
@@ -1086,8 +1097,7 @@ if [ "$mode" = "bash" ]; then
   deny "$verdict"
 fi
 
-# NotebookEdit uses notebook_path, not file_path.
-path=$(printf '%s' "$input" | jq -r '.tool_input.file_path // .tool_input.notebook_path // empty')
+path=$(printf '%s' "$input" | jq -r --arg k "$path_key" '.tool_input[$k] // empty')
 
 # A Read/Write/Edit with no file_path cannot be classified. Permitting it
 # would be a hole shaped exactly like the tool call we most need to judge,
@@ -1124,7 +1134,7 @@ chmod +x hooks/guard.sh
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Read|Write|Edit|MultiEdit|NotebookEdit|Bash",
+        "matcher": "Read|Write|Edit|MultiEdit|NotebookEdit|NotebookRead|Bash",
         "hooks": [
           {
             "type": "command",
