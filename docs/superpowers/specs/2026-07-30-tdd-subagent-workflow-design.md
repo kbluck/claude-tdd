@@ -126,6 +126,8 @@ write .tdd/phase = "red"  →  dispatch tdd-red
                                status = redundant → next item
 ```
 
+**Every commit is audited**, including the `test:` branch — Red can violate its write boundary whether the test it produced passed or failed. The diagram elides the repeat for readability; the rule has no exceptions.
+
 The three-way outcome is the literal reading of the requirement that every authored test must *either* fail *or* measurably increase coverage. A passing test that raises coverage documents real existing behavior and is worth keeping; a passing test that raises nothing is waste.
 
 **Consequence:** an item can complete without Green ever running. Completion is therefore **"no `pending` items remain"**, not "every item went red then green." This contradicts the usual TDD mental model and must be stated in the orchestrator skill.
@@ -172,7 +174,11 @@ The diff audit can only observe writes. Read isolation — the property that act
 
 Detecting mutation by parsing shell commands is unbounded and will lose — `sed -i`, `cat >`, `mv`, a codegen script, and arbitrarily many more.
 
-Invert it. The three agents only ever legitimately need to run the commands in `config.json`. The hook permits a `Bash` call only when it prefix-matches a configured command **and** contains no shell metacharacters (`;`, `|`, `&&`, `>`, backticks, `$(`). Everything else is denied. `Read`, `Grep`, and `Glob` cover the inspection the agents would otherwise shell out for.
+Invert it. The three agents only ever legitimately need to run the commands in `config.json`. The hook permits a `Bash` call only when it prefix-matches a configured command for the current phase. Everything else is denied. `Read`, `Grep`, and `Glob` cover the inspection the agents would otherwise shell out for.
+
+**The metacharacter ban applies to the delta, not the template.** A configured command is trusted — it was authored or confirmed by the user at init time, and some toolchains legitimately need a pipe or redirect to produce coverage. What the agent supplies beyond the template (the `{testId}` substitution, any appended flags) must contain no `;`, `|`, `&&`, `>`, backtick, or `$(`. Banning metacharacters in the template itself would make the rule unsatisfiable for those toolchains, and the failure would surface at init time as an unexplained rejection.
+
+`/tdd-init` validates that each detected command parses under this rule and warns if one does not.
 
 A tight rule that is actually checkable beats a broad rule that is not.
 
@@ -235,6 +241,8 @@ Red returns this, and it is the entirety of what Green receives:
 Data-driven, so supporting a new toolchain is a table row rather than new code.
 
 `.tdd/phase` and `.tdd/checklist.json` are added to `.gitignore`.
+
+**`/tdd-init` commits its own output.** It writes `.tdd/config.json` and edits `.gitignore`, which leaves the tree dirty — and preflight step 1 refuses to start against a dirty tree. Without this, the first-time path (`/tdd-init` then `/tdd`) fails on its own side effects.
 
 **Coverage is optional.** If `commands.coverage` is null, Red's three-way outcome collapses to strict red: a passing test is always discarded. The workflow degrades rather than refusing to run.
 
