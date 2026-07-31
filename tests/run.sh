@@ -25,12 +25,24 @@ assert_contains() { # needle haystack name
 TESTS_DIR="$(cd "$(dirname "$0")" && pwd)"
 export REPO_ROOT="$(cd "$TESTS_DIR/.." && pwd)"
 
+FOUND=0
 for t in "$TESTS_DIR"/*.test.sh; do
   [ -e "$t" ] || continue
+  FOUND=1
   printf '\n--- %s ---\n' "$(basename "$t")"
+  BEFORE=$((PASS + FAIL))
   # shellcheck disable=SC1090
   . "$t"
+  if [ "$((PASS + FAIL))" -eq "$BEFORE" ]; then
+    printf '  FAIL: %s contributed no assertions\n' "$(basename "$t")"
+    FAIL=$((FAIL + 1))
+  fi
 done
+
+if [ "$FOUND" -eq 0 ]; then
+  printf '\n  FAIL: no *.test.sh files found in %s\n' "$TESTS_DIR"
+  FAIL=$((FAIL + 1))
+fi
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
