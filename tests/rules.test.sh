@@ -54,6 +54,48 @@ assert_contains "deny" "$(tdd_path_verdict mutation read tests/test_a.py "$TG" "
 
 # --- fail closed ---
 assert_contains "deny" "$(tdd_path_verdict "" write src/a.py "$TG" "$SG")" \
-  "empty phase denies"
+  "empty role denies"
 assert_contains "deny" "$(tdd_path_verdict bogus write src/a.py "$TG" "$SG")" \
-  "unknown phase denies"
+  "unknown role denies"
+assert_contains "deny" "$(tdd_path_verdict red read src/a.py "$TG" "")" \
+  "empty source globs deny a read rather than permitting it"
+assert_contains "deny" "$(tdd_path_verdict green read tests/test_a.py "" "$SG")" \
+  "empty test globs deny a read rather than permitting it"
+assert_contains "deny" "$(tdd_path_verdict red write tests/test_a.py "" "$SG")" \
+  "empty test globs deny a write"
+
+# --- REGRESSION: the verdict must not depend on what is on disk ---
+#
+# An unquoted glob string undergoes pathname expansion as well as word
+# splitting, so `src/**` would be replaced by whatever files exist. That made
+# `red read src/pkg/module.py` return "allow" from a directory containing
+# src/, and "deny" from anywhere else -- a silent fail-open on the one rule
+# nothing else in the design can enforce.
+#
+# These run inside a scratch tree whose shape would trigger the bug.
+_glob_sandbox="$(mktemp -d)"
+mkdir -p "$_glob_sandbox/src/pkg" "$_glob_sandbox/tests"
+touch "$_glob_sandbox/src/a.py" "$_glob_sandbox/src/pkg/module.py" \
+      "$_glob_sandbox/tests/test_a.py"
+_glob_prevpwd="$PWD"
+cd "$_glob_sandbox" || return
+
+assert_contains "deny" "$(tdd_path_verdict red read src/pkg/module.py "$TG" "$SG")" \
+  "red may not read nested source even when src/ exists on disk"
+assert_contains "deny" "$(tdd_path_verdict red read src/a.py "$TG" "$SG")" \
+  "red may not read top-level source even when it exists on disk"
+assert_contains "deny" "$(tdd_path_verdict green read tests/test_a.py "$TG" "$SG")" \
+  "green may not read an existing test file"
+assert_eq "allow" "$(tdd_path_verdict green write src/pkg/module.py "$TG" "$SG")" \
+  "green may write nested source that exists on disk"
+assert_eq "allow" "$(tdd_path_verdict green write src/pkg/brand_new.py "$TG" "$SG")" \
+  "green may write nested source that does NOT exist yet"
+
+cd "$_glob_prevpwd" || return
+rm -rf "$_glob_sandbox"
+
+# The caller's noglob setting must survive unchanged.
+set +f
+tdd_matches_any "src/a.py" "$SG" || true
+case "$-" in *f*) _noglob_leaked=yes ;; *) _noglob_leaked=no ;; esac
+assert_eq "no" "$_noglob_leaked" "tdd_matches_any restores the caller's noglob flag"
