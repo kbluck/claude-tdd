@@ -45,6 +45,7 @@
 | `tests/rules.test.sh` | unit tests for `rules.sh` |
 | `tests/guard.test.sh` | integration tests piping JSON fixtures into `guard.sh` |
 | `tests/agents.test.sh` | pins each agent's `name:` to the guard's dispatch table |
+| `tests/config-contract.test.sh` | pins the `.tdd/config.json` schema init writes and the guard reads |
 | `tests/fixtures/` | project skeletons and hook input JSON |
 
 **Why `rules.sh` is split from `guard.sh`:** the decision logic is the part with real edge cases (glob semantics, delta extraction, phase matrix). Pure functions taking strings and echoing verdicts are directly unit-testable without spawning a process or building JSON. `guard.sh` then holds only the parts that are hard to test and boring to get right.
@@ -1914,6 +1915,59 @@ fail on this command's side effects.
 Tell the user the config is written and committed, and that `/tdd <spec-path>`
 is ready to run.
 ```
+
+- [ ] **Step 1b: Pin the config schema with a contract test**
+
+`/tdd-init` writes the file that `guard.sh` and the orchestrator both read.
+Nothing else checks that what init produces is what they consume, and every
+defect in this project so far has landed at exactly that kind of seam. A
+missing key does not fail loudly — `jq` returns `null`, the guard's glob list
+becomes empty, and `tdd_path_verdict` denies everything, or a threshold reads
+as `null` and a gate silently stops comparing.
+
+Create `tests/config-contract.test.sh`:
+
+```bash
+# Sourced by tests/run.sh. Do not add a shebang, set -e, or exit.
+#
+# Pins the .tdd/config.json schema that /tdd-init must produce and that
+# guard.sh and the orchestrator consume. Update this list when the schema
+# changes -- deliberately, not by discovering a null at runtime.
+
+_cfg="$REPO_ROOT/tests/fixtures/config.json"
+
+# Keys that must be present AND non-null.
+for _k in version crapMode \
+          commands.test commands.single \
+          globs.test globs.source globs.ignore \
+          refactorTriggers.maxCrap refactorTriggers.duplicateThreshold \
+          refactorTriggers.maxFunctionLines \
+          limits.greenAttempts limits.violationRetries \
+          limits.mutationRounds limits.mutantsPerPass \
+          coverageGates.greenMaxNewUncovered coverageGates.refactorMaxNewUncovered; do
+  assert_eq "yes" "$(jq -r "if (.${_k} // null) == null then \"no\" else \"yes\" end" "$_cfg")" \
+    "config has non-null ${_k}"
+done
+
+# Keys that must be PRESENT but may be null -- absence and null mean different
+# things here. Null is "this toolchain has no such tool, degrade explicitly";
+# absent means /tdd-init forgot to decide.
+for _k in coverage complexity mutation; do
+  assert_eq "true" "$(jq -r ".commands | has(\"${_k}\")" "$_cfg")" \
+    "config declares commands.${_k} (null is allowed, absent is not)"
+done
+
+# The three glob lists must be arrays. A bare string would word-split in the
+# guard into per-character globs and match almost nothing -- denying every
+# write and, worse, permitting every read.
+for _k in test source ignore; do
+  assert_eq "array" "$(jq -r ".globs.${_k} | type" "$_cfg")" \
+    "globs.${_k} is an array"
+done
+```
+
+Run `bash tests/run.sh`, then verify it bites: delete `globs.source` from the
+fixture, confirm the suite fails, restore.
 
 - [ ] **Step 2: Verify the command file is well-formed**
 
