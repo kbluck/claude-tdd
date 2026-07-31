@@ -115,17 +115,25 @@ assert_eq "0|" "$out" "unrecognized tdd-* agent permits"
 for _t in Write Edit MultiEdit; do
   out=$(AGENT="tdd-red"; printf '{"hook_event_name":"PreToolUse","agent_id":"a123","agent_type":"tdd-red","tool_name":"%s","tool_input":{"file_path":"%s"}}' "$_t" "$SANDBOX/src/a.py" \
         | TDD_PROJECT_DIR="$SANDBOX" bash "$GUARD" 2>&1 >/dev/null; printf '%s' "|$?")
-  assert_contains "2" "$out" "red writing source via $_t is denied"
+  assert_contains "|2" "$out" "red writing source via $_t is denied"
 done
+
+# The path key must be chosen by tool. A NotebookEdit payload carrying a
+# benign file_path alongside a real-target notebook_path must be judged on the
+# field the tool actually acts on -- otherwise the guard validates something
+# the tool ignores and permits the write it should have caught.
+out=$(printf '{"hook_event_name":"PreToolUse","agent_id":"a123","agent_type":"tdd-red","tool_name":"NotebookEdit","tool_input":{"file_path":"%s","notebook_path":"%s"}}' "$SANDBOX/tests/test_a.py" "$SANDBOX/src/nb.ipynb" \
+      | TDD_PROJECT_DIR="$SANDBOX" bash "$GUARD" 2>&1 >/dev/null; printf '%s' "|$?")
+assert_contains "|2" "$out" "NotebookEdit is judged on notebook_path, not a decoy file_path"
 
 # NotebookEdit carries notebook_path, not file_path.
 out=$(printf '{"hook_event_name":"PreToolUse","agent_id":"a123","agent_type":"tdd-red","tool_name":"NotebookEdit","tool_input":{"notebook_path":"%s"}}' "$SANDBOX/src/nb.ipynb" \
       | TDD_PROJECT_DIR="$SANDBOX" bash "$GUARD" 2>&1 >/dev/null; printf '%s' "|$?")
-assert_contains "2" "$out" "red writing source via NotebookEdit is denied"
+assert_contains "|2" "$out" "red writing source via NotebookEdit is denied"
 
 out=$(printf '{"hook_event_name":"PreToolUse","agent_id":"a123","agent_type":"tdd-red","tool_name":"SomeFutureTool","tool_input":{"file_path":"%s"}}' "$SANDBOX/src/a.py" \
       | TDD_PROJECT_DIR="$SANDBOX" bash "$GUARD" 2>&1 >/dev/null; printf '%s' "|$?")
-assert_contains "2" "$out" "an unrecognized tool denies rather than passing through"
+assert_contains "|2" "$out" "an unrecognized tool denies rather than passing through"
 
 # --- a payload the guard cannot classify must deny, not pass ---
 out=$(run_guard "tdd-red" payload_write "")

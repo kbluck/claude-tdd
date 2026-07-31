@@ -70,19 +70,23 @@ tool=$(printf '%s' "$input" | jq -r '.tool_name // empty')
 # `NotebookEdit` -- and an unmapped tool that fell through to `exit 0` would
 # be silently permitted to write source. Unknown tools deny: if the matcher
 # delivered something this case does not know, the safe answer is no.
+# `path_key` names which tool_input field actually carries the target. Select
+# it by tool rather than falling back through `file_path // notebook_path`:
+# that precedence would validate `file_path` on a NotebookEdit call, which
+# acts on `notebook_path` -- checking a field the tool ignores is the
+# permissive kind of wrong.
 case "$tool" in
-  Read)                          mode=read ;;
-  Write|Edit|MultiEdit)          mode=write ;;
-  NotebookEdit)                  mode=write ;;
-  Bash)                          mode=bash ;;
+  Read)                  mode=read;  path_key=file_path ;;
+  NotebookRead)          mode=read;  path_key=notebook_path ;;
+  Write|Edit|MultiEdit)  mode=write; path_key=file_path ;;
+  NotebookEdit)          mode=write; path_key=notebook_path ;;
+  Bash)                  mode=bash;  path_key= ;;
   *) deny "tdd guard: ${agent} called an unrecognized tool '${tool}'; the guard cannot classify it and fails closed" ;;
 esac
 
 if [ "$mode" = "bash" ]; then
   cmd=$(printf '%s' "$input" | jq -r '.tool_input.command // empty')
 
-  # The phase's own runner command, plus the coverage command — every role is
-  # measured on coverage, so every role may measure itself.
   # Each role gets its own runner command plus the measurement commands it is
   # judged on. Red, Green, and Refactor are gated on coverage and may measure
   # themselves. Mutate is not -- it is judged on whether mutants survive the
@@ -105,8 +109,7 @@ if [ "$mode" = "bash" ]; then
   deny "$verdict"
 fi
 
-# NotebookEdit uses notebook_path, not file_path.
-path=$(printf '%s' "$input" | jq -r '.tool_input.file_path // .tool_input.notebook_path // empty')
+path=$(printf '%s' "$input" | jq -r --arg k "$path_key" '.tool_input[$k] // empty')
 
 # A Read/Write/Edit with no file_path cannot be classified. Permitting it
 # would be a hole shaped exactly like the tool call we most need to judge,
