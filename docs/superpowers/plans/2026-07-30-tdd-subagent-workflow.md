@@ -2145,7 +2145,7 @@ no *participant* has full visibility.
 
 Announce: "Using run-tdd-cycle to implement `<spec>`."
 
-## Preflight — all six, in order, before any dispatch
+## Preflight — all seven, in order, before any dispatch
 
 1. **Git repo, clean tree.** The audit's revert is `git reset --hard`, which would destroy uncommitted work. Dirty → stop, ask the user to commit or stash.
 2. **`.tdd/config.json` exists.** Missing → tell the user to run `/tdd-init`. Do not write one yourself.
@@ -2231,10 +2231,10 @@ measurement is the one that decides.
 ### Red
 
 1. Dispatch `tdd-red` with: the spec path, the one item, the configured commands, and the current coverage baseline.
-3. On return, **audit**: `git diff --name-only` plus `git status --porcelain`. Every touched path must match `globs.test`. Violation → `git checkout -- .`, re-dispatch once quoting the rule and the offending path. Second violation → stop, escalate.
+2. On return, **audit**: `git diff --name-only` plus `git status --porcelain`. Every touched path must match `globs.test`. Violation → `git checkout -- .`, re-dispatch once quoting the rule and the offending path. Second violation → stop, escalate.
 
    **An empty diff is not a passing audit.** "Every touched path matched" is vacuously true when nothing was touched. If Red reports `failing`, `passing-covered`, or `passing-flat`, it claims to have written a test — so at least one path must have changed. Zero changed paths alongside any of those outcomes means the agent reported work it did not do: treat it as `blocked` and escalate rather than committing an empty commit and moving on. The same applies to Green's audit below.
-4. Branch on `outcome`:
+3. Branch on `outcome`:
    - `failing` → commit `red: <behavior>`, status `red`, continue to Green.
    - `passing-covered` → **re-measure coverage yourself before committing.** This branch writes a commit and skips Green entirely on the strength of a number the agent computed about its own work; it is the one place nothing else would catch a wrong answer. Delta confirmed → commit `test: <behavior>`, status `done`, next item. Delta not confirmed → treat as `passing-flat`.
    - `passing-flat` → `git checkout -- .`, status `redundant`, next item.
@@ -2250,8 +2250,8 @@ Red failed to do its job. Collapsing them would silently drop a spec item as
 1. Dispatch `tdd-green` with **only** Red's handover report. Do not paste the test source — that is the whole point of the separation.
 2. On return, audit as above against `globs.source`.
 3. `outcome: stuck` → stop and escalate with the agent's attempts.
-5. Independently verify: run the configured single-test command against `testId` yourself. Do not take the agent's word for it.
-6. **Coverage gate** (skip entirely if `commands.coverage` is null, or if the baseline reports zero total lines):
+4. Independently verify: run the configured single-test command against `testId` yourself. Do not take the agent's word for it.
+5. **Coverage gate** (skip entirely if `commands.coverage` is null, or if the baseline reports zero total lines):
    - Run the coverage command. Compute new uncovered lines against the pre-dispatch baseline.
    - Within `coverageGates.greenMaxNewUncovered` → commit `green: <behavior>`, status `green`.
    - Over → `git checkout -- .` and re-dispatch once, naming the specific uncovered file:line ranges and instructing Green to implement only what the test drives.
