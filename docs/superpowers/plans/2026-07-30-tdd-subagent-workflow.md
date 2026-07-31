@@ -599,6 +599,8 @@ The rule has two parts:
 1. The command must start with the template's **static prefix** — everything before the first `{` placeholder, trailing whitespace trimmed. For `pytest -q {testId}` the prefix is `pytest -q`.
 2. The **delta** — what the agent supplied beyond that prefix — must contain none of `;` `|` `&` `>` `` ` `` `$(` `<` `\n`.
 
+**A template with no static prefix must deny.** If everything before the first `{` is empty or whitespace, the prefix test degenerates to `case "$cmd" in *)`, which matches every string — leaving only the metacharacter ban, so `cp -r /etc /tmp/exfil` would be permitted. This is the one input that turns the allowlist off entirely, and it must fail closed.
+
 The metacharacter ban applies to the delta, *not* the template. A configured command is trusted: the user confirmed it at init, and some toolchains genuinely need a redirect to emit coverage. Banning metacharacters in the template itself would make those toolchains unexpressible, and the failure would surface as an unexplained rejection at init.
 
 - [ ] **Step 1: Write the failing tests**
@@ -634,6 +636,22 @@ assert_contains "deny" "$(tdd_bash_verdict "sed -i s/a/b/ src/a.py" "$T_SINGLE")
   "in-place edit via bash is denied"
 assert_contains "deny" "$(tdd_bash_verdict "pytest -q" "")" \
   "empty template denies"
+
+# --- REGRESSION: a template with no static prefix must not wave everything
+# through. An empty prefix makes the prefix test `case "$cmd" in *)`, which
+# matches any string, leaving only the metacharacter ban -- so an arbitrary
+# command with clean punctuation would be permitted.
+assert_contains "deny" "$(tdd_bash_verdict "cp -r /etc /tmp/exfil" "   ")" \
+  "whitespace-only template denies rather than allowing any clean command"
+assert_contains "deny" "$(tdd_bash_verdict "rm -rf /tmp/pwned" "{cmd}")" \
+  "placeholder-only template denies"
+assert_contains "deny" "$(tdd_bash_verdict "anything at all" "{a} {b}")" \
+  "template starting with a placeholder denies"
+
+# A tab before the placeholder must be trimmed like a space, or every normal
+# invocation would fail the prefix match.
+assert_eq "allow" "$(tdd_bash_verdict "pytest -q tests/t.py::x" "$(printf 'pytest -q\t{testId}')")" \
+  "trailing tab is trimmed from the static prefix"
 ```
 
 The redirect case is the one that matters most: `T_COV`'s template contains `:` and is allowed verbatim, while an agent-appended `>` is denied. That is the delta rule doing its job.
@@ -664,8 +682,26 @@ tdd_bash_verdict() {
   fi
 
   local prefix="${template%%\{*}"
-  # trim trailing whitespace from the prefix
-  while [ "${prefix% }" != "$prefix" ]; do prefix="${prefix% }"; done
+
+  # Trim trailing whitespace. [[:space:]] rather than a literal space, so a
+  # tab before the placeholder does not survive into the prefix and cause
+  # every normal space-separated invocation to fail the match.
+  while :; do
+    case "$prefix" in
+      *[[:space:]]) prefix="${prefix%?}" ;;
+      *) break ;;
+    esac
+  done
+
+  # An empty static prefix would make the prefix test `case "$cmd" in *)`,
+  # which matches everything -- silently degrading the allowlist to "any
+  # command without shell metacharacters". `cp -r /etc /tmp/exfil` would be
+  # permitted. A template that is whitespace-only, or that starts with its
+  # placeholder, must deny rather than wave everything through.
+  if [ -z "$prefix" ]; then
+    echo "deny: the configured command for this phase has no static prefix, so it cannot constrain anything; the guard fails closed"
+    return
+  fi
 
   case "$cmd" in
     "$prefix"*) ;;
