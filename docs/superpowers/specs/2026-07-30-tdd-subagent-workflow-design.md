@@ -133,17 +133,24 @@ write .tdd/phase = "red"  →  dispatch tdd-red
 
 The three-way outcome is the literal reading of the requirement that every authored test must *either* fail *or* measurably increase coverage. A passing test that raises coverage documents real existing behavior and is worth keeping; a passing test that raises nothing is waste.
 
-**Consequence:** an item can complete without Green ever running. Completion is therefore **"no `pending` items remain"**, not "every item went red then green." This contradicts the usual TDD mental model and must be stated in the orchestrator skill.
+**Consequence:** an item can complete without Green ever running. So the checklist empties on **"no `pending` items remain"**, not "every item went red then green." This contradicts the usual TDD mental model and must be stated in the orchestrator skill.
+
+An empty checklist is not the end of the run — it triggers the mutation pass, which may append new items and restart the loop.
 
 ### Refactor trigger check
 
-After each green, the orchestrator reads the accumulated source diff and dispatches `tdd-refactor` only on a hit against a written trigger list:
+After each green, the orchestrator dispatches `tdd-refactor` only on a hit against a written trigger list:
 
+- **any method scores above `refactorTriggers.maxCrap`** — primary trigger; the dispatch is scoped to that method
 - the same shape appears a third time (`refactorTriggers.duplicateThreshold`)
-- a function crossed the line threshold (`refactorTriggers.maxFunctionLines`)
 - a name in the new code drifted from the spec's vocabulary
+- a function crossed `refactorTriggers.maxFunctionLines` — fallback only, when `crapMode` is `unavailable`
 
 No hit, no dispatch. This avoids paying for a subagent to conclude "nothing to do", which is the common case in early cycles, and avoids an idle Refactor agent inventing busywork to justify itself.
+
+### Mutation pass
+
+When the checklist first empties, the orchestrator runs the mutation hardening pass described above rather than declaring completion. Survivors append to the checklist as new Red items; the loop resumes. The run ends when a pass produces no survivors, or after `limits.mutationRounds`.
 
 ### Commits
 
@@ -161,7 +168,8 @@ Guardrails are enforced twice, at different surfaces.
 |---|---|---|---|
 | **Red** | spec, existing test files, runner output | test globs only | configured test + coverage commands |
 | **Green** | Red's handover report, source files, runner output | source globs only | configured single-test + coverage commands |
-| **Refactor** | source files, runner output | source globs only | configured full-suite + coverage commands |
+| **Refactor** | source files, runner output | source globs only | configured full-suite + coverage + complexity commands |
+| **Refactor (mutation phase)** | source files, runner output | source globs only — every write must be reverted before handover | full-suite + mutation commands |
 
 **Writes are an allowlist; reads are a denylist.** A write must *match* the phase's permitted globs; a read must merely *not match* the forbidden ones. The asymmetry is deliberate — agents legitimately read `README.md`, `pyproject.toml`, and type stubs, and an allowlist would fight them on every call.
 
@@ -220,6 +228,46 @@ Red returns this, and it is the entirety of what Green receives:
 
 `blocked` is deliberately distinct from `redundant`. `redundant` means Red wrote a test, it passed, and coverage did not move — the behavior is genuinely already covered. `blocked` means Red failed to do its job. Collapsing the two would let a spec item be silently dropped as "already covered" when in fact nothing verified it.
 
+## CRAP scores as the primary refactor trigger
+
+The Change Risk Anti-Patterns score, per method:
+
+```
+CRAP(m) = comp(m)² × (1 − cov(m))³ + comp(m)        cov ∈ [0,1]
+```
+
+At full coverage it collapses to `comp(m)` — a complex method that is thoroughly tested is not a risk. As coverage falls the penalty grows cubically. A 5-complexity untested method scores 30; so does a 30-complexity fully-tested one. The conventional "crappy" threshold is 30.
+
+This is the right trigger for this workflow specifically, because it is the intersection of the two things already being measured. Line count was a crude proxy for complexity that said nothing about whether the code was tested; CRAP is per-method and weights exactly the combination that warrants attention.
+
+**Trigger order.** CRAP is primary: any method scoring above `refactorTriggers.maxCrap` (default 30) dispatches Refactor, scoped to that method. Duplication and naming drift remain as secondary triggers. `maxFunctionLines` is demoted to a fallback for toolchains that cannot produce CRAP.
+
+**Computing it is toolchain-specific and is the main cost of this feature.** Three tiers, in order of preference:
+
+1. **Native** — PHPUnit and Cobertura report CRAP directly. Read it.
+2. **Computed** — combine a complexity tool with per-method coverage: `radon cc --json` plus `coverage.py`'s per-file line data for Python; equivalents elsewhere. Requires mapping coverage lines onto function line ranges.
+3. **Unavailable** — fall back to `maxFunctionLines`, and say so at init rather than silently degrading.
+
+`/tdd-init` detects which tier applies and records it as `crapMode: "native" | "computed" | "unavailable"`.
+
+## Mutation testing as a hardening pass
+
+Coverage proves a line *ran*. It does not prove any test would notice if that line were wrong — a test that executes code without asserting on its result yields full coverage and zero protection. Mutation testing closes that gap: perturb the source, re-run the suite, and see whether anything fails. A mutant that survives is proof of a test that does not actually test.
+
+**Why Refactor runs it, and why that does not break its contract.**
+
+Refactor is the only role that can write source *and* is categorically forbidden from keeping a behavior change. Red cannot touch source; Green has no reason to revert its own work. Mutation is mutate → observe → revert, and Refactor is the only role whose boundaries make that natural. Its handover contract — interfaces unchanged, suite passing — holds because every mutation is reverted before it reports.
+
+**Refactor detects; it never fixes.** A surviving mutant is a *test* defect, and Refactor may not read or write tests. It reports the survivor and stops.
+
+**Survivors become Red items.** This is the part that makes the feature fit rather than bolt on. A surviving mutant is already a specification of a missing test — "no test distinguishes `>` from `>=` at `parser.py:42`" is exactly the shape Red consumes. The orchestrator appends each survivor to the checklist as a new item and the normal Red→Green cycle absorbs it. The workflow extends itself.
+
+**When it runs.** Not per cycle — mutation testing runs the suite once per mutant and would dominate wall-clock. It runs as a **hardening pass after the checklist first empties**, in its own `mutation` phase. Survivors generate items; those items run through normal cycles; the pass may then repeat until it produces no survivors or hits `limits.mutationRounds` (default 2).
+
+**How mutants are generated.** Prefer a real tool (`mutmut`, `Stryker`, `PIT`, `cosmic-ray`) when `commands.mutation` is configured — they are systematic and use standard operators. Otherwise Refactor hand-mutates, targeting the **highest-CRAP methods first**, which is where the two features compose: CRAP says where the risk is concentrated, mutation says whether the tests there are real.
+
+**Bounded by construction.** `limits.mutantsPerPass` (default 20) caps how many mutants a single pass attempts, and the orchestrator logs what it skipped. An unbounded mutation pass on a large codebase does not terminate in useful time.
+
 ## Coverage as a shared ratchet
 
 Coverage is not only Red's concern. All three roles are measurable against it, and in each case the measurement detects the same underlying failure: **code that exists without a test driving it.**
@@ -254,17 +302,23 @@ Green's gate cannot be zero. Legitimate cases exist: satisfying a divide-by-zero
 {
   "version": 1,
   "commands": {
-    "test":     "pytest -q",
-    "single":   "pytest -q {testId}",
-    "coverage": "pytest -q --cov --cov-report=json:.tdd/coverage.json"
+    "test":       "pytest -q",
+    "single":     "pytest -q {testId}",
+    "coverage":   "pytest -q --cov --cov-report=json:.tdd/coverage.json",
+    "complexity": "radon cc -j -s src",
+    "mutation":   null
   },
+  "crapMode": "computed",
   "globs": {
     "test":   ["tests/**", "**/test_*.py"],
     "source": ["src/**"],
     "ignore": ["docs/**", "*.md", "pyproject.toml", ".gitignore"]
   },
-  "refactorTriggers": { "maxFunctionLines": 40, "duplicateThreshold": 3 },
-  "limits": { "greenAttempts": 3, "violationRetries": 1 },
+  "refactorTriggers": { "maxCrap": 30, "duplicateThreshold": 3, "maxFunctionLines": 40 },
+  "limits": {
+    "greenAttempts": 3, "violationRetries": 1,
+    "mutationRounds": 2, "mutantsPerPass": 20
+  },
   "coverageGates": { "greenMaxNewUncovered": 2, "refactorMaxNewUncovered": 0 }
 }
 ```
@@ -285,7 +339,16 @@ Data-driven, so supporting a new toolchain is a table row rather than new code.
 
 **`/tdd-init` commits its own output.** It writes `.tdd/config.json` and edits `.gitignore`, which leaves the tree dirty — and preflight step 1 refuses to start against a dirty tree. Without this, the first-time path (`/tdd-init` then `/tdd`) fails on its own side effects.
 
-**Coverage is optional.** If `commands.coverage` is null, Red's three-way outcome collapses to strict red: a passing test is always discarded. The workflow degrades rather than refusing to run.
+**Every measurement is optional, and each degrades independently.** The workflow always runs; it just enforces less.
+
+| Missing | Lost |
+|---|---|
+| `commands.coverage` is null | Red's three-way branch collapses to strict red; both coverage gates skipped; `crapMode` forced to `unavailable` |
+| `crapMode: "unavailable"` | CRAP trigger unavailable; refactor falls back to `maxFunctionLines` |
+| `commands.mutation` is null | mutation pass uses agent-driven hand-mutation instead of a tool; still runs |
+| `commands.complexity` is null and no native CRAP | same as `crapMode: "unavailable"` |
+
+`/tdd-init` must state which of these apply rather than degrading silently. Each one removes a mechanical check and replaces it with prompt discipline, and the user should know which guarantees they are actually getting.
 
 ## Risks
 
