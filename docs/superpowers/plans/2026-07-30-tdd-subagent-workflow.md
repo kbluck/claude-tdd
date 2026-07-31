@@ -246,12 +246,29 @@ assert_contains() { # needle haystack name
 TESTS_DIR="$(cd "$(dirname "$0")" && pwd)"
 export REPO_ROOT="$(cd "$TESTS_DIR/.." && pwd)"
 
+FILES=0
 for t in "$TESTS_DIR"/*.test.sh; do
   [ -e "$t" ] || continue
   printf '\n--- %s ---\n' "$(basename "$t")"
+  FILES=$((FILES + 1))
+  _before=$((PASS + FAIL))
   # shellcheck disable=SC1090
   . "$t"
+  # A file that records no assertions is not a passing file, it is a file that
+  # did not run: a syntax error, an empty glob, a loop that iterated zero times.
+  # Without this, the harness reports "N passed, 0 failed" for a suite that
+  # silently shrank -- which has already happened here, when a one-character
+  # typo in a jq filter removed 46 assertions and the run stayed green.
+  if [ "$((PASS + FAIL))" -eq "$_before" ]; then
+    printf '  FAIL: %s contributed no assertions\n' "$(basename "$t")"
+    FAIL=$((FAIL + 1))
+  fi
 done
+
+if [ "$FILES" -eq 0 ]; then
+  printf '  FAIL: no test files matched %s/*.test.sh\n' "$TESTS_DIR"
+  FAIL=$((FAIL + 1))
+fi
 
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
@@ -2021,22 +2038,42 @@ assert_eq "yes" "$_bounded" "the extracted block stops before step 8 (end anchor
 #
 # Multiplicity matters: "test" occurs twice (commands.test and globs.test), so
 # a presence check would not prove both are declared.
+# Count the iterations. A derived loop that enumerates nothing -- a broken jq
+# filter, an unreadable fixture -- contributes zero assertions and the suite
+# stays green while the check has silently disappeared. Verified: typing
+# `strnig` for `string` in this filter dropped 46 assertions and the run
+# reported 122 passed, 0 failed.
+_tpl_seen=0
 for _k in $(jq -r 'paths | .[-1] | select(type=="string")' "$_cfg" | sort -u); do
   _want=$(jq -r --arg k "$_k" '[paths | .[-1] | select(. == $k)] | length' "$_cfg")
   _have=$(printf '%s' "$_init_text" | grep -o "\"${_k}\":" | wc -l | tr -d ' ')
   assert_eq "$_want" "$_have" "tdd-init's template declares ${_k} (${_want}x)"
+  _tpl_seen=$((_tpl_seen + 1))
 done
+assert_eq "yes" "$([ "$_tpl_seen" -ge 19 ] && echo yes || echo no)" \
+  "the derived template loop enumerated at least 19 keys (saw ${_tpl_seen})"
 
 # The spec holds a THIRD copy of this schema. Drift there misleads whoever
 # reads the design next, which is how the template drifted in the first place.
 _spec="$REPO_ROOT/docs/superpowers/specs/2026-07-30-tdd-subagent-workflow-design.md"
 _spec_text=$(sed -n '/"version": 1,/,/^}/p' "$_spec")
 assert_contains "crapMode" "$_spec_text" "the spec's schema block was located at all"
+# Same end-anchor hazard the template block has: if `^}` stops matching, sed
+# runs to EOF and silently sweeps in trailing prose, widening the haystack and
+# corrupting the counts. Asserting the last line IS the closing brace is
+# stronger than a content marker, because it does not depend on what happens to
+# follow the block.
+assert_eq "}" "$(printf '%s' "$_spec_text" | tail -1)" \
+  "the spec's schema block ends at its closing brace (end anchor still matches)"
+_spec_seen=0
 for _k in $(jq -r 'paths | .[-1] | select(type=="string")' "$_cfg" | sort -u); do
   _want=$(jq -r --arg k "$_k" '[paths | .[-1] | select(. == $k)] | length' "$_cfg")
   _have=$(printf '%s' "$_spec_text" | grep -o "\"${_k}\":" | wc -l | tr -d ' ')
   assert_eq "$_want" "$_have" "the spec's schema declares ${_k} (${_want}x)"
+  _spec_seen=$((_spec_seen + 1))
 done
+assert_eq "yes" "$([ "$_spec_seen" -ge 19 ] && echo yes || echo no)" \
+  "the derived spec loop enumerated at least 19 keys (saw ${_spec_seen})"
 
 # The three glob lists must be arrays. A bare string would word-split in the
 # guard into per-character globs and match almost nothing -- denying every
