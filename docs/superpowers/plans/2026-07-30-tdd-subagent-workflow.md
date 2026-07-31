@@ -44,6 +44,7 @@
 | `tests/run.sh` | zero-dep harness + runner |
 | `tests/rules.test.sh` | unit tests for `rules.sh` |
 | `tests/guard.test.sh` | integration tests piping JSON fixtures into `guard.sh` |
+| `tests/agents.test.sh` | pins each agent's `name:` to the guard's dispatch table |
 | `tests/fixtures/` | project skeletons and hook input JSON |
 
 **Why `rules.sh` is split from `guard.sh`:** the decision logic is the part with real edge cases (glob semantics, delta extraction, phase matrix). Pure functions taking strings and echoing verdicts are directly unit-testable without spawning a process or building JSON. `guard.sh` then holds only the parts that are hard to test and boring to get right.
@@ -1581,6 +1582,48 @@ grep -c 'publicApi' agents/tdd-red.md agents/tdd-green.md
 ```
 
 Expected: non-zero for both. Red produces the field, Green consumes it; a rename in one file without the other silently breaks the handoff.
+
+- [ ] **Step 5b: Pin the agent-name/guard coupling with a test**
+
+The `name:` in each agent file and the dispatch table in `hooks/guard.sh` are a
+contract with no compiler behind it. A typo or a later rename does not fail
+loudly — it makes `guard.sh` fall through to `*) exit 0` and **permit
+everything that agent does**, silently. Assert the coupling so it cannot drift.
+
+Create `tests/agents.test.sh`:
+
+```bash
+# Sourced by tests/run.sh. Do not add a shebang, set -e, or exit.
+#
+# The guard identifies callers by agent_type, which is the agent file's `name:`
+# field. If the two ever disagree, the guard stops constraining that role and
+# says nothing. This test is the only thing standing between a rename and a
+# silently disabled guard.
+
+_agent_dir="$REPO_ROOT/agents"
+_guard="$REPO_ROOT/hooks/guard.sh"
+
+for _f in "$_agent_dir"/*.md; do
+  [ -e "$_f" ] || continue
+  _name=$(sed -n 's/^name:[[:space:]]*//p' "$_f" | head -1)
+  assert_contains "$_name)" "$(cat "$_guard")" \
+    "$(basename "$_f") declares name '$_name', which guard.sh dispatches on"
+done
+
+# And the reverse: every role the guard knows about must have an agent file.
+for _role in tdd-red tdd-green tdd-refactor tdd-mutate; do
+  _found=no
+  for _f in "$_agent_dir"/*.md; do
+    [ -e "$_f" ] || continue
+    [ "$(sed -n 's/^name:[[:space:]]*//p' "$_f" | head -1)" = "$_role" ] && _found=yes
+  done
+  assert_eq "yes" "$_found" "guard role $_role has an agent definition"
+done
+```
+
+Run `bash tests/run.sh` and confirm the new assertions pass. Then verify they
+bite: change one agent's `name:` to `tdd-typo`, confirm the suite fails, and
+restore.
 
 - [ ] **Step 6: Verify a custom agent reports its own name in `agent_type`**
 
