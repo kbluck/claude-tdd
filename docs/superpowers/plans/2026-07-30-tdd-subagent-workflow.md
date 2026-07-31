@@ -1390,7 +1390,13 @@ Compare after each dispatch. If a baseline reports zero total lines — an empty
 project, a first implementation — skip that cycle's gate; there is nothing
 meaningful to compare against.
 
-Measuring is your job, not the agent's. The agents may check themselves to
+**Red is the one role that measures for its own branch decision.** It needs the
+coverage delta to distinguish `passing-covered` from `passing-flat`, and it needs
+that answer before it can report at all — so you pass it the current baseline and
+it runs coverage itself. You then re-measure to confirm, exactly as you re-run
+Green's test rather than trusting its word.
+
+For Green and Refactor, measuring is your job. They may check themselves to
 self-correct before handing over, which is cheaper than a re-dispatch, but your
 measurement is the one that decides.
 
@@ -1403,7 +1409,7 @@ measurement is the one that decides.
 3. On return, **audit**: `git diff --name-only` plus `git status --porcelain`. Every touched path must match `globs.test`. Violation → `git checkout -- .`, re-dispatch once quoting the rule and the offending path. Second violation → stop, escalate.
 4. Branch on `outcome`:
    - `failing` → commit `red: <behavior>`, status `red`, continue to Green.
-   - `passing-covered` → commit `test: <behavior>`, status `done`, **skip Green**, next item.
+   - `passing-covered` → **re-measure coverage yourself before committing.** This branch writes a commit and skips Green entirely on the strength of a number the agent computed about its own work; it is the one place nothing else would catch a wrong answer. Delta confirmed → commit `test: <behavior>`, status `done`, next item. Delta not confirmed → treat as `passing-flat`.
    - `passing-flat` → `git checkout -- .`, status `redundant`, next item.
    - `blocked` → status `blocked`, record the reason, **stop and escalate**.
 
@@ -1643,9 +1649,13 @@ python -m pytest -q --cov --cov-report=json:.tdd/coverage.json >/dev/null
 jq '[.files[].summary.missing_lines] | add' .tdd/coverage.json
 ```
 
-Expected: the second number exceeds the first by roughly 7 — over
-`greenMaxNewUncovered` of 2. Confirm the orchestrator's extraction produces the
-same delta by hand-running the comparison it performs.
+Expected: the second number exceeds the first by clearly more than
+`greenMaxNewUncovered` of 2. Do not hard-code an expected delta — `missing_lines`
+counts executable body lines only, and the `def` line runs at import so it is
+never missing. The exact figure depends on how coverage.py counts the branches;
+what matters is that the delta is unambiguously above the threshold. Confirm the
+orchestrator's extraction produces the same delta by hand-running the comparison
+it performs.
 
 **This step exists to catch a silent parser failure.** Reading uncovered lines
 out of a coverage report is the most toolchain-specific piece of the design. An
