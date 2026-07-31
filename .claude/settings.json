@@ -1,0 +1,39 @@
+{
+  "model":                  "claude-opus-5",
+  "advisorModel":           "claude-opus-5",
+  "effortLevel":            "xhigh",
+  "askUserQuestionTimeout": "never",
+  "attribution":            { "commit": "", "pr": "", "sessionUrl": false },
+  "availableModels":        [ "haiku", "claude-sonnet-5", "claude-opus-5", "claude-fable-5" ],
+  "outputStyle":            "Brief",
+  "plansDirectory":         "./.claude/plans",
+  "workflowSizeGuideline":  "small",
+  "worktree":               { "baseRef": "head" },
+
+  "agentPushNotifEnabled":      true,
+  "alwaysThinkingEnabled":      true,
+  "autoCompactEnabled":         true,
+  "autoMemoryEnabled":          true,
+  "autoScrollEnabled":          true,
+  "awaySummaryEnabled":         true,
+  "enableAllProjectMcpServers": true,
+  "inputNeededNotifEnabled":    true,
+  "remoteControlAtStartup":     true,
+  "respectGitignore":           true,
+  "showTurnDuration":           true,
+  "spinnerTipsEnabled":         false,
+  "useAutoModeDuringPlan":      true,
+  "workflows":                  true,
+
+  "env": {
+    "CLAUDE_CODE_ENABLE_AUTO_MODE": "1",
+    "CLAUDE_CODE_SUBAGENT_MODEL":   "claude-sonnet-5",
+    "ENABLE_LSP_TOOL":              "1",
+    "ENABLE_TOOL_SEARCH":           "auto"
+  },
+
+  "enabledPlugins": {
+    "remember@claude-plugins-official":    true,
+    "superpowers@claude-plugins-official": true
+  }
+}
