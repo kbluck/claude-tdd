@@ -2078,8 +2078,13 @@ and record `reverted`, regardless of what the agent reported. New uncovered
 lines mean new behavior, and Refactor adding behavior is a boundary violation,
 not a quality issue. There is no re-dispatch — reverting is the correct outcome.
 
-`improved` and gate passed → commit `refactor: <behavior>`. `reverted` or
-`blocked` → record it and continue; a failed refactor is not a failed cycle.
+Branch on all four outcomes:
+
+- `improved` and the gate passed → commit `refactor: <behavior>`.
+- `no-change-needed` → commit nothing, record it, continue. This is a good outcome, not a failure; the trigger fired and the agent judged there was nothing worth doing.
+- `reverted` or `blocked` → record it and continue. A failed refactor is not a failed cycle.
+
+**On `reverted`, verify the tree rather than trusting the report.** Refactor restores by rewriting recorded text with `Edit`/`Write`, not `git checkout`, so an imperfect restore is possible and the coverage gate would not catch one whose uncovered-line count happened to match. Require `git diff HEAD` to be empty; if it is not, `git reset --hard HEAD` yourself and record that the agent's restore was incomplete.
 
 Then status `done`, next item.
 
@@ -2092,17 +2097,19 @@ Coverage gates prove code was executed. They cannot prove any test would notice
 if that code were wrong. This pass finds the tests that execute without
 asserting.
 
-1. Compute CRAP for every method and rank descending. Dispatch **`tdd-mutate`** with the ranked target list, `limits.mutantsPerPass`, and the mutation command if one is configured.
-3. On return, **verify the tree is clean**: `git status --porcelain` must be empty and `git diff HEAD` must be empty. Not clean → `git reset --hard HEAD`, record it, and do not trust the report — an agent that failed to revert may also have failed to run the suite honestly between mutants.
-4. Re-run the full suite. It must be green.
-5. For each survivor, append a checklist item:
+1. Compute CRAP for every method and rank descending.
+2. **Verify the tree is clean before dispatching**: `git status --porcelain` and `git diff HEAD` must both be empty. `tdd-mutate`'s prompt tells it you have already done this, and it skips its own check on that basis — so if you skip it too, nobody checks. A mutate run started on a dirty tree cannot distinguish its own mutations from pre-existing edits, and its restore step would silently revert your work along with its own. Dirty → stop and report; do not dispatch.
+3. Dispatch **`tdd-mutate`** with the ranked target list, `limits.mutantsPerPass`, and the mutation command if one is configured.
+4. On return, **verify the tree is clean**: `git status --porcelain` must be empty and `git diff HEAD` must be empty. Not clean → `git reset --hard HEAD`, record it, and do not trust the report — an agent that failed to revert may also have failed to run the suite honestly between mutants.
+5. Re-run the full suite. It must be green.
+6. For each survivor, append a checklist item:
 
        { "id": <next>, "behavior": "<the survivor's missingBehavior>",
          "status": "pending", "origin": "mutation",
          "mutant": { "file": ..., "line": ..., "mutation": ... } }
 
-6. Survivors found → report the count and **resume the per-item loop**. The new items run as ordinary Red→Green cycles.
-7. No survivors, or `limits.mutationRounds` reached → done.
+7. Survivors found → report the count and **resume the per-item loop**. The new items run as ordinary Red→Green cycles.
+8. No survivors, or `limits.mutationRounds` reached → done.
 
 If the pass skipped mutants because of `mutantsPerPass`, say how many. A capped
 pass that reports "no survivors" without mentioning the cap reads as a clean
