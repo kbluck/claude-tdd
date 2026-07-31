@@ -1,0 +1,251 @@
+################################################################################
+# A gitignore file specifies intentionally untracked files that Git shouldn't  #
+# track by default. Each line in a gitignore file specifies a regex pattern.   #
+# Any file with path and name matching the pattern is not tracked by default.  #
+# You can still manually add and track files that match an ignore pattern, but #
+# it is better to add a negative match for those using the ! operator.         #
+#                                                                              #
+# We generally add sets of patterns in sections according to the kinds of junk #
+# created by different language tools, IDEs, editors, and operating systems.   #
+# There is a Github repository with a collection of gitignore templates that   #
+# provide a useful starting point to assemble these sections:                  #
+# https://github.com/github/gitignore                                          #
+#                                                                              #
+# Full documentation about gitignore: https://git-scm.com/docs/gitignore       #
+################################################################################
+
+################################################################################
+###                                 Project                                  ###
+################################################################################
+
+.mcp.json
+.superpowers/
+.tdd/checklist.json
+.tdd/config.json
+mutants/
+
+################################################################################
+###                             Node/JavaScript                              ###
+################################################################################
+
+# Dependencies
+node_modules/
+jspm_packages/
+
+# Caches
+.eslintcache
+.node_repl_history
+.npm
+.stylelintcache
+
+# Diagnostic reports (https://nodejs.org/api/report.html)
+report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
+
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+
+# Runtime data
+pids
+*.pid
+*.seed
+*.pid.lock
+
+################################################################################
+###                                  Python                                  ###
+################################################################################
+
+# Environments
+.env
+.envrc
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Sphinx documentation
+docs/_build/
+
+# Unit test / coverage reports
+.hypothesis/
+.coverage
+.coverage.*
+coverage.json
+coverage.xml
+cover/
+*.cover
+*.py.cover
+*.lcov
+htmlcov/
+nosetests.xml
+
+# Caches and compiled artifacts
+__pycache__/
+*.pyc
+*$py.class
+.pytest_cache/
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+################################################################################
+###                                JetBrains                                 ###
+################################################################################
+
+# Covers JetBrains IDEs: Android Studio, AppCode, CLion, DataGrip, GoLand,
+# IntelliJ, PhpStorm, PyCharm, Rider, RubyMine, and WebStorm.
+# https://intellij-support.jetbrains.com/hc/en-us/articles/206544839
+
+# User-specific files
+.idea/**/aws.xml
+.idea/**/dictionaries/*
+!.idea/**/dictionaries/project.xml
+.idea/**/queries
+.idea/**/shelf
+.idea/**/tasks.xml
+.idea/**/usage.statistics.xml
+
+# Sensitive or high-churn files
+.idea/**/*.iml
+.idea/**/contentModel.xml
+.idea/**/dataSources/
+.idea/**/dataSources.ids
+.idea/**/dataSources.local.xml
+.idea/**/dbnavigator.xml
+.idea/**/dynamic.xml
+.idea/**/projectSettingsUpdater.xml
+.idea/**/modules.xml
+.idea/**/sqlDataSources.xml
+.idea/**/uiDesigner.xml
+.idea/**/workspace.xml
+
+# Editor-based HTTP Client requests
+.idea/**/httpRequests
+.idea/**/http-client.private.env.json
+
+# Github Copilot persisted session migrations
+.idea/**/copilot.data.migration.*.xml
+
+# JIRA plugin
+.idea/**/atlassian-ide-plugin.xml
+
+# SonarLint plugin
+.idea/**/sonarlint/
+.idea/**/sonarlint.xml
+
+################################################################################
+###                            Visual Studio Code                            ###
+################################################################################
+
+# Project configuration
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+!.vscode/*.code-snippets
+!*.code-workspace
+
+# Built Visual Studio Code Extensions
+*.vsix
+
+################################################################################
+###                                  Linux                                   ###
+################################################################################
+
+# Temporary files which can be created if a process still has a handle open
+# of a deleted file
+.fuse_hidden*
+
+# Trash folder which might appear on any partition or disk
+.Trash-*
+
+# .nfs files are created when an open file is removed but is still
+# being accessed
+.nfs*
+
+# Log files created by default by the nohup command
+nohup.out
+
+################################################################################
+###                                  macOS                                   ###
+################################################################################
+
+# General
+~$*
+*~
+._*
+.DS_Store
+__MACOSX/
+.AppleDouble
+.LSOverride
+Icon*
+
+# Files that might appear in the root of a volume
+.DocumentRevisions*
+.fseventsd
+.Spotlight*
+.TemporaryItems
+.Trashes
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+
+# Directories potentially created on remote AFP share
+.AppleDB
+.AppleDesktop
+Network Trash Folder
+Temporary Items
+.apdisk
+
+################################################################################
+###                                 Windows                                  ###
+################################################################################
+
+# Thumbnail cache files
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+
+# Folder config file
+[Dd]esktop.ini
+
+# Shortcut files
+*.lnk
+
+# Recycle Bin used on file shares
+$RECYCLE.BIN/
+
+# Dump files
+*.stackdump
+
+# Installer files
+*.cab
+*.msi
+*.msix
+*.msm
+*.msp

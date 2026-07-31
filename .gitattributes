@@ -1,0 +1,55 @@
+################################################################################
+# Defines attributes for pathnames in a Git repository. Each line in the file  #
+# consists of a pattern followed by a list of attributes, separated by space.  #
+# These attributes can control various aspects of how Git handles files, such  #
+# as end-of-line normalization, diff generation, and merge behavior.           #
+#                                                                              #
+# Full documentation about gitattributes:                                      #
+# https://git-scm.com/docs/gitattributes                                       #
+#                                                                              #
+# Reminder of line ending conventions:                                         #
+# Linux and modern MacOS: LF   "\n"   [ASCII code 10]                          #
+# Windows:                CRLF "\r\n" [ASCII codes 13 + 10]                    #
+# Classic MacOS: (Rare)   CR   "\r"   [ASCII code 13]                          #
+################################################################################
+
+# Set default behavior to normalize general text file line endings to LF.
+* text=auto eol=lf
+
+# Force Linux/MacOS shell scripts to always use LF line endings. Redundant with
+# default text handling, but worthwhile so that if a repo is accessed in Linux
+# or Mac via a file share from Windows, the scripts should still work.
+# *.bash
+*.[bB][aA][sS][hH]                 text eol=lf
+# *.csh
+*.[cC][sS][hH]                     text eol=lf
+# *.ksh
+*.[kK][sS][hH]                     text eol=lf
+# *.sh
+*.[sS][hH]                         text eol=lf
+# *.tcsh
+*.[tT][cC][sS][hH]                 text eol=lf
+# *.zsh
+*.[zZ][sS][hH]                     text eol=lf
+
+# Set Windows batch/command scripts to always use CRLF line endings.
+# *.bat
+*.[bB][aA][tT]                     text eol=crlf
+# *.cmd
+*.[cC][mM][dD]                     text eol=crlf
+
+# Set Windows Powershell scripts to always use CRLF line endings.
+# .cdxml
+*.[cC][dD][xX][mM][lL]             text eol=crlf
+# .ps1
+*.[pP][sS]1                        text eol=crlf
+# .psm1
+*.[pP][sS][mM]1                    text eol=crlf
+# .psd1
+*.[pP][sS][dD]1                    text eol=crlf
+# .ps1xml
+*.[pP][sS]1[xX][mM][lL]            text eol=crlf
+# .psrc
+*.[pP][sS][rR][cC]                 text eol=crlf
+# .pssc
+*.[pP][sS][sS][cC]                 text eol=crlf
