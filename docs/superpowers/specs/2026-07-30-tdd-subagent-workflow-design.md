@@ -51,7 +51,8 @@ claude-tdd/
 ├── agents/
 │   ├── tdd-red.md
 │   ├── tdd-green.md
-│   └── tdd-refactor.md
+│   ├── tdd-refactor.md
+│   └── tdd-mutate.md
 ├── commands/
 │   ├── tdd.md               /tdd <spec-path>
 │   └── tdd-init.md          /tdd-init
@@ -60,31 +61,32 @@ claude-tdd/
 │       └── SKILL.md         orchestrator loop
 └── hooks/
     ├── hooks.json           PreToolUse matcher
-    └── guard.sh             phase-aware path guard
+    └── guard.sh             role-aware path and command guard
 ```
 
 Each part has one job:
 
 - **`skills/run-tdd-cycle`** holds the loop. `/tdd` is a thin entry point that invokes it, so the loop is also reachable by the model recognizing it applies.
 - **`agents/*.md`** are pure role definitions — constraints and stop conditions, no orchestration logic.
-- **`hooks/guard.sh`** is the only executable and is stateless: read `.tdd/phase` and `.tdd/config.json`, decide, exit.
+- **`hooks/guard.sh`** is the only executable and is stateless: read `agent_type` from the payload and `.tdd/config.json` from disk, decide, exit.
 - **`.tdd/`** lives in the target project, not the plugin.
 
 ### State
 
 | Path | Committed | Purpose |
 |---|---|---|
-| `.tdd/config.json` | yes | toolchain commands, path globs, refactor thresholds |
+| `.tdd/config.json` | yes | toolchain commands, path globs, thresholds |
 | `.tdd/checklist.json` | no | run state; enables resume |
-| `.tdd/phase` | no | current phase, read by the hook |
 
 Run state is separated from config so an interrupted `/tdd` resumes from disk, and so the completion signal survives context compaction.
+
+There is no phase marker. The hook learns the caller's role from the payload's `agent_type`, so nothing needs to be written before a dispatch and nothing can go stale.
 
 ## The Cycle
 
 ### Preflight
 
-`/tdd <spec-path>` refuses to start unless all four hold. Each is a precondition some later step silently depends on.
+`/tdd <spec-path>` refuses to start unless all seven hold. Each is a precondition some later step silently depends on.
 
 1. **Target is a git repo with a clean tree.** The audit's revert is `git reset --hard`, which would destroy uncommitted work.
 2. **`.tdd/config.json` exists**, else run `/tdd-init` first.
@@ -93,8 +95,7 @@ Run state is separated from config so an interrupted `/tdd` resumes from disk, a
 
 5. **The glob partition is still exhaustive** — `git ls-files` produces no file matching neither `test`, `source`, nor `ignore`. Catches drift from edits made between runs. See *Writes are an allowlist; reads are a denylist* below for why this is load-bearing.
 6. **`jq` is on `PATH`** — `guard.sh` parses its stdin with it.
-
-Preflight also clears any stale `.tdd/phase` left by an interrupted run, so the hook never evaluates against a phase from a previous session.
+7. **The guard sees `agent_type`** — dispatch a trivial probe subagent and confirm the hook observed a non-empty `agent_type`. If it did not, the guard silently permits everything a subagent does; stop rather than run unenforced. This is the one check that verifies the enforcement mechanism itself is alive.
 
 ### Decompose
 
@@ -115,10 +116,10 @@ The orchestrator reads the spec once and writes an ordered checklist of test-siz
 ### Per item
 
 ```
-write .tdd/phase = "red"  →  dispatch tdd-red
+dispatch tdd-red
   │
   ├─ test FAILS ─────────────→ commit "red: <behavior>"
-  │                            audit → phase = "green" → dispatch tdd-green
+  │                            audit → dispatch tdd-green
   │                            test passes → commit "green: <behavior>" → audit
   │                            → refactor trigger check
   │
@@ -169,9 +170,9 @@ Guardrails are enforced twice, at different surfaces.
 | **Red** | spec, existing test files, runner output | test globs only | configured test + coverage commands |
 | **Green** | Red's handover report, source files, runner output | source globs only | configured single-test + coverage commands |
 | **Refactor** | source files, runner output | source globs only | configured full-suite + coverage + complexity commands |
-| **Refactor (mutation phase)** | source files, runner output | source globs only — every write must be reverted before handover | full-suite + mutation commands |
+| **Mutate** (`tdd-mutate`) | source files, runner output | source globs only — every write must be reverted before handover | full-suite + mutation commands |
 
-**Writes are an allowlist; reads are a denylist.** A write must *match* the phase's permitted globs; a read must merely *not match* the forbidden ones. The asymmetry is deliberate — agents legitimately read `README.md`, `pyproject.toml`, and type stubs, and an allowlist would fight them on every call.
+**Writes are an allowlist; reads are a denylist.** A write must *match* the role's permitted globs; a read must merely *not match* the forbidden ones. The asymmetry is deliberate — agents legitimately read `README.md`, `pyproject.toml`, and type stubs, and an allowlist would fight them on every call.
 
 But it means the read rule fails *open*: if `globs.source` is incomplete, a source file that matches nothing is readable by Red, and read isolation quietly disappears. Since globs come from auto-detection, this is a live risk — `src/**` misses a root-level package, a Go repo with source at the root, or a monorepo's second module.
 
@@ -185,11 +186,26 @@ The invariant is self-reinforcing once established: new files can only be create
 
 The diff audit can only observe writes. Read isolation — the property that actually makes Green's implementation independent of the test's internals — leaves no post-hoc signature. The hook is the only mechanism that can enforce it.
 
-**Hook** — `PreToolUse`, matching `Read|Write|Edit|Bash`. Reads `.tdd/phase` and `.tdd/config.json`, resolves the target path against the phase's allowed globs, denies on mismatch with a message naming the violated rule. Sole enforcement of read isolation. Safe against concurrency because the cycle is strictly sequential.
+**Hook** — `PreToolUse`, matching `Read|Write|Edit|Bash`. It identifies the caller from the payload's **`agent_type`** field, resolves the target path against that role's allowed globs, and denies on mismatch with a message naming the violated rule. Sole enforcement of read isolation.
 
-**The hook fails closed.** If `jq` is missing, `.tdd/config.json` is unreadable, or `.tdd/phase` names an unknown phase, `guard.sh` denies. A guard that cannot evaluate must not default to permitting — that would disable read isolation silently, which is the exact failure this design is built to prevent. Failing closed instead breaks the run loudly on the first tool call. `/tdd-init` and preflight both check `jq` so the loud failure lands at setup, not mid-cycle.
+```
+agent_type absent                        → permit   (main thread / orchestrator)
+agent_type not a tdd-* role              → permit   (unrelated work)
+tdd-red | tdd-green | tdd-refactor
+        | tdd-mutate                     → apply that role's rules
+```
 
-**Audit** — after each dispatch, `git diff HEAD~1 --name-only`, re-checking the write set against the phase's globs. Backstop for anything the hook missed: hook disabled, stale phase marker, an unanticipated mutation path.
+**Why `agent_type` and not a phase-marker file.** An earlier draft had the orchestrator write `.tdd/phase` before each dispatch. That design is broken, and the spike (`docs/superpowers/spikes/2026-07-30-hook-in-subagent.md`) showed why: during the red phase the orchestrator itself runs `git diff --name-only` to audit Red's work. A marker-based guard would judge that main-thread call against Red's Bash allowlist, find `git diff` does not prefix-match the test command, and **deny the orchestrator's own audit.** A marker file cannot distinguish orchestrator from agent. `agent_type` can, and is the only thing that can.
+
+Dropping the marker also removes the stale-marker failure mode and the strictly-sequential constraint, which existed only because one global file cannot describe two concurrent cycles.
+
+**The hook fails closed — but only once it knows the caller is a constrained role.** For a recognized `tdd-*` agent, a missing `jq`, an unreadable `.tdd/config.json`, or an unmappable role all deny. A guard that cannot evaluate must not default to permitting; that would disable read isolation silently, which is the exact failure this design exists to prevent. `/tdd-init` and preflight both check `jq` so the loud failure lands at setup rather than mid-cycle.
+
+Before that point the guard exits 0 without reading anything, so installing this plugin does not perturb unrelated sessions.
+
+**Residual risk: `agent_type` is undocumented.** It is absent from `plugin-dev/skills/hook-development/SKILL.md` and was found empirically on Claude Code 2.1.220. If a future version removed it, every subagent call would look like a main-thread call and the guard would fail **open** — the worst outcome available here, since reads leave no trace in a diff and nothing else would notice. Preflight therefore dispatches a trivial probe subagent and confirms the guard observed an `agent_type`, refusing to run if not. A startup check, not a per-call one.
+
+**Audit** — after each dispatch, `git diff HEAD~1 --name-only`, re-checking the write set against the role's globs. Backstop for anything the hook missed: hook disabled, `agent_type` unavailable, an unanticipated mutation path.
 
 ### Bash: allowlist, not mutation-detection
 
@@ -254,9 +270,11 @@ This is the right trigger for this workflow specifically, because it is the inte
 
 Coverage proves a line *ran*. It does not prove any test would notice if that line were wrong — a test that executes code without asserting on its result yields full coverage and zero protection. Mutation testing closes that gap: perturb the source, re-run the suite, and see whether anything fails. A mutant that survives is proof of a test that does not actually test.
 
-**Why Refactor runs it, and why that does not break its contract.**
+**Why this belongs to the Refactor family, and why it is a separate agent.**
 
-Refactor is the only role that can write source *and* is categorically forbidden from keeping a behavior change. Red cannot touch source; Green has no reason to revert its own work. Mutation is mutate → observe → revert, and Refactor is the only role whose boundaries make that natural. Its handover contract — interfaces unchanged, suite passing — holds because every mutation is reverted before it reports.
+Refactor is the only role that can write source *and* is categorically forbidden from keeping a behavior change. Red cannot touch source; Green has no reason to revert its own work. Mutation is mutate → observe → revert, and only Refactor's boundaries make that natural.
+
+It ships as a **separate agent, `tdd-mutate`**, rather than a mode flag on `tdd-refactor`. Since the guard identifies callers by `agent_type`, a distinct agent gets a distinct rule set for free — `tdd-mutate` needs the mutation command in its Bash allowlist and `tdd-refactor` needs the complexity command, and neither should have the other's. A mode flag would force both to share the union, widening each role beyond what it needs.
 
 **Refactor detects; it never fixes.** A surviving mutant is a *test* defect, and Refactor may not read or write tests. It reports the survivor and stops.
 
@@ -335,7 +353,7 @@ Green's gate cannot be zero. Legitimate cases exist: satisfying a divide-by-zero
 
 Data-driven, so supporting a new toolchain is a table row rather than new code.
 
-`.tdd/phase` and `.tdd/checklist.json` are added to `.gitignore`.
+`.tdd/checklist.json` and `.tdd/coverage.json` are added to `.gitignore`.
 
 **`/tdd-init` commits its own output.** It writes `.tdd/config.json` and edits `.gitignore`, which leaves the tree dirty — and preflight step 1 refuses to start against a dirty tree. Without this, the first-time path (`/tdd-init` then `/tdd`) fails on its own side effects.
 
@@ -352,14 +370,17 @@ Data-driven, so supporting a new toolchain is a table row rather than new code.
 
 ## Risks
 
-Two unverified assumptions sit under the enforcement design. Both are cheap to test and expensive to discover late.
+**Resolved by the spike** (`docs/superpowers/spikes/2026-07-30-hook-in-subagent.md`, Claude Code 2.1.220):
 
-1. **Do plugin `PreToolUse` hooks fire for tool calls made inside a subagent?** Not confirmable from local documentation. If they do not, the hook is inert, read isolation has no enforcement mechanism, and the audit cannot substitute — it cannot observe reads. This would require rework, not patching.
+1. ~~Do plugin `PreToolUse` hooks fire inside a subagent?~~ **Yes.** Verified against a real plugin-format hook, not a settings.json proxy.
+2. ~~Is a denial correctable or fatal?~~ **Correctable.** The subagent received the `systemMessage` verbatim and continued working.
+3. ~~The payload carries no agent identity.~~ **False** — it carries `agent_type` and `agent_id`; the `plugin-dev` documentation is incomplete. This removed the phase marker and fixed the orchestrator-audit bug described under *Enforcement*.
 
-   The spike must install a stub plugin and exercise `hooks/hooks.json` + `${CLAUDE_PLUGIN_ROOT}`. A hook registered through `.claude/settings.json` loads by a different path and format, so settings-format success would not prove the plugin-format case.
-2. **Does a hook denial reach the subagent as a correctable message, or does it fail the agent outright?** Determines whether "deny and let it self-correct" is real or whether every denial costs a full re-dispatch.
+**Open:**
 
-A third, lower risk: the `PreToolUse` payload carries no agent identity (confirmed against `plugin-dev/skills/hook-development/SKILL.md`), which is why the phase marker file exists. The marker can go stale if a run is interrupted mid-phase; preflight must clear it.
+1. **Does a plugin's own custom agent report its own name in `agent_type`?** The spike dispatched the built-in `general-purpose` and got `"general-purpose"` back. The guard's dispatch table assumes `tdd-red` yields `agent_type: "tdd-red"`. Plausible but untested, and load-bearing — if custom agents report something else, every rule lookup misses and the guard permits everything. Verify when the agent definitions land, before they are considered done.
+2. **`agent_type` is undocumented and could change.** Mitigated by the preflight probe (*Preflight*, item 7), which fails the run loudly rather than proceeding unenforced.
+3. **Coverage and complexity report parsing is toolchain-specific** and is now the largest remaining source of silent failure. An extractor returning `0` on a shape it does not recognize would disable all three coverage gates and the CRAP trigger while every other check still passes.
 
 ## Build Order
 
