@@ -32,11 +32,12 @@
 | `.claude-plugin/plugin.json` | manifest: name, version, description, author, license |
 | `.claude-plugin/marketplace.json` | single-plugin marketplace for distribution |
 | `hooks/lib/rules.sh` | **pure** decision functions; no I/O, no globals. Sourced by guard and tests. |
-| `hooks/guard.sh` | I/O shell: read stdin JSON, load state, call rules, emit decision |
+| `hooks/guard.sh` | I/O shell: read stdin JSON, map `agent_type` to a role, call rules, emit decision |
 | `hooks/hooks.json` | registers `guard.sh` on `PreToolUse` for `Read\|Write\|Edit\|Bash` |
 | `agents/tdd-red.md` | Red role definition + handover schema |
 | `agents/tdd-green.md` | Green role definition |
-| `agents/tdd-refactor.md` | Refactor role definition, plus its mutation mode |
+| `agents/tdd-refactor.md` | Refactor role definition |
+| `agents/tdd-mutate.md` | Mutation probe role; separate `agent_type` gives it a separate allowlist |
 | `commands/tdd-init.md` | detect toolchain, verify partition, write + commit config |
 | `commands/tdd.md` | thin entry point invoking the orchestrator skill |
 | `skills/run-tdd-cycle/SKILL.md` | preflight, decompose, per-item loop, audit, triggers |
@@ -329,7 +330,7 @@ The phase × mode × path matrix. Pure functions, no I/O.
 
 *Glob semantics.* Inside `[[ ]]`, an unquoted pattern's `*` matches `/` as well as any other character — unlike shell filename globbing. So `tests/*` already matches `tests/a/b.py`. Config files write `tests/**` for readability; normalize `**` to `*` before matching. Write the substitution as `${1//\*\*/*}` — in `${var//pattern/replacement}` the replacement half is *not* a pattern, so writing `\*` there can leave a literal backslash on some Bash versions.
 
-*Why writes are an allowlist and reads a denylist.* A write must match the phase's permitted globs. A read must merely not match the forbidden ones, because agents legitimately read `README.md`, `pyproject.toml`, and type stubs, and an allowlist would fight them constantly. This is only sound because `/tdd-init` (Task 7) proves the test/source/ignore globs partition every tracked file — otherwise an unclassified source file would be readable by Red.
+*Why writes are an allowlist and reads a denylist.* A write must match the role's permitted globs. A read must merely not match the forbidden ones, because agents legitimately read `README.md`, `pyproject.toml`, and type stubs, and an allowlist would fight them constantly. This is only sound because `/tdd-init` (Task 7) proves the test/source/ignore globs partition every tracked file — otherwise an unclassified source file would be readable by Red.
 
 *The matrix:*
 
@@ -345,10 +346,13 @@ The phase × mode × path matrix. Pure functions, no I/O.
 | `mutation` | `read` | deny iff matches test globs |
 | anything else | any | deny — fail closed |
 
-`mutation` shares Refactor's path rules. Its distinguishing rule — every write
-must be reverted before handover — is a *temporal* property the guard cannot
-see from a single tool call. The orchestrator enforces it with a diff check
-after the dispatch returns.
+`mutation` (agent `tdd-mutate`) shares Refactor's path rules. Its distinguishing
+rule — every write must be reverted before handover — is a *temporal* property
+the guard cannot see from a single tool call. The orchestrator enforces it with a
+diff check after the dispatch returns.
+
+Role names here are the guard's internal vocabulary; `guard.sh` maps
+`agent_type` (`tdd-red`, `tdd-green`, `tdd-refactor`, `tdd-mutate`) onto them.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -626,13 +630,24 @@ Wires the rules to Claude Code's hook protocol.
 
 **Design notes:**
 
-`guard.sh` reads `TDD_PROJECT_DIR` if set (tests use it), else `CLAUDE_PROJECT_DIR`, else `cwd` from the payload. State lives at `$root/.tdd/phase` and `$root/.tdd/config.json`.
+`guard.sh` reads `TDD_PROJECT_DIR` if set (tests use it), else `CLAUDE_PROJECT_DIR`, else `cwd` from the payload. Config lives at `$root/.tdd/config.json`. There is no phase file.
 
-**No phase file means the workflow is not running.** Exit 0 and permit — the hook must be inert during ordinary sessions, or installing this plugin would break every unrelated task. This is the one place the guard does not fail closed, and it is safe because absence of the marker is unambiguous: no cycle is in progress.
+**The caller is identified by the payload's `agent_type`** — verified empirically in Task 1's spike (`docs/superpowers/spikes/2026-07-30-hook-in-subagent.md`):
 
-Once a phase file *does* exist, every other failure denies.
+```
+agent_type absent            → exit 0   main thread / orchestrator
+agent_type not a tdd-* role  → exit 0   unrelated subagent
+tdd-red                      → role red
+tdd-green                    → role green
+tdd-refactor                 → role refactor
+tdd-mutate                   → role mutation
+```
 
-Tool → mode mapping: `Read` → `read`; `Write`, `Edit` → `write`; `Bash` → allowlist check. Any other tool → permit (the matcher should not deliver them, but defensive).
+**Why identity and not a marker file.** The orchestrator runs `git diff --name-only` from the main thread to audit each dispatch. A phase-marker guard would judge that call against the current role's Bash allowlist and deny the orchestrator's own audit. A file cannot distinguish orchestrator from agent; `agent_type` can.
+
+**The two early exits are the only places the guard permits without evaluating**, and both are unambiguous — no `agent_type` means no constrained agent is calling. Everything after them fails closed.
+
+Tool → mode mapping: `Read` → `read`; `Write`, `Edit` → `write`; `Bash` → allowlist check. Any other tool → permit (the matcher should not deliver them; defensive).
 
 Paths from the payload are absolute; strip the `$root/` prefix before matching, since globs are repo-relative.
 
@@ -672,87 +687,113 @@ SANDBOX="$(mktemp -d)"
 mkdir -p "$SANDBOX/.tdd"
 cp "$REPO_ROOT/tests/fixtures/config.json" "$SANDBOX/.tdd/config.json"
 
-# run_guard <phase-or-empty> <payload-json> ; echoes "<exit>|<stderr>"
+# AGENT is the payload's agent_type. Empty means a main-thread call, which
+# omits the key entirely -- matching what the spike observed.
+AGENT=""
+
+payload() { # <tool> <key> <value>
+  if [ -n "$AGENT" ]; then
+    printf '{"hook_event_name":"PreToolUse","agent_id":"a123","agent_type":"%s","tool_name":"%s","tool_input":{"%s":"%s"}}' \
+      "$AGENT" "$1" "$2" "$3"
+  else
+    printf '{"hook_event_name":"PreToolUse","tool_name":"%s","tool_input":{"%s":"%s"}}' "$1" "$2" "$3"
+  fi
+}
+payload_read()  { payload Read  file_path "$1"; }
+payload_write() { payload Write file_path "$1"; }
+payload_bash()  { payload Bash  command   "$1"; }
+
+# run_guard <agent_type-or-empty> <payload-fn> <arg> ; echoes "<exit>|<stderr>"
 run_guard() {
-  if [ -n "$1" ]; then printf '%s' "$1" > "$SANDBOX/.tdd/phase"
-  else rm -f "$SANDBOX/.tdd/phase"; fi
-  local err rc
-  err=$(printf '%s' "$2" | TDD_PROJECT_DIR="$SANDBOX" bash "$GUARD" 2>&1 >/dev/null)
+  AGENT="$1"
+  local body err rc
+  body=$("$2" "$3")
+  err=$(printf '%s' "$body" | TDD_PROJECT_DIR="$SANDBOX" bash "$GUARD" 2>&1 >/dev/null)
   rc=$?
   printf '%s|%s' "$rc" "$err"
 }
 
-payload_read() { printf '{"hook_event_name":"PreToolUse","tool_name":"Read","tool_input":{"file_path":"%s"}}' "$1"; }
-payload_write() { printf '{"hook_event_name":"PreToolUse","tool_name":"Write","tool_input":{"file_path":"%s"}}' "$1"; }
-payload_bash() { printf '{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"%s"}}' "$1"; }
+# --- inert unless a constrained agent is calling ---
+out=$(run_guard "" payload_write "$SANDBOX/src/a.py")
+assert_eq "0|" "$out" "main thread (no agent_type): permits silently"
 
-# inert when no cycle is running
-out=$(run_guard "" "$(payload_write "$SANDBOX/src/a.py")")
-assert_eq "0|" "$out" "no phase file: permits silently"
+out=$(run_guard "general-purpose" payload_write "$SANDBOX/src/a.py")
+assert_eq "0|" "$out" "unrelated agent type: permits silently"
+
+out=$(run_guard "" payload_read "$SANDBOX/tests/test_a.py")
+assert_eq "0|" "$out" "orchestrator may read tests"
+
+out=$(run_guard "" payload_bash "git diff --name-only")
+assert_eq "0|" "$out" "orchestrator may run its own audit command"
 
 # red
-out=$(run_guard red "$(payload_write "$SANDBOX/tests/test_a.py")")
+out=$(run_guard "tdd-red" payload_write "$SANDBOX/tests/test_a.py")
 assert_eq "0|" "$out" "red writing a test is permitted"
 
-out=$(run_guard red "$(payload_write "$SANDBOX/src/a.py")")
+out=$(run_guard "tdd-red" payload_write "$SANDBOX/src/a.py")
 assert_contains "2|" "$out" "red writing source exits 2"
 assert_contains "\"permissionDecision\":\"deny\"" "$out" "denial JSON has deny decision"
 assert_contains "only write test files" "$out" "denial names the violated rule"
 
-out=$(run_guard red "$(payload_read "$SANDBOX/src/a.py")")
+out=$(run_guard "tdd-red" payload_read "$SANDBOX/src/a.py")
 assert_contains "2|" "$out" "red reading source is denied"
 
 # green
-out=$(run_guard green "$(payload_read "$SANDBOX/tests/test_a.py")")
+out=$(run_guard "tdd-green" payload_read "$SANDBOX/tests/test_a.py")
 assert_contains "2|" "$out" "green reading a test is denied"
 
-out=$(run_guard green "$(payload_write "$SANDBOX/src/a.py")")
+out=$(run_guard "tdd-green" payload_write "$SANDBOX/src/a.py")
 assert_eq "0|" "$out" "green writing source is permitted"
 
 # bash
-out=$(run_guard green "$(payload_bash "pytest -q tests/test_a.py::test_x")")
+out=$(run_guard "tdd-green" payload_bash "pytest -q tests/test_a.py::test_x")
 assert_eq "0|" "$out" "green running the configured single-test command is permitted"
 
-out=$(run_guard green "$(payload_bash "rm -rf src")")
+out=$(run_guard "tdd-green" payload_bash "rm -rf src")
 assert_contains "2|" "$out" "green running an arbitrary command is denied"
 
-out=$(run_guard refactor "$(payload_bash "pytest -q")")
+out=$(run_guard "tdd-refactor" payload_bash "pytest -q")
 assert_eq "0|" "$out" "refactor running the full suite is permitted"
 
 # every role may measure its own coverage
 COV="pytest -q --cov --cov-report=json:.tdd/coverage.json"
-out=$(run_guard red "$(payload_bash "$COV")")
+out=$(run_guard "tdd-red" payload_bash "$COV")
 assert_eq "0|" "$out" "red may run the coverage command"
-out=$(run_guard green "$(payload_bash "$COV")")
+out=$(run_guard "tdd-green" payload_bash "$COV")
 assert_eq "0|" "$out" "green may run the coverage command"
-out=$(run_guard refactor "$(payload_bash "$COV")")
+out=$(run_guard "tdd-refactor" payload_bash "$COV")
 assert_eq "0|" "$out" "refactor may run the coverage command"
 
 # but the phase's own test command is still scoped
-out=$(run_guard green "$(payload_bash "pytest -q --cov; rm -rf src")")
+out=$(run_guard "tdd-green" payload_bash "pytest -q --cov; rm -rf src")
 assert_contains "2|" "$out" "metacharacters after a coverage prefix are still denied"
 
 # phase-scoped measurement commands
-out=$(run_guard refactor "$(payload_bash "radon cc -j -s src")")
+out=$(run_guard "tdd-refactor" payload_bash "radon cc -j -s src")
 assert_eq "0|" "$out" "refactor may run the complexity command"
-out=$(run_guard green "$(payload_bash "radon cc -j -s src")")
+out=$(run_guard "tdd-green" payload_bash "radon cc -j -s src")
 assert_contains "2|" "$out" "green may not run the complexity command"
 
-# mutation phase writes source like refactor does
-out=$(run_guard mutation "$(payload_write "$SANDBOX/src/a.py")")
-assert_eq "0|" "$out" "mutation phase may write source"
-out=$(run_guard mutation "$(payload_read "$SANDBOX/tests/test_a.py")")
-assert_contains "2|" "$out" "mutation phase may not read tests"
-out=$(run_guard mutation "$(payload_bash "pytest -q")")
-assert_eq "0|" "$out" "mutation phase may run the full suite"
+# tdd-mutate writes source like refactor does
+out=$(run_guard "tdd-mutate" payload_write "$SANDBOX/src/a.py")
+assert_eq "0|" "$out" "tdd-mutate may write source"
+out=$(run_guard "tdd-mutate" payload_read "$SANDBOX/tests/test_a.py")
+assert_contains "2|" "$out" "tdd-mutate may not read tests"
+out=$(run_guard "tdd-mutate" payload_bash "pytest -q")
+assert_eq "0|" "$out" "tdd-mutate may run the full suite"
 
-# fails closed on bad state
-out=$(run_guard bogus "$(payload_write "$SANDBOX/src/a.py")")
-assert_contains "2|" "$out" "unknown phase denies"
+# An agent this plugin does not own is none of our business, even if its
+# name happens to start with tdd-. Permitting is correct here; the guard
+# constrains exactly the four roles it defines and nothing else.
+out=$(run_guard "tdd-bogus" payload_write "$SANDBOX/src/a.py")
+assert_eq "0|" "$out" "unrecognized tdd-* agent permits"
 
+# --- fails closed once a role IS recognized ---
 mv "$SANDBOX/.tdd/config.json" "$SANDBOX/.tdd/config.json.bak"
-out=$(run_guard red "$(payload_write "$SANDBOX/tests/test_a.py")")
+out=$(run_guard "tdd-red" payload_write "$SANDBOX/tests/test_a.py")
 assert_contains "2|" "$out" "missing config denies even for an otherwise-legal write"
+out=$(run_guard "" payload_write "$SANDBOX/src/a.py")
+assert_eq "0|" "$out" "missing config still permits the main thread"
 mv "$SANDBOX/.tdd/config.json.bak" "$SANDBOX/.tdd/config.json"
 
 rm -rf "$SANDBOX"
@@ -771,10 +812,12 @@ Expected: FAIL — `hooks/guard.sh: No such file or directory`
 #!/usr/bin/env bash
 # PreToolUse guard for the TDD subagent workflow.
 #
-# Permits silently when no cycle is running (no .tdd/phase). Once a cycle
-# IS running, any condition it cannot evaluate results in denial: a guard
-# that fails open would silently disable read isolation, which is the one
-# property nothing else in the design can enforce.
+# Identifies the caller from the payload's agent_type. Main-thread calls
+# carry no agent_type and are permitted untouched, so installing this
+# plugin does not perturb unrelated sessions. Once a constrained tdd-*
+# agent IS identified, any condition the guard cannot evaluate denies: a
+# guard that fails open would silently disable read isolation, the one
+# property nothing else in this design can enforce.
 set -uo pipefail
 
 deny() {
@@ -785,22 +828,38 @@ deny() {
 
 input=$(cat)
 
-root="${TDD_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-}}"
-if [ -z "$root" ]; then
-  root=$(printf '%s' "$input" | jq -r '.cwd // empty' 2>/dev/null) || root=""
+# jq is needed even to read agent_type. Absent jq, we cannot tell whether
+# the caller is constrained — so we cannot safely permit or usefully deny
+# every call in the session. Deny only once we know a tdd-* agent is
+# calling; use a cheap grep to make that determination without jq.
+if ! command -v jq >/dev/null 2>&1; then
+  case "$input" in
+    *'"agent_type":"tdd-'*)
+      deny "tdd guard: jq is not on PATH; cannot evaluate tool calls safely. Run /tdd-init." ;;
+    *) exit 0 ;;
+  esac
 fi
-[ -n "$root" ] || exit 0   # nothing to resolve against; not our business
 
-phase_file="$root/.tdd/phase"
-[ -f "$phase_file" ] || exit 0   # no cycle running — stay inert
+agent=$(printf '%s' "$input" | jq -r '.agent_type // empty')
+[ -n "$agent" ] || exit 0        # main thread / orchestrator — never constrained
+
+case "$agent" in
+  tdd-red)      role=red ;;
+  tdd-green)    role=green ;;
+  tdd-refactor) role=refactor ;;
+  tdd-mutate)   role=mutation ;;
+  *) exit 0 ;;                   # some other agent's work — not ours
+esac
 
 # From here on, every failure denies.
-command -v jq >/dev/null 2>&1 || deny "tdd guard: jq is not on PATH; cannot evaluate tool calls safely"
+root="${TDD_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-}}"
+if [ -z "$root" ]; then
+  root=$(printf '%s' "$input" | jq -r '.cwd // empty')
+fi
+[ -n "$root" ] || deny "tdd guard: cannot determine the project root for ${agent}"
 
 config="$root/.tdd/config.json"
 [ -f "$config" ] || deny "tdd guard: .tdd/config.json is missing; run /tdd-init"
-
-phase=$(tr -d '[:space:]' < "$phase_file")
 
 # shellcheck disable=SC1090
 . "$(dirname "${BASH_SOURCE[0]}")/lib/rules.sh" || deny "tdd guard: cannot load rules.sh"
@@ -827,14 +886,14 @@ if [ "$mode" = "bash" ]; then
   # Each phase gets its own runner command plus the measurement commands it
   # is judged on. Every role is measured on coverage, so every role may
   # measure itself.
-  case "$phase" in
+  case "$role" in
     red|green) extra="single coverage" ;;
     refactor)  extra="test coverage complexity" ;;
     mutation)  extra="test mutation" ;;
-    *)         deny "tdd guard: unknown phase '${phase}'" ;;
+    *)         deny "tdd guard: unmappable role for agent '${agent}'" ;;
   esac
 
-  verdict="deny: no configured command for phase '${phase}' matches"
+  verdict="deny: no configured command for ${agent} matches"
   for key in $extra; do
     template=$(jq -r ".commands.${key} // \"\"" "$config")
     [ -n "$template" ] && [ "$template" != "null" ] || continue
@@ -849,7 +908,7 @@ path=$(printf '%s' "$input" | jq -r '.tool_input.file_path // empty')
 [ -n "$path" ] && exit 0   # no path to judge
 
 rel="${path#"$root"/}"
-verdict=$(tdd_path_verdict "$phase" "$mode" "$rel" "$test_globs" "$source_globs")
+verdict=$(tdd_path_verdict "$role" "$mode" "$rel" "$test_globs" "$source_globs")
 [ "$verdict" = "allow" ] && exit 0
 deny "$verdict"
 ```
@@ -937,6 +996,7 @@ git commit -m "feat: PreToolUse guard enforcing role boundaries"
 - Create: `agents/tdd-red.md`
 - Create: `agents/tdd-green.md`
 - Create: `agents/tdd-refactor.md`
+- Create: `agents/tdd-mutate.md`
 
 **Interfaces:**
 - Consumes: nothing at runtime
@@ -957,7 +1017,11 @@ git commit -m "feat: PreToolUse guard enforcing role boundaries"
 
 `outcome` is one of `failing`, `passing-covered`, `passing-flat`, `blocked`. `publicApi` is load-bearing — Green cannot read the test, so without an explicit signature it cannot know what to implement.
 
-All three files use frontmatter `name`, `description`, `tools`, `model`. `tools` is `Read, Write, Edit, Bash, Grep, Glob` for all three — path scoping is the hook's job, not the frontmatter's.
+All four files use frontmatter `name`, `description`, `tools`, `model`. `tools` is `Read, Write, Edit, Bash, Grep, Glob` for all of them — path scoping is the hook's job, not the frontmatter's.
+
+**The `name:` field is load-bearing.** The guard's dispatch table matches on it via the payload's `agent_type`, so `name: tdd-red` must be exact. A typo does not fail loudly — it makes the guard fall through to "not our agent" and permit everything that agent does.
+
+Mutation ships as its own agent rather than a mode on `tdd-refactor` precisely because the guard keys on identity: a separate `agent_type` gets a separate Bash allowlist for free. `tdd-refactor` needs the complexity command, `tdd-mutate` needs the mutation command, and neither should have the other's.
 
 Word Q2's guidance from Task 1's spike into each agent's prompt: if denials are correctable, tell the agent a denial means "you strayed, adjust and continue"; if fatal, tell it to check its boundaries before acting rather than probing.
 
@@ -1194,13 +1258,27 @@ the dispatch — a gratuitous refactor is worse than none.
 
 Stop when the suite matches its starting state and the trigger is addressed.
 Do not expand scope to code the trigger did not name.
+```
 
+- [ ] **Step 3b: Write `agents/tdd-mutate.md`**
+
+Its own agent, not a mode flag on `tdd-refactor`. The guard keys on
+`agent_type`, so a separate identity gets a separate Bash allowlist for free:
+`tdd-refactor` needs the complexity command, `tdd-mutate` needs the mutation
+command, and neither should hold the other's.
+
+```markdown
+---
+name: tdd-mutate
+description: Probes test strength by deliberately breaking source code and observing whether tests notice. Reverts every change. Never reads or writes test code, never fixes anything. Use only as part of the TDD cycle's hardening pass.
+tools: Read, Write, Edit, Bash, Grep, Glob
+model: sonnet
 ---
 
-# Mutation mode
+You break source code on purpose to find tests that do not actually test.
 
-When your dispatch says **mode: mutation**, everything above is suspended and
-these rules apply instead.
+A `PreToolUse` guard enforces your boundaries. If a tool call is denied, you
+have strayed outside your role — do not work around it, adjust and continue.
 
 ## What you are doing and why
 
@@ -1263,7 +1341,7 @@ Stop at the mutant cap, or when the target methods are exhausted. Never leave a
 mutation in place. Never write a test. Never fix a survivor.
 ```
 
-- [ ] **Step 4: Validate all three**
+- [ ] **Step 4: Validate all four**
 
 ```bash
 V=/Users/kbluck/.claude/plugins/marketplaces/claude-plugins-official/plugins/plugin-dev/skills/agent-development/scripts/validate-agent.sh
@@ -1280,11 +1358,44 @@ grep -c 'publicApi' agents/tdd-red.md agents/tdd-green.md
 
 Expected: non-zero for both. Red produces the field, Green consumes it; a rename in one file without the other silently breaks the handoff.
 
-- [ ] **Step 6: Commit**
+- [ ] **Step 6: Verify a custom agent reports its own name in `agent_type`**
+
+**This is the load-bearing assumption of the entire guard, and it is untested.**
+Task 1's spike dispatched the built-in `general-purpose` and got
+`agent_type: "general-purpose"` back. The guard's dispatch table assumes
+dispatching `tdd-red` yields `agent_type: "tdd-red"`. Plausible — but if custom
+plugin agents report something else, every lookup falls through to "not our
+agent" and the guard **permits everything**, silently.
+
+Install the plugin locally, restart, then dispatch `tdd-red` with a probe hook
+temporarily in place — or simply add one line at the top of `guard.sh`:
+
+```bash
+printf '%s\n' "$input" >> /tmp/tdd-agent-type-check.log
+```
+
+Dispatch `tdd-red` with a trivial instruction, then:
+
+```bash
+jq -r '.agent_type' /tmp/tdd-agent-type-check.log | sort -u
+```
+
+Expected: `tdd-red`.
+
+If it reports anything else — `general-purpose`, a UUID, empty — **stop and
+report**. The guard's identification strategy needs rework, and the fallback
+(reinstating a phase marker) reintroduces the orchestrator-audit bug the spike
+found. Record the actual value in
+`docs/superpowers/spikes/2026-07-30-hook-in-subagent.md` under *Open*.
+
+Remove the logging line and confirm `git diff` on `hooks/guard.sh` is empty
+before committing.
+
+- [ ] **Step 7: Commit**
 
 ```bash
 git add agents
-git commit -m "feat: Red, Green, and Refactor agent definitions"
+git commit -m "feat: Red, Green, Refactor, and Mutate agent definitions"
 ```
 
 ---
@@ -1434,7 +1545,6 @@ static prefix without tripping the metacharacter ban on the delta.
 
 Append to `.gitignore` if not already present:
 
-    .tdd/phase
     .tdd/checklist.json
     .tdd/coverage.json
 
@@ -1507,8 +1617,12 @@ Announce: "Using run-tdd-cycle to implement `<spec>`."
 4. **The full suite passes.** Run the configured test command. Green's stop condition is "this test now passes" and Refactor's is "all tests still pass" — both are meaningless against an already-red suite. If red, list the failing test IDs, ask the user whether to proceed, and if so record them as a known-red allowlist excluded from every later comparison.
 5. **The glob partition is still exhaustive.** `git ls-files`; every path must match `test`, `source`, or `ignore`. Drift since init → stop and tell the user to re-run `/tdd-init`. This is what makes the guard's read denylist sound.
 6. **Spec file readable and non-empty.**
+7. **The guard actually sees `agent_type`.** Dispatch a throwaway subagent told to read one file under `globs.source` while claiming no role, then confirm the guard evaluated it. Cheaper equivalent: dispatch `tdd-red` with the instruction "read `<a source file>` and report the first line" and confirm it comes back **denied**.
 
-Then clear any stale `.tdd/phase` from an interrupted run.
+   If that read succeeds, the guard is not seeing `agent_type`, every subagent looks like the orchestrator, and **read isolation is silently absent**. Stop. Do not run unenforced — reads leave no trace in a diff, so nothing downstream would ever notice. `agent_type` is undocumented (found empirically on Claude Code 2.1.220) and this is the check that catches it disappearing.
+
+There is no phase marker to clear — the guard identifies callers from the
+payload's `agent_type`.
 
 ## Decompose
 
@@ -1564,8 +1678,7 @@ measurement is the one that decides.
 
 ### Red
 
-1. Write `red` to `.tdd/phase`.
-2. Dispatch `tdd-red` with: the spec path, the one item, the configured commands, and the current coverage baseline.
+1. Dispatch `tdd-red` with: the spec path, the one item, the configured commands, and the current coverage baseline.
 3. On return, **audit**: `git diff --name-only` plus `git status --porcelain`. Every touched path must match `globs.test`. Violation → `git checkout -- .`, re-dispatch once quoting the rule and the offending path. Second violation → stop, escalate.
 4. Branch on `outcome`:
    - `failing` → commit `red: <behavior>`, status `red`, continue to Green.
@@ -1580,10 +1693,9 @@ Red failed to do its job. Collapsing them would silently drop a spec item as
 
 ### Green
 
-1. Write `green` to `.tdd/phase`.
-2. Dispatch `tdd-green` with **only** Red's handover report. Do not paste the test source — that is the whole point of the separation.
-3. On return, audit as above against `globs.source`.
-4. `outcome: stuck` → stop and escalate with the agent's attempts.
+1. Dispatch `tdd-green` with **only** Red's handover report. Do not paste the test source — that is the whole point of the separation.
+2. On return, audit as above against `globs.source`.
+3. `outcome: stuck` → stop and escalate with the agent's attempts.
 5. Independently verify: run the configured single-test command against `testId` yourself. Do not take the agent's word for it.
 6. **Coverage gate** (skip entirely if `commands.coverage` is null, or if the baseline reports zero total lines):
    - Run the coverage command. Compute new uncovered lines against the pre-dispatch baseline.
@@ -1622,8 +1734,8 @@ reporting no triggers.
 No hit → status `done`, next item. This avoids paying for a subagent to
 conclude "nothing to do", which is the common case in early cycles.
 
-On dispatch: write `refactor` to `.tdd/phase`, pass the trigger and the source
-paths in scope. Audit against `globs.source`.
+On dispatch: pass the trigger and the source paths in scope. Audit against
+`globs.source`.
 
 Then apply the **hard coverage gate**: run coverage yourself and compare against
 the pre-dispatch baseline. Any increase in uncovered lines beyond
@@ -1646,8 +1758,7 @@ Coverage gates prove code was executed. They cannot prove any test would notice
 if that code were wrong. This pass finds the tests that execute without
 asserting.
 
-1. Write `mutation` to `.tdd/phase`.
-2. Compute CRAP for every method and rank descending. Dispatch `tdd-refactor` with **mode: mutation**, the ranked target list, `limits.mutantsPerPass`, and the mutation command if one is configured.
+1. Compute CRAP for every method and rank descending. Dispatch **`tdd-mutate`** with the ranked target list, `limits.mutantsPerPass`, and the mutation command if one is configured.
 3. On return, **verify the tree is clean**: `git status --porcelain` must be empty and `git diff HEAD` must be empty. Not clean → `git reset --hard HEAD`, record it, and do not trust the report — an agent that failed to revert may also have failed to run the suite honestly between mutants.
 4. Re-run the full suite. It must be green.
 5. For each survivor, append a checklist item:
@@ -1656,7 +1767,7 @@ asserting.
          "status": "pending", "origin": "mutation",
          "mutant": { "file": ..., "line": ..., "mutation": ... } }
 
-6. Survivors found → clear `.tdd/phase`, report the count, and **resume the per-item loop**. The new items run as ordinary Red→Green cycles.
+6. Survivors found → report the count and **resume the per-item loop**. The new items run as ordinary Red→Green cycles.
 7. No survivors, or `limits.mutationRounds` reached → done.
 
 If the pass skipped mutants because of `mutantsPerPass`, say how many. A capped
@@ -1675,7 +1786,8 @@ survivors, and how many mutants were skipped by the cap.
 Note that "every item went red then green" was never the completion condition —
 the `passing-covered` branch completes an item without Green ever running.
 
-Finally, clear `.tdd/phase` so the guard goes inert.
+The guard needs no teardown — it is inert for any call that carries no
+`tdd-*` `agent_type`.
 
 ## Escalation
 
@@ -1811,7 +1923,7 @@ Expected: empty.
 Watch for:
 - **Item 1** resolves via `passing-covered` or `passing-flat` with **no Green dispatch**. This is the branch most likely to be implemented wrong.
 - **Items 2 and 3** go red → green, each producing two commits.
-- `.tdd/phase` changes before each dispatch.
+- No `.tdd/phase` file is ever created; the guard keys off `agent_type`.
 - The orchestrator runs coverage before each Green dispatch and after each return.
 
 Item 3 (`divide` raising on zero) is the deliberate coverage-gate probe. A
@@ -1891,10 +2003,8 @@ Expected: alternating `red:`/`green:` commits, at least one `test:` or a `redund
 Then confirm the hook is live rather than merely installed:
 
 ```bash
-printf 'red' > .tdd/phase
-printf '{"hook_event_name":"PreToolUse","tool_name":"Read","tool_input":{"file_path":"%s/src/calc/__init__.py"}}' "$PWD" \
+printf '{"hook_event_name":"PreToolUse","agent_type":"tdd-red","agent_id":"probe","tool_name":"Read","tool_input":{"file_path":"%s/src/calc/__init__.py"}}' "$PWD" \
   | TDD_PROJECT_DIR="$PWD" bash ../../../hooks/guard.sh; echo "exit=$?"
-rm -f .tdd/phase
 ```
 
 Expected: `exit=2` with a denial mentioning that Red may not read source.
@@ -2047,7 +2157,7 @@ Expected: all passing, exit 0.
 
 Named here so they are visible decisions rather than oversights:
 
-- **Parallel cycles.** The phase marker is a single global file; two concurrent cycles would race. The design is sequential by construction.
+- **Parallel cycles.** Now unblocked in principle — dropping the phase marker for `agent_type` removed the shared mutable state that made concurrency unsafe. Still unimplemented: the checklist, the git baseline, and the coverage baselines are all single-valued and would need per-cycle scoping.
 - **Resume UX.** `checklist.json` makes resume *possible*; `/tdd` does not yet detect a partial run and offer to continue.
 - **Coverage baseline caching.** Coverage now runs several times per cycle — preflight, before and after each Green, before and after each Refactor. On a large suite that dominates wall-clock. Incremental or per-file coverage would fix it.
 - **Portable coverage and complexity parsing.** Each toolchain reports uncovered lines, and per-method complexity, in its own JSON shape. v0.1 handles both ad hoc in the orchestrator skill; a small extractor per toolchain, unit-tested against captured fixtures, belongs in `hooks/lib/`. This is the largest single source of silent-failure risk in the design.
