@@ -129,6 +129,22 @@ assert_contains "deny" "$(tdd_bash_verdict "sed -i s/a/b/ src/a.py" "$T_SINGLE")
 assert_contains "deny" "$(tdd_bash_verdict "pytest -q" "")" \
   "empty template denies"
 
+# --- REGRESSION: a template with no static prefix must not wave everything
+# through. An empty prefix makes the prefix test `case "$cmd" in *)`, which
+# matches any string, leaving only the metacharacter ban -- so an arbitrary
+# command with clean punctuation would be permitted.
+assert_contains "deny" "$(tdd_bash_verdict "cp -r /etc /tmp/exfil" "   ")" \
+  "whitespace-only template denies rather than allowing any clean command"
+assert_contains "deny" "$(tdd_bash_verdict "rm -rf /tmp/pwned" "{cmd}")" \
+  "placeholder-only template denies"
+assert_contains "deny" "$(tdd_bash_verdict "anything at all" "{a} {b}")" \
+  "template starting with a placeholder denies"
+
+# A tab before the placeholder must be trimmed like a space, or every normal
+# invocation would fail the prefix match.
+assert_eq "allow" "$(tdd_bash_verdict "pytest -q tests/t.py::x" "$(printf 'pytest -q\t{testId}')")" \
+  "trailing tab is trimmed from the static prefix"
+
 # --- REGRESSION: glob characters in the agent-supplied portion are data,
 # not a pattern. `case` only reinterprets the pattern side of a match, never
 # the subject, but this pins it directly rather than trusting that reasoning

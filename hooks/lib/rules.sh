@@ -103,8 +103,26 @@ tdd_bash_verdict() {
   fi
 
   local prefix="${template%%\{*}"
-  # trim trailing whitespace from the prefix
-  while [ "${prefix% }" != "$prefix" ]; do prefix="${prefix% }"; done
+
+  # Trim trailing whitespace. [[:space:]] rather than a literal space, so a
+  # tab before the placeholder does not survive into the prefix and cause
+  # every normal space-separated invocation to fail the match.
+  while :; do
+    case "$prefix" in
+      *[[:space:]]) prefix="${prefix%?}" ;;
+      *) break ;;
+    esac
+  done
+
+  # An empty static prefix would make the prefix test `case "$cmd" in *)`,
+  # which matches everything -- silently degrading the allowlist to "any
+  # command without shell metacharacters". `cp -r /etc /tmp/exfil` would be
+  # permitted. A template that is whitespace-only, or that starts with its
+  # placeholder, must deny rather than wave everything through.
+  if [ -z "$prefix" ]; then
+    echo "deny: the configured command for this phase has no static prefix, so it cannot constrain anything; the guard fails closed"
+    return
+  fi
 
   case "$cmd" in
     "$prefix"*) ;;
