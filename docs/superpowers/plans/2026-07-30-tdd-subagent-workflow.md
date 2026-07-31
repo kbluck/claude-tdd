@@ -2273,6 +2273,20 @@ Expected: 1 passed.
 
 Add `claude-tdd` as a local marketplace, install it, restart Claude Code so `hooks/hooks.json` loads. Confirm `/tdd` and `/tdd-init` appear.
 
+**`/plugin install` copies the repo into a cache snapshot at
+`~/.claude/plugins/cache/claude-tdd/claude-tdd/<version>/`. Edits to the repo do
+not take effect until you reinstall — `/reload-plugins` re-reads the cache, it
+does not refresh it.** Verified during Task 6 step 6, where a fixed `guard.sh`
+sat in the repo while the stale copy ran. Before trusting any live run in this
+task, confirm the two agree:
+
+```bash
+diff -rq hooks "$HOME/.claude/plugins/cache/claude-tdd/claude-tdd/0.1.0/hooks"
+```
+
+Silence means they match. Any output means you are testing code you did not
+write, and a passing run proves nothing.
+
 - [ ] **Step 3: Run `/tdd-init` in the fixture and check the partition**
 
 Expected: detects pytest, proposes `src/**` and `tests/**`, flags `pyproject.toml` and `spec.md` as needing `ignore` entries, and refuses to write until they are classified. That refusal is the partition check working — if it writes a config while leaving files unclassified, Task 7 step 4 was not implemented correctly.
