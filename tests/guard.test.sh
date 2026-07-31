@@ -106,6 +106,27 @@ assert_eq "0|" "$out" "tdd-mutate may run the full suite"
 out=$(run_guard "tdd-bogus" payload_write "$SANDBOX/src/a.py")
 assert_eq "0|" "$out" "unrecognized tdd-* agent permits"
 
+# --- every file-writing tool must be judged, not just Write/Edit ---
+#
+# Hook matchers are unanchored regex, so `Edit` also delivers `MultiEdit` and
+# `NotebookEdit`. A tool that fell through to `exit 0` would let Red write
+# source with no check at all -- invisible, because nothing downstream can
+# tell a permitted write from one that was never attempted.
+for _t in Write Edit MultiEdit; do
+  out=$(AGENT="tdd-red"; printf '{"hook_event_name":"PreToolUse","agent_id":"a123","agent_type":"tdd-red","tool_name":"%s","tool_input":{"file_path":"%s"}}' "$_t" "$SANDBOX/src/a.py" \
+        | TDD_PROJECT_DIR="$SANDBOX" bash "$GUARD" 2>&1 >/dev/null; printf '%s' "|$?")
+  assert_contains "2" "$out" "red writing source via $_t is denied"
+done
+
+# NotebookEdit carries notebook_path, not file_path.
+out=$(printf '{"hook_event_name":"PreToolUse","agent_id":"a123","agent_type":"tdd-red","tool_name":"NotebookEdit","tool_input":{"notebook_path":"%s"}}' "$SANDBOX/src/nb.ipynb" \
+      | TDD_PROJECT_DIR="$SANDBOX" bash "$GUARD" 2>&1 >/dev/null; printf '%s' "|$?")
+assert_contains "2" "$out" "red writing source via NotebookEdit is denied"
+
+out=$(printf '{"hook_event_name":"PreToolUse","agent_id":"a123","agent_type":"tdd-red","tool_name":"SomeFutureTool","tool_input":{"file_path":"%s"}}' "$SANDBOX/src/a.py" \
+      | TDD_PROJECT_DIR="$SANDBOX" bash "$GUARD" 2>&1 >/dev/null; printf '%s' "|$?")
+assert_contains "2" "$out" "an unrecognized tool denies rather than passing through"
+
 # --- a payload the guard cannot classify must deny, not pass ---
 out=$(run_guard "tdd-red" payload_write "")
 assert_contains "2|" "$out" "empty file_path denies rather than permitting"
@@ -115,8 +136,11 @@ assert_contains "2|" "$out" "empty file_path denies rather than permitting"
 # permit the read.
 out=$(run_guard "tdd-red" payload_read "$SANDBOX/../$(basename "$SANDBOX")/src/a.py")
 assert_contains "2|" "$out" "a .. segment denies rather than escaping classification"
-out=$(run_guard "tdd-green" payload_read "$SANDBOX/../$(basename "$SANDBOX")/tests/test_a.py")
-assert_contains "2|" "$out" "a .. segment denies for green too"
+# Use a SOURCE path for green's traversal case. A traversal to a *test* path
+# would be denied by the ordinary "green may not read tests" rule even with the
+# traversal guard removed, so it would not prove the guard is live.
+out=$(run_guard "tdd-green" payload_read "$SANDBOX/../$(basename "$SANDBOX")/src/a.py")
+assert_contains "2|" "$out" "a .. segment denies for green even on a path it could otherwise read"
 
 # Repo-relative paths must classify identically to absolute ones.
 out=$(run_guard "tdd-red" payload_read "src/a.py")

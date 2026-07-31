@@ -22,8 +22,13 @@ input=$(cat)
 # every call in the session. Deny only once we know a tdd-* agent is
 # calling; use a cheap grep to make that determination without jq.
 if ! command -v jq >/dev/null 2>&1; then
+  # Match the role names themselves rather than a compact-JSON key/value
+  # spelling: `"agent_type": "tdd-red"` with a space would slip past a
+  # pattern anchored on `"agent_type":"tdd-`, and slipping past means
+  # permitting. A false positive here only denies during an already-broken
+  # setup, so err wide.
   case "$input" in
-    *'"agent_type":"tdd-'*)
+    *tdd-red*|*tdd-green*|*tdd-refactor*|*tdd-mutate*)
       deny "tdd guard: jq is not on PATH; cannot evaluate tool calls safely. Run /tdd-init." ;;
     *) exit 0 ;;
   esac
@@ -60,11 +65,17 @@ source_globs=$(jq -r '.globs.source | join(" ")' "$config" 2>/dev/null) \
 
 tool=$(printf '%s' "$input" | jq -r '.tool_name // empty')
 
+# Every file-writing tool must map to a mode. Hook matchers are unanchored
+# regex, so `Edit` in the matcher also delivers `MultiEdit` and
+# `NotebookEdit` -- and an unmapped tool that fell through to `exit 0` would
+# be silently permitted to write source. Unknown tools deny: if the matcher
+# delivered something this case does not know, the safe answer is no.
 case "$tool" in
-  Read)        mode=read ;;
-  Write|Edit)  mode=write ;;
-  Bash)        mode=bash ;;
-  *)           exit 0 ;;
+  Read)                          mode=read ;;
+  Write|Edit|MultiEdit)          mode=write ;;
+  NotebookEdit)                  mode=write ;;
+  Bash)                          mode=bash ;;
+  *) deny "tdd guard: ${agent} called an unrecognized tool '${tool}'; the guard cannot classify it and fails closed" ;;
 esac
 
 if [ "$mode" = "bash" ]; then
@@ -72,9 +83,10 @@ if [ "$mode" = "bash" ]; then
 
   # The phase's own runner command, plus the coverage command — every role is
   # measured on coverage, so every role may measure itself.
-  # Each phase gets its own runner command plus the measurement commands it
-  # is judged on. Every role is measured on coverage, so every role may
-  # measure itself.
+  # Each role gets its own runner command plus the measurement commands it is
+  # judged on. Red, Green, and Refactor are gated on coverage and may measure
+  # themselves. Mutate is not -- it is judged on whether mutants survive the
+  # suite -- so it gets the mutation command instead.
   case "$role" in
     red|green) extra="single coverage" ;;
     refactor)  extra="test coverage complexity" ;;
@@ -93,7 +105,8 @@ if [ "$mode" = "bash" ]; then
   deny "$verdict"
 fi
 
-path=$(printf '%s' "$input" | jq -r '.tool_input.file_path // empty')
+# NotebookEdit uses notebook_path, not file_path.
+path=$(printf '%s' "$input" | jq -r '.tool_input.file_path // .tool_input.notebook_path // empty')
 
 # A Read/Write/Edit with no file_path cannot be classified. Permitting it
 # would be a hole shaped exactly like the tool call we most need to judge,
