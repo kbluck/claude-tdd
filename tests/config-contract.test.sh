@@ -27,6 +27,20 @@ for _k in coverage complexity mutation; do
     "config declares commands.${_k} (null is allowed, absent is not)"
 done
 
+# The template inside commands/tdd-init.md is a SECOND copy of this schema, and
+# two copies drift. It already did once: the template omitted crapMode,
+# maxCrap, mutationRounds, mutantsPerPass, commands.complexity and
+# commands.mutation, so an agent following it would have written a config whose
+# primary refactor trigger threshold was null -- a comparison that never fires.
+_init="$REPO_ROOT/commands/tdd-init.md"
+_init_text=$(cat "$_init")
+for _k in version crapMode complexity mutation \
+          maxCrap duplicateThreshold maxFunctionLines \
+          greenAttempts violationRetries mutationRounds mutantsPerPass \
+          greenMaxNewUncovered refactorMaxNewUncovered ignore; do
+  assert_contains "$_k" "$_init_text" "tdd-init's config template names ${_k}"
+done
+
 # The three glob lists must be arrays. A bare string would word-split in the
 # guard into per-character globs and match almost nothing -- denying every
 # write and, worse, permitting every read.

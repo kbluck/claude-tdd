@@ -138,12 +138,26 @@ Confirm each command is actually runnable as written.
 
     {
       "version": 1,
-      "commands": { "test": "...", "single": "...", "coverage": "..." },
+      "commands": {
+        "test": "...", "single": "...", "coverage": "...",
+        "complexity": "...", "mutation": null
+      },
+      "crapMode": "computed",
       "globs": { "test": [...], "source": [...], "ignore": [...] },
-      "refactorTriggers": { "maxFunctionLines": 40, "duplicateThreshold": 3 },
-      "limits": { "greenAttempts": 3, "violationRetries": 1 },
+      "refactorTriggers": { "maxCrap": 30, "duplicateThreshold": 3, "maxFunctionLines": 40 },
+      "limits": {
+        "greenAttempts": 3, "violationRetries": 1,
+        "mutationRounds": 2, "mutantsPerPass": 20
+      },
       "coverageGates": { "greenMaxNewUncovered": 2, "refactorMaxNewUncovered": 0 }
     }
+
+**Write every key, including the ones whose value is `null`.** An omitted key is
+not a smaller config, it is a broken one: `jq` returns `null`, and a `null`
+threshold compares as "never exceeded". Omit `refactorTriggers.maxCrap` and the
+primary refactor trigger silently never fires; omit `limits.mutantsPerPass` and
+the mutation pass has no bound. A `null` value means "this project has no such
+tool, degrade explicitly"; an absent key means nobody decided.
 
 Append to `.gitignore` if not already present:
 
