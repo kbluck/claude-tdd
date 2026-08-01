@@ -50,10 +50,15 @@ Read the spec once. Write `.tdd/checklist.json`:
     {
       "spec": "<path>",
       "knownRed": ["<test ids excluded from comparisons>"],
+      "mutationRoundsRun": 0,
       "items": [
         { "id": 1, "behavior": "<one testable behavior>", "status": "pending" }
       ]
     }
+
+Write `mutationRoundsRun` at decompose time, initialised to `0`. Every other field the loop reads is declared here; leaving this one
+to be created later by the mutation pass is the shape `knownRed` had before it turned out nothing read it — a value that exists in
+prose but not in the schema is one nobody has to account for.
 
 Items may also carry `"overbuilt": true`, set by the Green coverage gate. It is a flag for review, not a status — the item still
 reaches `done`.
@@ -228,9 +233,9 @@ that execute without asserting.
 8. No survivors, or `mutationRoundsRun` (read from `checklist.json`) has reached `limits.mutationRounds` → done. Read the count from
    the file, not from memory of this session — on a resumed run your context has no record of passes already spent.
 
-Record the completed round count in `checklist.json` as `mutationRoundsRun` each time a pass finishes. It is the one piece of loop
-state not otherwise on disk, and without it an interrupted run resumes with no idea how many passes it has already spent — which
-contradicts this file's own claim that the checklist, not your context, is what a resumed run reads.
+9. Increment `mutationRoundsRun` in `checklist.json` and write the file.
+
+That increment is a numbered step rather than trailing advice because it is the one piece of loop state nothing else reconstructs.
 
 If the pass skipped mutants because of `mutantsPerPass`, say how many. A capped pass that reports "no survivors" without mentioning
 the cap reads as a clean bill of health it did not earn.
