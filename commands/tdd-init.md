@@ -19,7 +19,7 @@ guard hook on every subsequent tool call.
 | `package.json` with `jest` | jest | `npx jest` | `npx jest -t {testId}` | `npx jest --coverage --coverageReporters=json-summary` |
 | `package.json` with `vitest` | vitest | `npx vitest run` | `npx vitest run -t {testId}` | `npx vitest run --coverage` |
 | `Cargo.toml` | cargo | `cargo test` | `cargo test {testId}` | `cargo llvm-cov --json` |
-| `go.mod` | go | `go test ./...` | `go test -run {testId} ./...` | `go test -cover ./...` |
+| `go.mod` | go | `go test ./...` | `go test ./... -run {testId}` | `go test -cover ./...` |
 | `*.csproj`, `*.sln` | dotnet | `dotnet test` | `dotnet test --filter {testId}` | `dotnet test --collect:"XPlat Code Coverage"` |
 
 No marker matches, or several do → ask the user rather than guessing.
