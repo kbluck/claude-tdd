@@ -9,14 +9,19 @@
   },
   "crapMode": "computed",
   "globs": {
-    "test": ["e2e/tests/**"],
-    "source": ["e2e/src/**"],
+    "test": [
+      "e2e/tests/**"
+    ],
+    "source": [
+      "e2e/src/**"
+    ],
     "ignore": [
-      ".claude/**",
       ".claude-plugin/**",
+      ".claude/**",
       ".gitattributes",
       ".gitignore",
       ".idea/**",
+      ".tdd/**",
       "AGENTS.md",
       "LICENSE",
       "agents/**",
@@ -31,7 +36,19 @@
       "tests/**"
     ]
   },
-  "refactorTriggers": { "maxCrap": 30, "duplicateThreshold": 3, "maxFunctionLines": 40 },
-  "limits": { "greenAttempts": 3, "violationRetries": 1, "mutationRounds": 2, "mutantsPerPass": 20 },
-  "coverageGates": { "greenMaxNewUncovered": 2, "refactorMaxNewUncovered": 0 }
+  "refactorTriggers": {
+    "maxCrap": 30,
+    "duplicateThreshold": 3,
+    "maxFunctionLines": 40
+  },
+  "limits": {
+    "greenAttempts": 3,
+    "violationRetries": 1,
+    "mutationRounds": 2,
+    "mutantsPerPass": 20
+  },
+  "coverageGates": {
+    "greenMaxNewUncovered": 2,
+    "refactorMaxNewUncovered": 0
+  }
 }
