@@ -2428,8 +2428,9 @@ git commit -m "feat: orchestrator skill and /tdd entry point"
 The first time every part runs together. Unit tests cover the guard's logic; nothing so far has verified that the loop, the agents, and the hook actually compose.
 
 **Files:**
-- Create: `tests/fixtures/e2e-project/` (a real git repo)
-- Create: `tests/fixtures/e2e-project/spec.md`
+- Create: `e2e/` (a plain directory in THIS repo — not a nested git repo)
+- Create: `e2e/spec.md`
+- Create: `.tdd/config.json` (written by `/tdd-init`, committed by it)
 - Create: `docs/superpowers/spikes/2026-07-30-e2e-findings.md`
 
 **Interfaces:**
@@ -2438,14 +2439,21 @@ The first time every part runs together. Unit tests cover the guard's logic; not
 
 - [ ] **Step 1: Build the fixture project**
 
+**The fixture lives at `e2e/` in this repo, not in a nested git repo of its own.**
+
+An earlier draft put it at `tests/fixtures/e2e-project/` with its own `git init`. That does not work, and it was only discoverable by running it: `hooks/guard.sh` resolves the project root from `CLAUDE_PROJECT_DIR`, falling back to the payload's `cwd` — both of which are the *session's* project directory, never a subdirectory a dispatch happens to be working in. Verified with a live `tdd-red` dispatch against this repo: the guard looked for `.tdd/config.json` at the repo root and denied with "run /tdd-init". A config written inside a nested fixture is a config the guard will never read, so every agent call would be denied for the whole run.
+
+So: one git repo (this one), `.tdd/config.json` at its root, and globs scoped to the fixture. `e2e/` rather than `tests/fixtures/…` because our own `tests/**` would otherwise collide with the fixture's test glob — `*` crosses `/` in the matcher, so `tests/**` would match both our `rules.test.sh` and the fixture's `test_calc.py`, and the partition check requires each tracked file to match exactly one list.
+
+The `red:`/`green:` commits this produces land in this branch's history. That is intended — they are the run's evidence.
+
 A Python project with pytest, and — critically — **one behavior already implemented**, so the `passing-covered` or `passing-flat` branch actually executes. A fixture where every item goes red→green would leave the branch that most complicates the orchestrator completely untested.
 
 ```bash
-mkdir -p tests/fixtures/e2e-project/src/calc tests/fixtures/e2e-project/tests
-cd tests/fixtures/e2e-project
+mkdir -p e2e/src/calc e2e/tests
 ```
 
-`src/calc/__init__.py`:
+`e2e/src/calc/__init__.py`:
 
 ```python
 def add(a, b):
@@ -2486,11 +2494,12 @@ pythonpath = ["src"]
 Item 1 is already implemented — that is deliberate.
 
 ```bash
-git init -q && git add -A && git commit -q -m "fixture: initial calc project"
-python -m pytest -q
+git add e2e && git commit -q -m "test(plugin): add e2e fixture project"
+python -m pytest -q e2e
 ```
 
-Expected: 1 passed.
+Expected: 1 passed. No `git init` — this repo is the git context, and the audit,
+the revert, and the per-phase commits all operate on it.
 
 - [ ] **Step 2: Install the plugin locally and restart**
 
@@ -2510,14 +2519,31 @@ diff -rq hooks "$HOME/.claude/plugins/cache/claude-tdd/claude-tdd/0.1.0/hooks"
 Silence means they match. Any output means you are testing code you did not
 write, and a passing run proves nothing.
 
-- [ ] **Step 3: Run `/tdd-init` in the fixture and check the partition**
+- [ ] **Step 3: Run `/tdd-init` and check the partition**
 
-Expected: detects pytest, proposes `src/**` and `tests/**`, flags `pyproject.toml` and `spec.md` as needing `ignore` entries, and refuses to write until they are classified. That refusal is the partition check working — if it writes a config while leaving files unclassified, Task 7 step 4 was not implemented correctly.
+Run it from the repo root. The partition covers **every tracked file in this
+repo**, not just the fixture, because that is the set `git ls-files` returns and
+the set the guard's read denylist is judged against.
+
+Expected globs:
+
+- `test`: `e2e/tests/**`
+- `source`: `e2e/src/**`
+- `ignore`: everything else — `agents/**`, `commands/**`, `hooks/**`, `skills/**`, `tests/**`, `docs/**`, `.claude/**`, `*.md`, `.gitignore`, `e2e/*.toml`, `e2e/*.md`
+
+Expected behaviour: it detects pytest, proposes globs, and **refuses to write
+until every tracked file is classified**. That refusal is the partition check
+working. If it writes a config while leaving files unclassified, Task 7 step 4
+was not implemented correctly.
+
+Watch for the collision the layout was chosen to avoid: `*` crosses `/` in the
+matcher, so a `tests/**` test-glob would also swallow our own `tests/rules.test.sh`
+and the partition check should report the overlap.
 
 Confirm it committed its own output:
 
 ```bash
-git -C tests/fixtures/e2e-project status --porcelain
+git status --porcelain
 ```
 
 Expected: empty.
@@ -2547,7 +2573,6 @@ the rejection deterministically rather than hoping an agent overbuilds.
 Capture the baseline:
 
 ```bash
-cd tests/fixtures/e2e-project
 python -m pytest -q --cov --cov-report=json:.tdd/coverage.json >/dev/null
 jq '[.files[].summary.missing_lines] | add' .tdd/coverage.json
 ```
@@ -2595,7 +2620,6 @@ git checkout -- src/calc/__init__.py
 The single highest-value check in this task. Everything else can pass while the hook sits inert, and an inert hook means read isolation was never enforced.
 
 ```bash
-cd tests/fixtures/e2e-project
 git log --oneline
 git log --format='%s' | grep -c '^red:'
 git log --format='%s' | grep -c '^green:'
@@ -2620,7 +2644,7 @@ If Task 1 found denials are *correctable*, also confirm from the transcript that
 Write `docs/superpowers/spikes/2026-07-30-e2e-findings.md`: which branches executed, whether the guard fired in situ, any denial text agents saw, and every point where the orchestrator needed judgment the skill did not specify. That last list is the backlog for v0.2.
 
 ```bash
-git add tests/fixtures docs/superpowers/spikes
+git add e2e docs/superpowers/spikes
 git commit -m "test: end-to-end fixture run and findings"
 ```
 
@@ -2640,7 +2664,7 @@ Task 9 verified the Red/Green/Refactor loop. This verifies the pass that runs
 after it, and the CRAP trigger that targets it.
 
 **Files:**
-- Modify: `tests/fixtures/e2e-project/tests/test_calc.py`
+- Modify: `e2e/tests/test_calc.py`
 - Create: `docs/superpowers/spikes/2026-07-30-mutation-findings.md`
 
 **Interfaces:**
@@ -2664,7 +2688,6 @@ def test_divide_by_zero():
 ```
 
 ```bash
-cd tests/fixtures/e2e-project
 python -m pytest -q --cov --cov-report=json:.tdd/coverage.json
 jq '.files["src/calc/__init__.py"].summary.percent_covered' .tdd/coverage.json
 ```
@@ -2705,8 +2728,8 @@ to revert corrupts the source tree, and the corruption looks like ordinary
 implementation drift.
 
 ```bash
-git -C tests/fixtures/e2e-project status --porcelain
-git -C tests/fixtures/e2e-project diff HEAD --stat
+git status --porcelain
+git diff HEAD --stat
 ```
 
 Expected: both empty after the pass returns, before any new items are worked.
@@ -2743,7 +2766,7 @@ three-function fixture takes minutes, the pass needs to be opt-in on real
 projects.
 
 ```bash
-git add tests/fixtures docs/superpowers/spikes
+git add e2e docs/superpowers/spikes
 git commit -m "test: mutation hardening pass end-to-end"
 ```
 
