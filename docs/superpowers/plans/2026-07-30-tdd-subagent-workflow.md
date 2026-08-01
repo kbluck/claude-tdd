@@ -459,6 +459,26 @@ assert_contains "deny" "$(tdd_path_verdict green read tests/test_a.py "" "$SG")"
 assert_contains "deny" "$(tdd_path_verdict red write tests/test_a.py "" "$SG")" \
   "empty test globs deny a write"
 
+# --- REGRESSION: alternative spellings of the same path must agree ---
+#
+# guard.sh strips the project root by literal prefix, so an un-normalised
+# `./x` or `x//y` fails to strip and then matches no glob. On a READ that
+# means ALLOW, because reads are a denylist. Verified live before the fix:
+# red was denied `e2e/src/calc/__init__.py` and permitted the identical file
+# spelled `./e2e/src/calc/__init__.py`.
+assert_eq "e2e/src/a.py" "$(tdd_normalize_path "./e2e/src/a.py")" \
+  "leading ./ is stripped"
+assert_eq "e2e/src/a.py" "$(tdd_normalize_path "e2e//src/a.py")" \
+  "repeated slashes collapse"
+assert_eq "e2e/src/a.py" "$(tdd_normalize_path "e2e/./src/a.py")" \
+  "/./ segments collapse"
+assert_eq "e2e/src/a.py" "$(tdd_normalize_path ".//e2e/./src//a.py")" \
+  "all three at once"
+assert_eq "/abs/e2e/src/a.py" "$(tdd_normalize_path "/abs//e2e/./src/a.py")" \
+  "an absolute path keeps its leading slash"
+assert_eq "" "$(tdd_normalize_path "")" \
+  "empty input stays empty rather than erroring"
+
 # --- REGRESSION: the verdict must not depend on what is on disk ---
 #
 # An unquoted glob string undergoes pathname expansion as well as word
@@ -543,6 +563,35 @@ tdd_matches_any() {
 
   if [ "$restore" = 1 ]; then set +f; fi
   return "$rc"
+}
+
+# tdd_normalize_path <path>
+# Collapses repeated slashes, leading `./`, and `/./` segments.
+#
+# Without this the guard is trivially bypassable. guard.sh strips the project
+# root by literal prefix match, and the glob match then needs the relative path
+# to start with the glob's literal prefix. A path spelled `./e2e/src/a.py`
+# strips to nothing and matches no glob -- and because reads are a DENYLIST,
+# no-match means ALLOW. Verified against the live config: red was denied
+# `e2e/src/calc/__init__.py` and permitted `./e2e/src/calc/__init__.py`, the
+# same file. `e2e//src/...` bypassed identically.
+#
+# Uses `tr -s` rather than `${p//\/\//\/}` deliberately: the replacement half
+# of a bash substitution is not a pattern, so `\/` there leaves a literal
+# backslash -- the same trap that produced the `**` normalization bug in this
+# file's own history.
+tdd_normalize_path() {
+  local p="${1:-}"
+  [ -n "$p" ] || { printf ''; return; }
+  p=$(printf '%s' "$p" | tr -s '/')
+  while :; do
+    case "$p" in
+      ./*)   p="${p#./}" ;;
+      */./*) p="${p%%/./*}/${p#*/./}" ;;
+      *)     break ;;
+    esac
+  done
+  printf '%s' "$p"
 }
 
 # tdd_path_verdict <role> <mode> <path> <test_globs> <source_globs>
@@ -1164,6 +1213,12 @@ case "/$path/" in
   */../*) deny "tdd guard: path contains a '..' segment and cannot be classified safely: $path" ;;
 esac
 
+# Normalise BOTH sides before the prefix strip. An un-normalised `./x`, `x//y`,
+# or a root with a trailing slash fails to strip, then matches no glob, and a
+# no-match on a read means allow.
+root=$(tdd_normalize_path "$root"); root="${root%/}"
+path=$(tdd_normalize_path "$path")
+
 case "$path" in
   "$root"/*) rel="${path#"$root"/}" ;;   # inside the project
   *)         rel="$path" ;;              # already relative, or outside the project
@@ -1293,7 +1348,9 @@ git commit -m "feat: PreToolUse guard enforcing role boundaries"
 
 `outcome` is one of `failing`, `passing-covered`, `passing-flat`, `blocked`. `publicApi` is load-bearing — Green cannot read the test, so without an explicit signature it cannot know what to implement.
 
-All four files use frontmatter `name`, `description`, `tools`, `model`, `color`. `tools` is `Read, Write, Edit, Bash, Grep, Glob` for all of them — path scoping is the hook's job, not the frontmatter's.
+All four files use frontmatter `name`, `description`, `tools`, `model`, `color`. `tools` is `Read, Write, Edit, Bash` for all of them — path scoping is the hook's job, not the frontmatter's.
+
+**`Grep` and `Glob` are deliberately not granted.** The `PreToolUse` matcher covers `Read|Write|Edit|MultiEdit|NotebookEdit|NotebookRead|Bash`; a `Grep` call would never reach the guard at all — not even its fail-closed arm — and `Grep` returns file *content*, so Red could read source wholesale through it. Widening the matcher is not a simple fix either: `Grep` and `Glob` are scoped to a directory rather than a file, and the guard classifies file paths against globs. Granting a tool the guard cannot classify is how a boundary becomes decorative, so the roles get file-level tools only.
 
 **The `name:` field is load-bearing.** The guard's dispatch table matches on it via the payload's `agent_type`, so `name: tdd-red` must be exact. A typo does not fail loudly — it makes the guard fall through to "not our agent" and permit everything that agent does.
 
@@ -1308,7 +1365,7 @@ Word Q2's guidance from Task 1's spike into each agent's prompt: if denials are 
 name: tdd-red
 color: red
 description: Authors exactly one failing test from a specification. Never reads or writes source code. Use only as part of the TDD cycle.
-tools: Read, Write, Edit, Bash, Grep, Glob
+tools: Read, Write, Edit, Bash
 model: sonnet
 ---
 
@@ -1379,7 +1436,7 @@ it pass. Do not refactor. Do not start the next item.
 name: tdd-green
 color: green
 description: Writes the minimum source code to turn one failing test green. Never reads or writes test code. Use only as part of the TDD cycle.
-tools: Read, Write, Edit, Bash, Grep, Glob
+tools: Read, Write, Edit, Bash
 model: sonnet
 ---
 
@@ -1469,7 +1526,7 @@ tests. Do not start the next item.
 name: tdd-refactor
 color: blue
 description: Improves existing source code while holding public interfaces and test results constant. Never reads or writes test code, never adds behavior. Use only as part of the TDD cycle.
-tools: Read, Write, Edit, Bash, Grep, Glob
+tools: Read, Write, Edit, Bash
 model: sonnet
 ---
 
@@ -1567,7 +1624,7 @@ command, and neither should hold the other's.
 name: tdd-mutate
 color: magenta
 description: Probes test strength by deliberately breaking source code and observing whether tests notice. Reverts every change. Never reads or writes test code, never fixes anything. Use only as part of the TDD cycle's hardening pass.
-tools: Read, Write, Edit, Bash, Grep, Glob
+tools: Read, Write, Edit, Bash
 model: sonnet
 ---
 
