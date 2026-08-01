@@ -211,7 +211,7 @@ Before that point the guard exits 0 without reading anything, so installing this
 
 Detecting mutation by parsing shell commands is unbounded and will lose — `sed -i`, `cat >`, `mv`, a codegen script, and arbitrarily many more.
 
-Invert it. The three agents only ever legitimately need to run the commands in `config.json`. The hook permits a `Bash` call only when it prefix-matches a configured command for the current phase. Everything else is denied. `Read`, `Grep`, and `Glob` cover the inspection the agents would otherwise shell out for.
+Invert it. The three agents only ever legitimately need to run the commands in `config.json`. The hook permits a `Bash` call only when it prefix-matches a configured command for the current phase. Everything else is denied. `Read` covers the inspection the agents would otherwise shell out for. `Grep` and `Glob` are deliberately not granted: they sit outside the `PreToolUse` matcher, so such a call would never reach the guard at all, and `Grep` returns file content.
 
 **The metacharacter ban applies to the delta, not the template.** A configured command is trusted — it was authored or confirmed by the user at init time, and some toolchains legitimately need a pipe or redirect to produce coverage. What the agent supplies beyond the template (the `{testId}` substitution, any appended flags) must contain no `;`, `|`, `&&`, `>`, backtick, or `$(`. Banning metacharacters in the template itself would make the rule unsatisfiable for those toolchains, and the failure would surface at init time as an unexplained rejection.
 

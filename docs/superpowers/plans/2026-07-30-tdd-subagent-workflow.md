@@ -478,6 +478,12 @@ assert_eq "/abs/e2e/src/a.py" "$(tdd_normalize_path "/abs//e2e/./src/a.py")" \
   "an absolute path keeps its leading slash"
 assert_eq "" "$(tdd_normalize_path "")" \
   "empty input stays empty rather than erroring"
+assert_eq "/a/b" "$(tdd_normalize_path "/a/b/.")" \
+  "a trailing /. is stripped — a root spelled \$ROOT/. otherwise fails the prefix strip"
+assert_eq "/a/b" "$(tdd_normalize_path "/a/b/./.")" \
+  "repeated trailing /. collapse"
+assert_eq "." "$(tdd_normalize_path ".")" \
+  "a bare . terminates rather than looping"
 
 # --- REGRESSION: the verdict must not depend on what is on disk ---
 #
@@ -588,6 +594,7 @@ tdd_normalize_path() {
     case "$p" in
       ./*)   p="${p#./}" ;;
       */./*) p="${p%%/./*}/${p#*/./}" ;;
+      */.)   p="${p%/.}" ;;
       *)     break ;;
     esac
   done
