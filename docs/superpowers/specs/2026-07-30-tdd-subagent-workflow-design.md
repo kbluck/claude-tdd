@@ -1,7 +1,7 @@
 # TDD Subagent Workflow — Design
 
 **Date:** 2026-07-30
-**Status:** Approved, not yet implemented
+**Status:** Implemented. This document was updated after the build to match the shipped system — several designs below changed on contact with reality, and each such change is marked with *why*.
 
 ## Purpose
 
@@ -75,7 +75,7 @@ Each part has one job:
 
 | Path | Committed | Purpose |
 |---|---|---|
-| `.tdd/config.json` | yes | toolchain commands, path globs, thresholds |
+| `.tdd/config.json` | no — gitignored | toolchain commands, path globs, thresholds |
 | `.tdd/checklist.json` | no | run state; enables resume |
 
 Run state is separated from config so an interrupted `/tdd` resumes from disk, and so the completion signal survives context compaction.
@@ -88,9 +88,9 @@ There is no phase marker. The hook learns the caller's role from the payload's `
 
 `/tdd <spec-path>` refuses to start unless all seven hold. Each is a precondition some later step silently depends on.
 
-1. **Target is a git repo with a clean tree.** The audit's revert is `git reset --hard`, which would destroy uncommitted work.
+1. **Target is a git repo with a clean tree.** Reverting a dispatch destroys working-tree state — see *Reverting a dispatch* below.
 2. **`.tdd/config.json` exists**, else run `/tdd-init` first.
-3. **The full suite passes.** Refactor's stop condition is "all tests still pass" and Green's is "this test now passes"; both are meaningless against an already-red suite. If red, record the failing test IDs as a known-red allowlist and exclude them from every later comparison.
+3. **The full suite passes.** Refactor's stop condition is "all tests still pass" and Green's is "this test now passes"; both are meaningless against an already-red suite. If red, record the failing test IDs in `checklist.json` as `knownRed` and **pass that list into every Refactor and Mutate dispatch**. Both roles stop on a suite that is not green, so an allowlist that only exists in the file makes them refuse to run for the rest of the session. Every later suite comparison subtracts it.
 4. **Spec file is readable and non-empty.**
 
 5. **The glob partition is still exhaustive** — `git ls-files` produces no file matching neither `test`, `source`, nor `ignore`. Catches drift from edits made between runs. See *Writes are an allowlist; reads are a denylist* below for why this is load-bearing.
@@ -104,6 +104,8 @@ The orchestrator reads the spec once and writes an ordered checklist of test-siz
 ```json
 {
   "spec": "docs/specs/parser.md",
+  "knownRed": ["<test ids excluded from every comparison>"],
+  "mutationRoundsRun": 0,
   "items": [
     { "id": 1, "behavior": "rejects empty input", "status": "pending" },
     { "id": 2, "behavior": "parses a single token", "status": "pending" }
@@ -126,7 +128,7 @@ dispatch tdd-red
   ├─ test PASSES, coverage ↑ → commit "test: <behavior>"   (no Green dispatch)
   │                            status = done → next item
   │
-  └─ test PASSES, flat ──────→ git checkout -- .           (nothing committed)
+  └─ test PASSES, flat ──────→ revert                      (nothing committed)
                                status = redundant → next item
 ```
 
@@ -137,6 +139,8 @@ The three-way outcome is the literal reading of the requirement that every autho
 **Consequence:** an item can complete without Green ever running. So the checklist empties on **"no `pending` items remain"**, not "every item went red then green." This contradicts the usual TDD mental model and must be stated in the orchestrator skill.
 
 An empty checklist is not the end of the run — it triggers the mutation pass, which may append new items and restart the loop.
+
+**Items originating from a mutation survivor are exempt from the three-way rule.** A surviving mutant means the source is *correct* and the test is weak, so Red's test for that behavior necessarily passes and necessarily moves no coverage — the line was already executed by the assertion-free test that let the mutant survive. Judged by the rule above, every such item lands on `passing-flat` and is discarded, the next round rediscovers the identical survivors, and the loop terminates having closed nothing. The feature was structurally incapable of working until this exception was added. Mutation-origin items are instead judged on whether the test kills the recorded mutants, which the orchestrator verifies by applying each one — Red cannot, since it may not write source.
 
 ### Refactor trigger check
 
@@ -171,6 +175,25 @@ Guardrails are enforced twice, at different surfaces.
 | **Green** | Red's handover report, source files, runner output | source globs only | configured single-test + coverage commands |
 | **Refactor** | source files, runner output | source globs only | configured full-suite + coverage + complexity commands |
 | **Mutate** (`tdd-mutate`) | source files, runner output | source globs only — every write must be reverted before handover | full-suite + mutation commands |
+
+### Reverting a dispatch
+
+Several branches discard an agent's work. **`git checkout -- .` does not do it**, and neither does `git reset --hard` — both restore or reset *tracked* files and leave untracked ones in place, and Red's tests are almost always new files. Found on the first live run: after a rejected `passing-flat` test, `git checkout -- .` left the test sitting in the tree, where the next item's commit would have swept it up.
+
+Revert means both, scoped to the role's write globs:
+
+```
+git checkout -- <globs>     # restore tracked edits
+git clean -fd -- <globs>    # remove new files
+```
+
+Only `clean` takes a pathspec; `git reset --hard -- <path>` fails outright. Reset is therefore tree-wide, which is safe only because preflight requires a clean tree and exactly one agent writes per dispatch.
+
+### Paths are normalised before matching
+
+The guard strips the project root by literal prefix, and the glob match then needs the relative path to start with a glob's prefix. Without normalisation a path spelled `./x`, `x//y`, or a root ending `/.` fails to strip, matches no glob — and because reads are a denylist, **no match means allow**.
+
+This was live in the shipped guard until the final review: `red` was denied `e2e/src/calc/__init__.py` and permitted `./e2e/src/calc/__init__.py`, the same file. `./` is how a model habitually writes a relative path, so this was not an adversarial case. `tdd_normalize_path` collapses repeated slashes and leading, interior and trailing `.` segments, applied to both root and path.
 
 **Writes are an allowlist; reads are a denylist.** A write must *match* the role's permitted globs; a read must merely *not match* the forbidden ones. The asymmetry is deliberate — agents legitimately read `README.md`, `pyproject.toml`, and type stubs, and an allowlist would fight them on every call.
 
