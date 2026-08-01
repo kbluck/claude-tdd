@@ -2386,7 +2386,9 @@ asserting.
 3. Dispatch **`tdd-mutate`** with the ranked target list, `limits.mutantsPerPass`, `knownRed`, and the mutation command if one is configured.
 4. On return, **verify the tree is clean**: `git status --porcelain` must be empty and `git diff HEAD` must be empty. Not clean → **reset and clean** (see *Reverting a dispatch*), record it, and do not trust the report — an agent that failed to revert may also have failed to run the suite honestly between mutants.
 5. Re-run the full suite, **subtracting `knownRed`**. Every test outside that list must pass. This is the last orchestrator-side suite check that did not subtract it, and leaving it flat would dead-end every mutation pass on any run where preflight recorded a non-empty `knownRed` — reproducing the exact failure the threading rule above was added to prevent.
-6. For each survivor, append a checklist item:
+6. **Group survivors by `missingBehavior` first**, then append one checklist item per distinct behavior. Several mutants routinely map to a single gap — the first live pass returned four survivors of which three were "nothing asserts divide's error message" (mutated to `None`, to an `XX`-wrapped string, and to upper case). One test closes all three, so queueing three Red cycles wastes two of them. Keep every mutant in the item's `mutant` field as evidence, and report the survivor count, not the item count.
+
+   For each distinct behavior, append:
 
        { "id": <next>, "behavior": "<the survivor's missingBehavior>",
          "status": "pending", "origin": "mutation",
