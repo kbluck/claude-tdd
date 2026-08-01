@@ -2374,7 +2374,8 @@ The guard needs no teardown — it is inert for any call that carries no
 
 ## Escalation
 
-Stop and return to the user on: a second guardrail violation by the same agent,
+Stop and return to the user on: a guardrail violation by the same agent beyond
+`limits.violationRetries` re-dispatches,
 Green stuck after `limits.greenAttempts`, any `blocked` outcome, or a suite that
 goes red in a way Refactor did not cause. Do not loop. A stuck agent is
 information the user needs, not a problem to grind on.
