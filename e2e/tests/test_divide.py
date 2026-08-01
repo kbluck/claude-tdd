@@ -26,3 +26,10 @@ def test_divide_returns_arithmetic_quotient():
     # (0.2857...), and a // b (3), all of which pass the assertion-free
     # test_divide_runs above.
     assert divide(7, 2) == 3.5
+
+
+def test_divide_with_negative_divisor_returns_negative_quotient():
+    # A negative divisor is not zero and must not raise. This distinguishes
+    # a guard of `b == 0` from a weakened `b <= 0`, which would incorrectly
+    # reject every negative divisor.
+    assert divide(7, -2) == -3.5
