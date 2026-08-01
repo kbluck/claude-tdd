@@ -1376,7 +1376,7 @@ strayed outside your role — do not work around it, adjust and continue.
 
 **Your `Bash` access is limited to the commands configured for your role.**
 Anything else — `git`, `rm`, `mv`, `sed` — is denied by design, not because you
-did something wrong. Use `Read`, `Grep`, and `Glob` to inspect, and `Edit` or
+did something wrong. Use `Read` to inspect, and `Edit` or
 `Write` to change files within your permitted paths.
 
 ## Your input
@@ -1447,7 +1447,7 @@ strayed outside your role — do not work around it, adjust and continue.
 
 **Your `Bash` access is limited to the commands configured for your role.**
 Anything else — `git`, `rm`, `mv`, `sed` — is denied by design, not because you
-did something wrong. Use `Read`, `Grep`, and `Glob` to inspect, and `Edit` or
+did something wrong. Use `Read` to inspect, and `Edit` or
 `Write` to change files within your permitted paths.
 
 ## Your input
@@ -1537,7 +1537,7 @@ strayed outside your role — do not work around it, adjust and continue.
 
 **Your `Bash` access is limited to the commands configured for your role.**
 Anything else — `git`, `rm`, `mv`, `sed` — is denied by design, not because you
-did something wrong. Use `Read`, `Grep`, and `Glob` to inspect, and `Edit` or
+did something wrong. Use `Read` to inspect, and `Edit` or
 `Write` to change files within your permitted paths.
 
 ## Your input
