@@ -1,0 +1,366 @@
+# Review package: 3cd3e2d10f6364a3ca414141b257d9309b086ca6..HEAD
+
+## Commits
+89ec68d fix(command): write every schema key in tdd-init's config template
+bdf9882 fix(plan): give /tdd-init's template the full config schema
+4175db4 feat(plugin): add /tdd-init toolchain detection and config setup
+
+## Files changed
+ AGENTS.md                                          |   1 +
+ commands/tdd-init.md                               | 179 +++++++++++++++++++++
+ .../plans/2026-07-30-tdd-subagent-workflow.md      |  34 +++-
+ tests/config-contract.test.sh                      |  50 ++++++
+ 4 files changed, 261 insertions(+), 3 deletions(-)
+
+## Diff
+diff --git a/AGENTS.md b/AGENTS.md
+index f6955da..bdfbdc4 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -18,20 +18,21 @@ tool call with "run /tdd-init". That is the guard working. Note `Grep` and `Glob
+ 
+ Commits follow Conventional Commits — refer to skill `conventional-commits`.
+ Stage explicit paths. Never `git add -A` — a subagent may be mid-edit.
+ Combine commits into the same type and scope. Separate commits with different type or scope.
+ Add a scope to every commit type except `chore`. Split commit if multiple scopes would be included. List of scopes:
+ - spec — the specification
+ - plan — the plan
+ - plugin — the entire project or the plugin config
+ - hooks — the hooks guarding the workflow
+ - agent — the subagent definitions
++- command — the slash commands
+ 
+ ## Tests
+ 
+ ```bash
+ bash tests/run.sh          # whole suite, ~1.3s, exits non-zero on any failure
+ ```
+ 
+ There is no single-test selector. `run.sh` globs `tests/*.test.sh`. The suite is fast enough that running all tests is acceptable.
+ 
+ Test files are **sourced**, not executed: no shebang, no `set -e`, no `exit`. They call `assert_eq` and `assert_contains` from
+diff --git a/commands/tdd-init.md b/commands/tdd-init.md
+new file mode 100644
+index 0000000..b6e000d
+--- /dev/null
++++ b/commands/tdd-init.md
+@@ -0,0 +1,179 @@
++---
++description: Detect the project's toolchain and write .tdd/config.json for the TDD cycle
++---
++
++Set up `.tdd/config.json` for this project. Work through these steps in order
++and do not skip the verification — a config that passes here is trusted by the
++guard hook on every subsequent tool call.
++
++## 1. Check prerequisites
++
++- `jq` on PATH (`command -v jq`). Missing → stop and tell the user to install it. The guard parses its input with `jq` and fails closed without it, which would deny every tool call mid-cycle.
++- The project is a git repository with at least one commit.
++
++## 2. Detect the toolchain
++
++| Marker | Toolchain | test | single | coverage |
++|---|---|---|---|---|
++| `pytest.ini`, or `pyproject.toml` mentioning pytest | pytest | `pytest -q` | `pytest -q {testId}` | `pytest -q --cov --cov-report=json:.tdd/coverage.json` |
++| `package.json` with `jest` | jest | `npx jest` | `npx jest -t {testId}` | `npx jest --coverage --coverageReporters=json-summary` |
++| `package.json` with `vitest` | vitest | `npx vitest run` | `npx vitest run -t {testId}` | `npx vitest run --coverage` |
++| `Cargo.toml` | cargo | `cargo test` | `cargo test {testId}` | `cargo llvm-cov --json` |
++| `go.mod` | go | `go test ./...` | `go test -run {testId} ./...` | `go test -cover ./...` |
++| `*.csproj`, `*.sln` | dotnet | `dotnet test` | `dotnet test --filter {testId}` | `dotnet test --collect:"XPlat Code Coverage"` |
++
++No marker matches, or several do → ask the user rather than guessing.
++
++## 2c. Report every degradation explicitly
++
++Each missing tool removes a mechanical check and silently replaces it with
++prompt discipline. Tell the user which guarantees they are actually getting:
++
++| Missing | Lost |
++|---|---|
++| `commands.coverage` | Red's three-way branch collapses to strict red; both coverage gates skipped; `crapMode` forced to `unavailable` |
++| `crapMode: "unavailable"` | CRAP trigger gone; refactor falls back to `maxFunctionLines` |
++| `commands.mutation` | hardening pass uses agent hand-mutation instead of a tool; slower, less systematic, still runs |
++
++Coverage is the one worth pressing on — losing it cascades into all three
++gates. Recommend installing it rather than proceeding without it.
++
++The command must report **uncovered line counts**, not just a percentage —
++`--cov-report=json`, `--coverageReporters=json-summary`, and equivalents. The
++gates count uncovered lines because percentage moves with the denominator and
++cannot distinguish a large tested addition from a small untested one.
++
++## 2b. Detect complexity and mutation tooling
++
++**Complexity**, for CRAP scores:
++
++| Toolchain | Command | Notes |
++|---|---|---|
++| pytest | `radon cc -j -s src` | JSON, per-function complexity |
++| jest / vitest | `npx eslint --format json --rule '{"complexity":["error",0]}' src` | complexity reported as violations |
++| cargo | `cargo clippy --message-format=json` | `cognitive_complexity` lint |
++| dotnet | native CRAP via Cobertura report | set `crapMode: "native"` |
++| go | `gocyclo -json ./...` | |
++
++Set `crapMode`:
++
++- `native` if the coverage report already carries CRAP (Cobertura, PHPUnit)
++- `computed` if both a complexity command and line-level coverage are available
++- `unavailable` otherwise
++
++**Run the complexity command before setting `computed`.** A command that is
++configured but not installed produces no scores, and a CRAP computation over no
++scores yields no triggers — indistinguishable from healthy code. If it does not
++run, set `unavailable` and tell the user which tool to install.
++
++**Mutation**, for the hardening pass: `mutmut` (Python), `Stryker` (JS/TS/C#),
++`PIT` (Java), `cargo-mutants` (Rust), `go-mutesting` (Go). Set
++`commands.mutation` if one is installed; `null` otherwise — the pass falls back
++to agent-driven hand-mutation, which still works but is slower and less
++systematic.
++
++## 3. Propose globs
++
++Infer `test`, `source`, and `ignore` from the layout. Typical shapes:
++
++- `test`: `tests/**`, `**/test_*.py`, `**/*_test.go`, `**/*.test.ts`, `spec/**`
++- `source`: `src/**`, `lib/**`, or the package directory at repo root
++- `ignore`: `docs/**`, `*.md`, manifests, lockfiles, CI config, `.gitignore`
++
++## 4. Verify the partition is exhaustive — do not skip this
++
++Every tracked file must match exactly one of the three lists.
++
++    git ls-files
++
++For each path, check it against `test`, then `source`, then `ignore`. Report
++every unclassified file to the user and extend the globs until none remain.
++
++**If `git ls-files` returns nothing, this check proved nothing.** An empty or
++freshly-initialised repo makes the partition vacuously exhaustive, and you
++would write a config whose globs have never been tested against a single real
++path. Say so explicitly and ask the user to confirm the globs by hand — do not
++report the partition as verified.
++
++This matters more than it looks. Writes are checked against an allowlist, so a
++bad glob merely blocks a legal write — noisy but safe. Reads are checked against
++a denylist, so an unclassified source file is *readable by Red*, and read
++isolation disappears with no error and no trace in any diff. The partition check
++is what makes the denylist sound.
++
++Also report any file matching **two** lists — an overlap means the same path is
++both writable and forbidden depending on phase, which is almost always a
++mistake in the globs.
++
++## 5. Show the user the proposed config and get confirmation
++
++Present every field. Let them correct anything. Do not write until they agree.
++
++## 6. Verify each command parses under the guard's Bash rule
++
++For each configured command, the static prefix is everything before the first
++`{`. Three checks, in order of severity:
++
++1. **Refuse any command whose static prefix is empty or whitespace-only** — one
++   that starts with its placeholder, or is only a placeholder. The guard would
++   have nothing to match against and its allowlist would degrade to "any
++   command without shell metacharacters", which is the single input that turns
++   the whole Bash guard off. The guard denies this at runtime, so such a
++   config would break every dispatch; catch it here where the error is
++   explainable.
++2. **Warn if a template has content *after* its placeholder** — e.g.
++   `pytest -q {testId} --cov`. Only the static prefix constrains, so everything
++   the agent supplies after it becomes the delta, and the template's own
++   trailing text will be treated as agent input and rejected. Move such flags
++   before the placeholder.
++3. **Warn if a template contains shell metacharacters.** Those are trusted in
++   the template itself, but the agent will not be able to append anything
++   without tripping the metacharacter ban on the delta.
++
++Confirm each command is actually runnable as written.
++
++## 7. Write the files
++
++`.tdd/config.json`:
++
++    {
++      "version": 1,
++      "commands": {
++        "test": "...", "single": "...", "coverage": "...",
++        "complexity": "...", "mutation": null
++      },
++      "crapMode": "computed",
++      "globs": { "test": [...], "source": [...], "ignore": [...] },
++      "refactorTriggers": { "maxCrap": 30, "duplicateThreshold": 3, "maxFunctionLines": 40 },
++      "limits": {
++        "greenAttempts": 3, "violationRetries": 1,
++        "mutationRounds": 2, "mutantsPerPass": 20
++      },
++      "coverageGates": { "greenMaxNewUncovered": 2, "refactorMaxNewUncovered": 0 }
++    }
++
++**Write every key, including the ones whose value is `null`.** An omitted key is
++not a smaller config, it is a broken one: `jq` returns `null`, and a `null`
++threshold compares as "never exceeded". Omit `refactorTriggers.maxCrap` and the
++primary refactor trigger silently never fires; omit `limits.mutantsPerPass` and
++the mutation pass has no bound. A `null` value means "this project has no such
++tool, degrade explicitly"; an absent key means nobody decided.
++
++Append to `.gitignore` if not already present:
++
++    .tdd/checklist.json
++    .tdd/coverage.json
++
++## 8. Commit
++
++    git add .tdd/config.json .gitignore
++    git commit -m "chore: configure TDD subagent workflow"
++
++Commit is mandatory, not optional. `/tdd`'s preflight refuses to start against
++a dirty tree, so leaving these files uncommitted makes the very next command
++fail on this command's side effects.
++
++## 9. Confirm
++
++Tell the user the config is written and committed, and that `/tdd <spec-path>`
++is ready to run.
+diff --git a/docs/superpowers/plans/2026-07-30-tdd-subagent-workflow.md b/docs/superpowers/plans/2026-07-30-tdd-subagent-workflow.md
+index 2f15866..73fbd16 100644
+--- a/docs/superpowers/plans/2026-07-30-tdd-subagent-workflow.md
++++ b/docs/superpowers/plans/2026-07-30-tdd-subagent-workflow.md
+@@ -1882,27 +1882,41 @@ For each configured command, the static prefix is everything before the first
+    without tripping the metacharacter ban on the delta.
+ 
+ Confirm each command is actually runnable as written.
+ 
+ ## 7. Write the files
+ 
+ `.tdd/config.json`:
+ 
+     {
+       "version": 1,
+-      "commands": { "test": "...", "single": "...", "coverage": "..." },
++      "commands": {
++        "test": "...", "single": "...", "coverage": "...",
++        "complexity": "...", "mutation": null
++      },
++      "crapMode": "computed",
+       "globs": { "test": [...], "source": [...], "ignore": [...] },
+-      "refactorTriggers": { "maxFunctionLines": 40, "duplicateThreshold": 3 },
+-      "limits": { "greenAttempts": 3, "violationRetries": 1 },
++      "refactorTriggers": { "maxCrap": 30, "duplicateThreshold": 3, "maxFunctionLines": 40 },
++      "limits": {
++        "greenAttempts": 3, "violationRetries": 1,
++        "mutationRounds": 2, "mutantsPerPass": 20
++      },
+       "coverageGates": { "greenMaxNewUncovered": 2, "refactorMaxNewUncovered": 0 }
+     }
+ 
++**Write every key, including the ones whose value is `null`.** An omitted key is
++not a smaller config, it is a broken one: `jq` returns `null`, and a `null`
++threshold compares as "never exceeded". Omit `refactorTriggers.maxCrap` and the
++primary refactor trigger silently never fires; omit `limits.mutantsPerPass` and
++the mutation pass has no bound. A `null` value means "this project has no such
++tool, degrade explicitly"; an absent key means nobody decided.
++
+ Append to `.gitignore` if not already present:
+ 
+     .tdd/checklist.json
+     .tdd/coverage.json
+ 
+ ## 8. Commit
+ 
+     git add .tdd/config.json .gitignore
+     git commit -m "chore: configure TDD subagent workflow"
+ 
+@@ -1950,20 +1964,34 @@ for _k in version crapMode \
+ done
+ 
+ # Keys that must be PRESENT but may be null -- absence and null mean different
+ # things here. Null is "this toolchain has no such tool, degrade explicitly";
+ # absent means /tdd-init forgot to decide.
+ for _k in coverage complexity mutation; do
+   assert_eq "true" "$(jq -r ".commands | has(\"${_k}\")" "$_cfg")" \
+     "config declares commands.${_k} (null is allowed, absent is not)"
+ done
+ 
++# The template inside commands/tdd-init.md is a SECOND copy of this schema, and
++# two copies drift. It already did once: the template omitted crapMode,
++# maxCrap, mutationRounds, mutantsPerPass, commands.complexity and
++# commands.mutation, so an agent following it would have written a config whose
++# primary refactor trigger threshold was null -- a comparison that never fires.
++_init="$REPO_ROOT/commands/tdd-init.md"
++_init_text=$(cat "$_init")
++for _k in version crapMode complexity mutation \
++          maxCrap duplicateThreshold maxFunctionLines \
++          greenAttempts violationRetries mutationRounds mutantsPerPass \
++          greenMaxNewUncovered refactorMaxNewUncovered ignore; do
++  assert_contains "$_k" "$_init_text" "tdd-init's config template names ${_k}"
++done
++
+ # The three glob lists must be arrays. A bare string would word-split in the
+ # guard into per-character globs and match almost nothing -- denying every
+ # write and, worse, permitting every read.
+ for _k in test source ignore; do
+   assert_eq "array" "$(jq -r ".globs.${_k} | type" "$_cfg")" \
+     "globs.${_k} is an array"
+ done
+ ```
+ 
+ Run `bash tests/run.sh`, then verify it bites: delete `globs.source` from the
+diff --git a/tests/config-contract.test.sh b/tests/config-contract.test.sh
+new file mode 100644
+index 0000000..1f78df9
+--- /dev/null
++++ b/tests/config-contract.test.sh
+@@ -0,0 +1,50 @@
++# Sourced by tests/run.sh. Do not add a shebang, set -e, or exit.
++#
++# Pins the .tdd/config.json schema that /tdd-init must produce and that
++# guard.sh and the orchestrator consume. Update this list when the schema
++# changes -- deliberately, not by discovering a null at runtime.
++
++_cfg="$REPO_ROOT/tests/fixtures/config.json"
++
++# Keys that must be present AND non-null.
++for _k in version crapMode \
++          commands.test commands.single \
++          globs.test globs.source globs.ignore \
++          refactorTriggers.maxCrap refactorTriggers.duplicateThreshold \
++          refactorTriggers.maxFunctionLines \
++          limits.greenAttempts limits.violationRetries \
++          limits.mutationRounds limits.mutantsPerPass \
++          coverageGates.greenMaxNewUncovered coverageGates.refactorMaxNewUncovered; do
++  assert_eq "yes" "$(jq -r "if (.${_k} // null) == null then \"no\" else \"yes\" end" "$_cfg")" \
++    "config has non-null ${_k}"
++done
++
++# Keys that must be PRESENT but may be null -- absence and null mean different
++# things here. Null is "this toolchain has no such tool, degrade explicitly";
++# absent means /tdd-init forgot to decide.
++for _k in coverage complexity mutation; do
++  assert_eq "true" "$(jq -r ".commands | has(\"${_k}\")" "$_cfg")" \
++    "config declares commands.${_k} (null is allowed, absent is not)"
++done
++
++# The template inside commands/tdd-init.md is a SECOND copy of this schema, and
++# two copies drift. It already did once: the template omitted crapMode,
++# maxCrap, mutationRounds, mutantsPerPass, commands.complexity and
++# commands.mutation, so an agent following it would have written a config whose
++# primary refactor trigger threshold was null -- a comparison that never fires.
++_init="$REPO_ROOT/commands/tdd-init.md"
++_init_text=$(cat "$_init")
++for _k in version crapMode complexity mutation \
++          maxCrap duplicateThreshold maxFunctionLines \
++          greenAttempts violationRetries mutationRounds mutantsPerPass \
++          greenMaxNewUncovered refactorMaxNewUncovered ignore; do
++  assert_contains "$_k" "$_init_text" "tdd-init's config template names ${_k}"
++done
++
++# The three glob lists must be arrays. A bare string would word-split in the
++# guard into per-character globs and match almost nothing -- denying every
++# write and, worse, permitting every read.
++for _k in test source ignore; do
++  assert_eq "array" "$(jq -r ".globs.${_k} | type" "$_cfg")" \
++    "globs.${_k} is an array"
++done

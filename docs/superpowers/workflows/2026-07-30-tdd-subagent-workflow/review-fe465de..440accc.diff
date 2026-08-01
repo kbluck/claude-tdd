@@ -1,0 +1,131 @@
+# Review package: fe465dee2a5f907e275bd95d954df20524451ef6..HEAD
+
+## Commits
+440accc feat: bash command allowlist with delta-scoped metacharacter ban
+
+## Files changed
+ hooks/lib/rules.sh  | 42 ++++++++++++++++++++++++++++++++++++++++++
+ tests/rules.test.sh | 48 ++++++++++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 90 insertions(+)
+
+## Diff
+diff --git a/hooks/lib/rules.sh b/hooks/lib/rules.sh
+index bbc3e6c..6fa3fc9 100644
+--- a/hooks/lib/rules.sh
++++ b/hooks/lib/rules.sh
+@@ -73,10 +73,52 @@ tdd_path_verdict() {
+       if [ -z "$test_globs" ]; then
+         echo "deny: no test globs are configured, so $path cannot be shown not to be a test; the guard fails closed"; return
+       fi
+       if tdd_matches_any "$path" "$test_globs"; then
+         echo "deny: ${role} may not read test files; $path is under the configured test globs. Work from the handover report and the test runner's output."
+       else echo "allow"; fi ;;
+     *)
+       echo "deny: unknown role '${role}' or mode '${mode}'; the guard fails closed" ;;
+   esac
+ }
++
++# tdd_bash_verdict <command> <template>
++# Echoes "allow" or "deny: <reason>".
++#
++# The command must begin with the template's static prefix (everything
++# before the first `{` placeholder). Whatever the agent added beyond that
++# prefix — the delta — must contain no shell metacharacters. The template
++# itself is trusted and may contain them.
++#
++# Both parameters default to empty, matching tdd_path_verdict above: this
++# file is sourced under `set -u`, where an unset positional aborts the whole
++# sourcing script. An aborted guard exits non-zero-but-not-2, which is
++# treated as a non-blocking error and lets the tool call through. A caller
++# bug must degrade to deny, never to a crash that permits.
++tdd_bash_verdict() {
++  local cmd="${1:-}" template="${2:-}"
++
++  if [ -z "$template" ]; then
++    echo "deny: no command is configured for this phase; the guard fails closed"
++    return
++  fi
++
++  local prefix="${template%%\{*}"
++  # trim trailing whitespace from the prefix
++  while [ "${prefix% }" != "$prefix" ]; do prefix="${prefix% }"; done
++
++  case "$cmd" in
++    "$prefix"*) ;;
++    *) echo "deny: only the configured command for this phase may be run; expected it to start with '${prefix}'"
++       return ;;
++  esac
++
++  local delta="${cmd#"$prefix"}"
++  case "$delta" in
++    *";"*|*"|"*|*"&"*|*">"*|*"<"*|*'`'*|*'$('*|*"
++"*)
++      echo "deny: shell metacharacters are not permitted in arguments; got '${delta}'"
++      return ;;
++  esac
++
++  echo "allow"
++}
+diff --git a/tests/rules.test.sh b/tests/rules.test.sh
+index 6a1674b..d1b7413 100644
+--- a/tests/rules.test.sh
++++ b/tests/rules.test.sh
+@@ -92,10 +92,58 @@ assert_eq "allow" "$(tdd_path_verdict green write src/pkg/brand_new.py "$TG" "$S
+   "green may write nested source that does NOT exist yet"
+ 
+ cd "$_glob_prevpwd" || return
+ rm -rf "$_glob_sandbox"
+ 
+ # The caller's noglob setting must survive unchanged.
+ set +f
+ tdd_matches_any "src/a.py" "$SG" || true
+ case "$-" in *f*) _noglob_leaked=yes ;; *) _noglob_leaked=no ;; esac
+ assert_eq "no" "$_noglob_leaked" "tdd_matches_any restores the caller's noglob flag"
++
++# --- bash allowlist ---
++T_SINGLE="pytest -q {testId}"
++T_FULL="pytest -q"
++T_COV="pytest -q --cov --cov-report=json:.tdd/coverage.json"
++
++assert_eq "allow" "$(tdd_bash_verdict "pytest -q tests/test_a.py::test_x" "$T_SINGLE")" \
++  "substituted test id is allowed"
++assert_eq "allow" "$(tdd_bash_verdict "pytest -q" "$T_FULL")" \
++  "exact template match is allowed"
++assert_eq "allow" "$(tdd_bash_verdict "$T_COV" "$T_COV")" \
++  "template containing a colon path is allowed verbatim"
++
++assert_contains "deny" "$(tdd_bash_verdict "rm -rf src" "$T_FULL")" \
++  "unrelated command is denied"
++assert_contains "deny" "$(tdd_bash_verdict "pytest -q; rm -rf src" "$T_FULL")" \
++  "semicolon in delta is denied"
++assert_contains "deny" "$(tdd_bash_verdict "pytest -q | tee out.txt" "$T_FULL")" \
++  "pipe in delta is denied"
++assert_contains "deny" "$(tdd_bash_verdict "pytest -q > out.txt" "$T_FULL")" \
++  "redirect in delta is denied"
++assert_contains "deny" "$(tdd_bash_verdict 'pytest -q $(whoami)' "$T_FULL")" \
++  "command substitution in delta is denied"
++assert_contains "deny" "$(tdd_bash_verdict "pytest -q && rm -rf src" "$T_FULL")" \
++  "and-chain in delta is denied"
++assert_contains "deny" "$(tdd_bash_verdict "sed -i s/a/b/ src/a.py" "$T_SINGLE")" \
++  "in-place edit via bash is denied"
++assert_contains "deny" "$(tdd_bash_verdict "pytest -q" "")" \
++  "empty template denies"
++
++# --- REGRESSION: glob characters in the agent-supplied portion are data,
++# not a pattern. `case` only reinterprets the pattern side of a match, never
++# the subject, but this pins it directly rather than trusting that reasoning
++# -- pytest parametrized node ids routinely contain `[` and `-k` expressions
++# routinely contain `*`.
++assert_eq "allow" "$(tdd_bash_verdict "pytest -q tests/test_a.py::test_x[case-1]" "$T_SINGLE")" \
++  "glob characters in a parametrized test id are treated as data, not a pattern"
++assert_eq "allow" "$(tdd_bash_verdict "pytest -q -k test_*" "$T_FULL")" \
++  "glob characters after the prefix are treated as literal data, not a pattern"
++
++# --- REGRESSION: a missing (not just empty) template must not crash the
++# sourcing script under `set -u`. An unset positional in a bare `$2` aborts
++# the caller with a non-blocking exit code, which lets the tool call through
++# instead of denying it -- the same fail-open class as Task 3's unquoted
++# glob bug. Run through a subshell so a crash here is visible as an empty
++# result rather than killing the whole suite.
++assert_contains "deny" "$(tdd_bash_verdict "pytest -q" 2>/dev/null)" \
++  "missing template argument denies rather than crashing"

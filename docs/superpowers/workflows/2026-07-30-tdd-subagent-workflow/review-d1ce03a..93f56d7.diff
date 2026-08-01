@@ -1,0 +1,119 @@
+# Review package: d1ce03a..HEAD
+
+## Commits
+93f56d7 test(command): use json-form needles, bound the block end anchor
+134e6f0 fix(plan): match the JSON key form, and bound the extracted block
+
+## Files changed
+ .../plans/2026-07-30-tdd-subagent-workflow.md      | 24 +++++++++++++++++++++-
+ tests/config-contract.test.sh                      | 24 +++++++++++++++++++++-
+ 2 files changed, 46 insertions(+), 2 deletions(-)
+
+## Diff
+diff --git a/docs/superpowers/plans/2026-07-30-tdd-subagent-workflow.md b/docs/superpowers/plans/2026-07-30-tdd-subagent-workflow.md
+index 8c1e72c..73ab11c 100644
+--- a/docs/superpowers/plans/2026-07-30-tdd-subagent-workflow.md
++++ b/docs/superpowers/plans/2026-07-30-tdd-subagent-workflow.md
+@@ -1985,26 +1985,48 @@ done
+ # commands.mutation, so an agent following it would have written a config whose
+ # primary refactor trigger threshold was null -- a comparison that never fires.
+ # Scope the haystack to the Step 7 JSON block, NOT the whole file. Seven of
+ # these key names also appear in surrounding prose (the detection table, the
+ # degradation table), so a whole-file grep passes even when the key is missing
+ # from the template a model actually copies from. Verified: deleting crapMode
+ # from the JSON block alone left the suite fully green under a whole-file
+ # match. That is the same defect this test exists to catch, one level up.
+ _init="$REPO_ROOT/commands/tdd-init.md"
+ _init_text=$(sed -n '/^## 7\. Write the files/,/^Append to/p' "$_init")
++
++# Both anchors have to be checked, and they fail differently.
++#
++# Start anchor broken -> sed returns empty -> every assertion below fails in a
++# heap, which is loud but confusing. The first assertion names the real cause.
++#
++# End anchor broken -> sed runs to EOF instead, silently re-widening the
++# haystack toward the whole-file behaviour this scoping was added to remove.
++# That one passes quietly, so it needs its own check: nothing from step 8
++# onward may appear in the extracted block.
+ assert_contains "version" "$_init_text" "the Step 7 JSON block was located at all"
++case "$_init_text" in
++  *"## 8"*) _bounded=no ;;
++  *)        _bounded=yes ;;
++esac
++assert_eq "yes" "$_bounded" "the extracted block stops before step 8 (end anchor still matches)"
+ for _k in version crapMode complexity mutation \
+           maxCrap duplicateThreshold maxFunctionLines \
+           greenAttempts violationRetries mutationRounds mutantsPerPass \
+           greenMaxNewUncovered refactorMaxNewUncovered ignore; do
+-  assert_contains "$_k" "$_init_text" "tdd-init's config template names ${_k}"
++  # Match the JSON form `"key":`, not the bare word. Four key names also occur
++  # elsewhere inside this same block -- maxCrap and mutantsPerPass in the
++  # paragraph right after the JSON, mutation as a substring of mutationRounds,
++  # ignore as a substring of .gitignore on the end-anchor line -- so a bare-name
++  # needle passes even when the key is absent from the template. Verified: with
++  # the bare needle, deleting any of those four from the JSON left the suite
++  # fully green.
++  assert_contains "\"${_k}\":" "$_init_text" "tdd-init's config template names ${_k}"
+ done
+ 
+ # The three glob lists must be arrays. A bare string would word-split in the
+ # guard into per-character globs and match almost nothing -- denying every
+ # write and, worse, permitting every read.
+ for _k in test source ignore; do
+   assert_eq "array" "$(jq -r ".globs.${_k} | type" "$_cfg")" \
+     "globs.${_k} is an array"
+ done
+ ```
+diff --git a/tests/config-contract.test.sh b/tests/config-contract.test.sh
+index 57d9726..19d5e9f 100644
+--- a/tests/config-contract.test.sh
++++ b/tests/config-contract.test.sh
+@@ -33,25 +33,47 @@ done
+ # commands.mutation, so an agent following it would have written a config whose
+ # primary refactor trigger threshold was null -- a comparison that never fires.
+ # Scope the haystack to the Step 7 JSON block, NOT the whole file. Seven of
+ # these key names also appear in surrounding prose (the detection table, the
+ # degradation table), so a whole-file grep passes even when the key is missing
+ # from the template a model actually copies from. Verified: deleting crapMode
+ # from the JSON block alone left the suite fully green under a whole-file
+ # match. That is the same defect this test exists to catch, one level up.
+ _init="$REPO_ROOT/commands/tdd-init.md"
+ _init_text=$(sed -n '/^## 7\. Write the files/,/^Append to/p' "$_init")
++
++# Both anchors have to be checked, and they fail differently.
++#
++# Start anchor broken -> sed returns empty -> every assertion below fails in a
++# heap, which is loud but confusing. The first assertion names the real cause.
++#
++# End anchor broken -> sed runs to EOF instead, silently re-widening the
++# haystack toward the whole-file behaviour this scoping was added to remove.
++# That one passes quietly, so it needs its own check: nothing from step 8
++# onward may appear in the extracted block.
+ assert_contains "version" "$_init_text" "the Step 7 JSON block was located at all"
++case "$_init_text" in
++  *"## 8"*) _bounded=no ;;
++  *)        _bounded=yes ;;
++esac
++assert_eq "yes" "$_bounded" "the extracted block stops before step 8 (end anchor still matches)"
+ for _k in version crapMode complexity mutation \
+           maxCrap duplicateThreshold maxFunctionLines \
+           greenAttempts violationRetries mutationRounds mutantsPerPass \
+           greenMaxNewUncovered refactorMaxNewUncovered ignore; do
+-  assert_contains "$_k" "$_init_text" "tdd-init's config template names ${_k}"
++  # Match the JSON form `"key":`, not the bare word. Four key names also occur
++  # elsewhere inside this same block -- maxCrap and mutantsPerPass in the
++  # paragraph right after the JSON, mutation as a substring of mutationRounds,
++  # ignore as a substring of .gitignore on the end-anchor line -- so a bare-name
++  # needle passes even when the key is absent from the template. Verified: with
++  # the bare needle, deleting any of those four from the JSON left the suite
++  # fully green.
++  assert_contains "\"${_k}\":" "$_init_text" "tdd-init's config template names ${_k}"
+ done
+ 
+ # The three glob lists must be arrays. A bare string would word-split in the
+ # guard into per-character globs and match almost nothing -- denying every
+ # write and, worse, permitting every read.
+ for _k in test source ignore; do
+   assert_eq "array" "$(jq -r ".globs.${_k} | type" "$_cfg")" \
+     "globs.${_k} is an array"
+ done

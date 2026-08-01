@@ -1,0 +1,412 @@
+# Review package: bdeaa86..HEAD
+
+## Commits
+fe465de fix: guard glob splitting against pathname expansion
+25d8888 fix: confine glob splitting to tdd_matches_any under set -f
+
+## Files changed
+ .../plans/2026-07-30-tdd-subagent-workflow.md      | 135 +++++++++++++++++----
+ hooks/lib/rules.sh                                 |  75 +++++++++---
+ tests/rules.test.sh                                |  46 ++++++-
+ 3 files changed, 209 insertions(+), 47 deletions(-)
+
+## Diff
+diff --git a/docs/superpowers/plans/2026-07-30-tdd-subagent-workflow.md b/docs/superpowers/plans/2026-07-30-tdd-subagent-workflow.md
+index 54c99b8..1dba132 100644
+--- a/docs/superpowers/plans/2026-07-30-tdd-subagent-workflow.md
++++ b/docs/superpowers/plans/2026-07-30-tdd-subagent-workflow.md
+@@ -316,29 +316,37 @@ git commit -m "feat: plugin manifest and zero-dependency test harness"
+ The phase × mode × path matrix. Pure functions, no I/O.
+ 
+ **Files:**
+ - Create: `hooks/lib/rules.sh`
+ - Create: `tests/rules.test.sh`
+ 
+ **Interfaces:**
+ - Consumes: `assert_eq`, `assert_contains` (Task 2)
+ - Produces:
+   - `tdd_glob_match <pattern> <path>` → exit 0 on match, 1 otherwise
+-  - `tdd_matches_any <path> <glob1> [glob2 ...]` → exit 0 if any glob matches
+-  - `tdd_path_verdict <phase> <mode> <path> <test_globs> <source_globs>` → echoes `allow` or `deny: <reason>`. Glob arguments are **space-separated strings**, not arrays — Bash 3.2 has no associative arrays and passing arrays through function boundaries is not worth the complexity here.
++  - `tdd_matches_any <path> <glob-string>` → exit 0 if any glob in the space-separated string matches
++  - `tdd_path_verdict <role> <mode> <path> <test_globs> <source_globs>` → echoes `allow` or `deny: <reason>`. Glob arguments are **space-separated strings**, not arrays — Bash 3.2 has no associative arrays and passing arrays through function boundaries is not worth the complexity here.
+ 
+ **Design notes the implementer needs:**
+ 
+ *Glob semantics.* Inside `[[ ]]`, an unquoted pattern's `*` matches `/` as well as any other character — unlike shell filename globbing. So `tests/*` already matches `tests/a/b.py`. Config files write `tests/**` for readability; normalize `**` to `*` before matching. Write the substitution as `${1//\*\*/*}` — in `${var//pattern/replacement}` the replacement half is *not* a pattern, so writing `\*` there can leave a literal backslash on some Bash versions.
+ 
+ *Why writes are an allowlist and reads a denylist.* A write must match the role's permitted globs. A read must merely not match the forbidden ones, because agents legitimately read `README.md`, `pyproject.toml`, and type stubs, and an allowlist would fight them constantly. This is only sound because `/tdd-init` (Task 7) proves the test/source/ignore globs partition every tracked file — otherwise an unclassified source file would be readable by Red.
+ 
++*Splitting the glob string is the one dangerous operation in this file, and it is confined to `tdd_matches_any`.* An unquoted `$globs` in bash undergoes word splitting **and pathname expansion**. Pathname expansion is the hazard: `src/**` would be replaced by whatever files happen to exist on disk, so `tdd_path_verdict red read src/pkg/module.py` returns `allow` when run from a directory containing `src/`, and `deny` when run from anywhere else. Same arguments, different answer, and the wrong answer is the permissive one — a silent fail-open on exactly the read isolation nothing else can enforce.
++
++So `tdd_matches_any` takes the glob **string** (quoted at every call site) and does the splitting internally with `set -f` in force, saving and restoring the caller's flag. Callers cannot reintroduce the bug by forgetting to quote, because quoting is now correct everywhere.
++
++`tdd_glob_match` needs no such guard: inside `[[ ]]`, bash does not perform pathname expansion on the right-hand pattern.
++
++*Every parameter defaults to empty, and an empty governing glob list denies.* `tests/run.sh` sources this file under `set -u`, where an unset positional would abort the script rather than return a verdict — and an aborted guard exits non-zero-but-not-2, which Claude Code treats as a non-blocking error, letting the tool call proceed. A caller bug must degrade to `deny`, never to a crash that permits.
++
+ *The matrix:*
+ 
+ | phase | mode | rule |
+ |---|---|---|
+ | `red` | `write` | allow iff matches test globs |
+ | `red` | `read` | deny iff matches source globs |
+ | `green` | `write` | allow iff matches source globs |
+ | `green` | `read` | deny iff matches test globs |
+ | `refactor` | `write` | allow iff matches source globs |
+ | `refactor` | `read` | deny iff matches test globs |
+@@ -408,85 +416,162 @@ assert_contains "deny" "$(tdd_path_verdict refactor read tests/test_a.py "$TG" "
+ # agent's and the orchestrator's job, not the guard's ---
+ assert_eq "allow" "$(tdd_path_verdict mutation write src/a.py "$TG" "$SG")" \
+   "mutation may write source"
+ assert_contains "deny" "$(tdd_path_verdict mutation write tests/test_a.py "$TG" "$SG")" \
+   "mutation may not write tests"
+ assert_contains "deny" "$(tdd_path_verdict mutation read tests/test_a.py "$TG" "$SG")" \
+   "mutation may not read tests"
+ 
+ # --- fail closed ---
+ assert_contains "deny" "$(tdd_path_verdict "" write src/a.py "$TG" "$SG")" \
+-  "empty phase denies"
++  "empty role denies"
+ assert_contains "deny" "$(tdd_path_verdict bogus write src/a.py "$TG" "$SG")" \
+-  "unknown phase denies"
++  "unknown role denies"
++assert_contains "deny" "$(tdd_path_verdict red read src/a.py "$TG" "")" \
++  "empty source globs deny a read rather than permitting it"
++assert_contains "deny" "$(tdd_path_verdict green read tests/test_a.py "" "$SG")" \
++  "empty test globs deny a read rather than permitting it"
++assert_contains "deny" "$(tdd_path_verdict red write tests/test_a.py "" "$SG")" \
++  "empty test globs deny a write"
++
++# --- REGRESSION: the verdict must not depend on what is on disk ---
++#
++# An unquoted glob string undergoes pathname expansion as well as word
++# splitting, so `src/**` would be replaced by whatever files exist. That made
++# `red read src/pkg/module.py` return "allow" from a directory containing
++# src/, and "deny" from anywhere else -- a silent fail-open on the one rule
++# nothing else in the design can enforce.
++#
++# These run inside a scratch tree whose shape would trigger the bug.
++_glob_sandbox="$(mktemp -d)"
++mkdir -p "$_glob_sandbox/src/pkg" "$_glob_sandbox/tests"
++touch "$_glob_sandbox/src/a.py" "$_glob_sandbox/src/pkg/module.py" \
++      "$_glob_sandbox/tests/test_a.py"
++_glob_prevpwd="$PWD"
++cd "$_glob_sandbox" || return
++
++assert_contains "deny" "$(tdd_path_verdict red read src/pkg/module.py "$TG" "$SG")" \
++  "red may not read nested source even when src/ exists on disk"
++assert_contains "deny" "$(tdd_path_verdict red read src/a.py "$TG" "$SG")" \
++  "red may not read top-level source even when it exists on disk"
++assert_contains "deny" "$(tdd_path_verdict green read tests/test_a.py "$TG" "$SG")" \
++  "green may not read an existing test file"
++assert_eq "allow" "$(tdd_path_verdict green write src/pkg/module.py "$TG" "$SG")" \
++  "green may write nested source that exists on disk"
++assert_eq "allow" "$(tdd_path_verdict green write src/pkg/brand_new.py "$TG" "$SG")" \
++  "green may write nested source that does NOT exist yet"
++
++cd "$_glob_prevpwd" || return
++rm -rf "$_glob_sandbox"
++
++# The caller's noglob setting must survive unchanged.
++set +f
++tdd_matches_any "src/a.py" "$SG" || true
++case "$-" in *f*) _noglob_leaked=yes ;; *) _noglob_leaked=no ;; esac
++assert_eq "no" "$_noglob_leaked" "tdd_matches_any restores the caller's noglob flag"
+ ```
+ 
+ - [ ] **Step 2: Run to verify they fail**
+ 
+ Run: `bash tests/run.sh`
+ Expected: FAIL — `hooks/lib/rules.sh: No such file or directory`
+ 
+ - [ ] **Step 3: Write the implementation**
+ 
+ `hooks/lib/rules.sh`:
+ 
+ ```bash
+ # Pure decision functions for the TDD guard hook.
+-# Sourced, never executed. No I/O, no globals, no side effects.
++# Sourced, never executed. No load-time side effects, no globals.
+ 
+ # tdd_glob_match <pattern> <path>
+ # Returns 0 on match. `**` is normalized to `*` because inside [[ ]] a
+-# pattern's `*` already crosses `/`.
++# pattern's `*` already crosses `/`. Safe without `set -f`: bash does not
++# perform pathname expansion on the right-hand pattern of [[ == ]].
+ tdd_glob_match() {
+   local pat="${1//\*\*/*}"
+-  local path="$2"
++  local path="${2:-}"
+   [[ "$path" == $pat ]]
+ }
+ 
+-# tdd_matches_any <path> <glob>...
++# tdd_matches_any <path> <glob-string>
++# Splits the space-separated glob string and tests each against the path.
++#
++# The split MUST run with pathname expansion disabled. Unquoted `$globs`
++# would otherwise be expanded against the real filesystem -- `src/**` would
++# become whatever files happen to exist -- making the verdict depend on the
++# current directory and silently failing OPEN on reads. This function is the
++# only place that split happens, so this is the only place that needs the
++# guard.
+ tdd_matches_any() {
+-  local path="$1"; shift
+-  local g
+-  for g in "$@"; do
+-    tdd_glob_match "$g" "$path" && return 0
++  local path="${1:-}" globs="${2:-}"
++  local g rc=1 restore=0
++
++  case "$-" in
++    *f*) ;;                       # caller already had noglob on
++    *) restore=1; set -f ;;
++  esac
++
++  for g in $globs; do
++    if tdd_glob_match "$g" "$path"; then rc=0; break; fi
+   done
+-  return 1
++
++  if [ "$restore" = 1 ]; then set +f; fi
++  return "$rc"
+ }
+ 
+-# tdd_path_verdict <phase> <mode> <path> <test_globs> <source_globs>
++# tdd_path_verdict <role> <mode> <path> <test_globs> <source_globs>
+ # Echoes "allow" or "deny: <reason>".
++#
++# Every parameter defaults to empty rather than tripping `set -u`: this file
++# is sourced under `set -u`, where an unset positional aborts the whole
++# script. An aborted guard exits non-zero-but-not-2, which is treated as a
++# non-blocking error and lets the tool call through. A caller bug must
++# degrade to deny, never to a crash that permits.
+ tdd_path_verdict() {
+-  local phase="$1" mode="$2" path="$3"
+-  local test_globs="$4" source_globs="$5"
++  local role="${1:-}" mode="${2:-}" path="${3:-}"
++  local test_globs="${4:-}" source_globs="${5:-}"
+ 
+-  case "$phase:$mode" in
++  case "$role:$mode" in
+     red:write)
+-      if tdd_matches_any "$path" $test_globs; then echo "allow"
++      if [ -z "$test_globs" ]; then
++        echo "deny: no test globs are configured, so no write can be verified; the guard fails closed"; return
++      fi
++      if tdd_matches_any "$path" "$test_globs"; then echo "allow"
+       else echo "deny: Red may only write test files; $path is not under the configured test globs"; fi ;;
+     red:read)
+-      if tdd_matches_any "$path" $source_globs; then
++      if [ -z "$source_globs" ]; then
++        echo "deny: no source globs are configured, so $path cannot be shown not to be source; the guard fails closed"; return
++      fi
++      if tdd_matches_any "$path" "$source_globs"; then
+         echo "deny: Red may not read source files; $path is under the configured source globs"
+       else echo "allow"; fi ;;
+     green:write|refactor:write|mutation:write)
+-      if tdd_matches_any "$path" $source_globs; then echo "allow"
+-      else echo "deny: ${phase} may only write source files; $path is not under the configured source globs"; fi ;;
++      if [ -z "$source_globs" ]; then
++        echo "deny: no source globs are configured, so no write can be verified; the guard fails closed"; return
++      fi
++      if tdd_matches_any "$path" "$source_globs"; then echo "allow"
++      else echo "deny: ${role} may only write source files; $path is not under the configured source globs"; fi ;;
+     green:read|refactor:read|mutation:read)
+-      if tdd_matches_any "$path" $test_globs; then
+-        echo "deny: ${phase} may not read test files; $path is under the configured test globs. Work from the handover report and the test runner's output."
++      if [ -z "$test_globs" ]; then
++        echo "deny: no test globs are configured, so $path cannot be shown not to be a test; the guard fails closed"; return
++      fi
++      if tdd_matches_any "$path" "$test_globs"; then
++        echo "deny: ${role} may not read test files; $path is under the configured test globs. Work from the handover report and the test runner's output."
+       else echo "allow"; fi ;;
+     *)
+-      echo "deny: unknown phase '${phase}' or mode '${mode}'; the guard fails closed" ;;
++      echo "deny: unknown role '${role}' or mode '${mode}'; the guard fails closed" ;;
+   esac
+ }
+ ```
+ 
+-Note the deliberately unquoted `$test_globs` / `$source_globs` at the call sites — word splitting is how the space-separated string becomes multiple arguments.
++Every call site quotes its glob string. The splitting is `tdd_matches_any`'s job and happens under `set -f`.
+ 
+ - [ ] **Step 4: Run to verify they pass**
+ 
+ Run: `bash tests/run.sh`
+ Expected: all `rules.test.sh` assertions PASS, exit 0.
+ 
+ - [ ] **Step 5: Commit**
+ 
+ ```bash
+ git add hooks/lib/rules.sh tests/rules.test.sh
+diff --git a/hooks/lib/rules.sh b/hooks/lib/rules.sh
+index e5f9a3f..bbc3e6c 100644
+--- a/hooks/lib/rules.sh
++++ b/hooks/lib/rules.sh
+@@ -1,47 +1,82 @@
+ # Pure decision functions for the TDD guard hook.
+-# Sourced, never executed. No I/O, no globals, no side effects.
++# Sourced, never executed. No load-time side effects, no globals.
+ 
+ # tdd_glob_match <pattern> <path>
+ # Returns 0 on match. `**` is normalized to `*` because inside [[ ]] a
+-# pattern's `*` already crosses `/`.
++# pattern's `*` already crosses `/`. Safe without `set -f`: bash does not
++# perform pathname expansion on the right-hand pattern of [[ == ]].
+ tdd_glob_match() {
+   local pat="${1//\*\*/*}"
+-  local path="$2"
++  local path="${2:-}"
+   [[ "$path" == $pat ]]
+ }
+ 
+-# tdd_matches_any <path> <glob>...
++# tdd_matches_any <path> <glob-string>
++# Splits the space-separated glob string and tests each against the path.
++#
++# The split MUST run with pathname expansion disabled. Unquoted `$globs`
++# would otherwise be expanded against the real filesystem -- `src/**` would
++# become whatever files happen to exist -- making the verdict depend on the
++# current directory and silently failing OPEN on reads. This function is the
++# only place that split happens, so this is the only place that needs the
++# guard.
+ tdd_matches_any() {
+-  local path="$1"; shift
+-  local g
+-  for g in "$@"; do
+-    tdd_glob_match "$g" "$path" && return 0
++  local path="${1:-}" globs="${2:-}"
++  local g rc=1 restore=0
++
++  case "$-" in
++    *f*) ;;                       # caller already had noglob on
++    *) restore=1; set -f ;;
++  esac
++
++  for g in $globs; do
++    if tdd_glob_match "$g" "$path"; then rc=0; break; fi
+   done
+-  return 1
++
++  if [ "$restore" = 1 ]; then set +f; fi
++  return "$rc"
+ }
+ 
+-# tdd_path_verdict <phase> <mode> <path> <test_globs> <source_globs>
++# tdd_path_verdict <role> <mode> <path> <test_globs> <source_globs>
+ # Echoes "allow" or "deny: <reason>".
++#
++# Every parameter defaults to empty rather than tripping `set -u`: this file
++# is sourced under `set -u`, where an unset positional aborts the whole
++# script. An aborted guard exits non-zero-but-not-2, which is treated as a
++# non-blocking error and lets the tool call through. A caller bug must
++# degrade to deny, never to a crash that permits.
+ tdd_path_verdict() {
+-  local phase="$1" mode="$2" path="$3"
+-  local test_globs="$4" source_globs="$5"
++  local role="${1:-}" mode="${2:-}" path="${3:-}"
++  local test_globs="${4:-}" source_globs="${5:-}"
+ 
+-  case "$phase:$mode" in
++  case "$role:$mode" in
+     red:write)
+-      if tdd_matches_any "$path" $test_globs; then echo "allow"
++      if [ -z "$test_globs" ]; then
++        echo "deny: no test globs are configured, so no write can be verified; the guard fails closed"; return
++      fi
++      if tdd_matches_any "$path" "$test_globs"; then echo "allow"
+       else echo "deny: Red may only write test files; $path is not under the configured test globs"; fi ;;
+     red:read)
+-      if tdd_matches_any "$path" $source_globs; then
++      if [ -z "$source_globs" ]; then
++        echo "deny: no source globs are configured, so $path cannot be shown not to be source; the guard fails closed"; return
++      fi
++      if tdd_matches_any "$path" "$source_globs"; then
+         echo "deny: Red may not read source files; $path is under the configured source globs"
+       else echo "allow"; fi ;;
+     green:write|refactor:write|mutation:write)
+-      if tdd_matches_any "$path" $source_globs; then echo "allow"
+-      else echo "deny: ${phase} may only write source files; $path is not under the configured source globs"; fi ;;
++      if [ -z "$source_globs" ]; then
++        echo "deny: no source globs are configured, so no write can be verified; the guard fails closed"; return
++      fi
++      if tdd_matches_any "$path" "$source_globs"; then echo "allow"
++      else echo "deny: ${role} may only write source files; $path is not under the configured source globs"; fi ;;
+     green:read|refactor:read|mutation:read)
+-      if tdd_matches_any "$path" $test_globs; then
+-        echo "deny: ${phase} may not read test files; $path is under the configured test globs. Work from the handover report and the test runner's output."
++      if [ -z "$test_globs" ]; then
++        echo "deny: no test globs are configured, so $path cannot be shown not to be a test; the guard fails closed"; return
++      fi
++      if tdd_matches_any "$path" "$test_globs"; then
++        echo "deny: ${role} may not read test files; $path is under the configured test globs. Work from the handover report and the test runner's output."
+       else echo "allow"; fi ;;
+     *)
+-      echo "deny: unknown phase '${phase}' or mode '${mode}'; the guard fails closed" ;;
++      echo "deny: unknown role '${role}' or mode '${mode}'; the guard fails closed" ;;
+   esac
+ }
+diff --git a/tests/rules.test.sh b/tests/rules.test.sh
+index 40cb8f4..6a1674b 100644
+--- a/tests/rules.test.sh
++++ b/tests/rules.test.sh
+@@ -47,13 +47,55 @@ assert_contains "deny" "$(tdd_path_verdict refactor read tests/test_a.py "$TG" "
+ # agent's and the orchestrator's job, not the guard's ---
+ assert_eq "allow" "$(tdd_path_verdict mutation write src/a.py "$TG" "$SG")" \
+   "mutation may write source"
+ assert_contains "deny" "$(tdd_path_verdict mutation write tests/test_a.py "$TG" "$SG")" \
+   "mutation may not write tests"
+ assert_contains "deny" "$(tdd_path_verdict mutation read tests/test_a.py "$TG" "$SG")" \
+   "mutation may not read tests"
+ 
+ # --- fail closed ---
+ assert_contains "deny" "$(tdd_path_verdict "" write src/a.py "$TG" "$SG")" \
+-  "empty phase denies"
++  "empty role denies"
+ assert_contains "deny" "$(tdd_path_verdict bogus write src/a.py "$TG" "$SG")" \
+-  "unknown phase denies"
++  "unknown role denies"
++assert_contains "deny" "$(tdd_path_verdict red read src/a.py "$TG" "")" \
++  "empty source globs deny a read rather than permitting it"
++assert_contains "deny" "$(tdd_path_verdict green read tests/test_a.py "" "$SG")" \
++  "empty test globs deny a read rather than permitting it"
++assert_contains "deny" "$(tdd_path_verdict red write tests/test_a.py "" "$SG")" \
++  "empty test globs deny a write"
++
++# --- REGRESSION: the verdict must not depend on what is on disk ---
++#
++# An unquoted glob string undergoes pathname expansion as well as word
++# splitting, so `src/**` would be replaced by whatever files exist. That made
++# `red read src/pkg/module.py` return "allow" from a directory containing
++# src/, and "deny" from anywhere else -- a silent fail-open on the one rule
++# nothing else in the design can enforce.
++#
++# These run inside a scratch tree whose shape would trigger the bug.
++_glob_sandbox="$(mktemp -d)"
++mkdir -p "$_glob_sandbox/src/pkg" "$_glob_sandbox/tests"
++touch "$_glob_sandbox/src/a.py" "$_glob_sandbox/src/pkg/module.py" \
++      "$_glob_sandbox/tests/test_a.py"
++_glob_prevpwd="$PWD"
++cd "$_glob_sandbox" || return
++
++assert_contains "deny" "$(tdd_path_verdict red read src/pkg/module.py "$TG" "$SG")" \
++  "red may not read nested source even when src/ exists on disk"
++assert_contains "deny" "$(tdd_path_verdict red read src/a.py "$TG" "$SG")" \
++  "red may not read top-level source even when it exists on disk"
++assert_contains "deny" "$(tdd_path_verdict green read tests/test_a.py "$TG" "$SG")" \
++  "green may not read an existing test file"
++assert_eq "allow" "$(tdd_path_verdict green write src/pkg/module.py "$TG" "$SG")" \
++  "green may write nested source that exists on disk"
++assert_eq "allow" "$(tdd_path_verdict green write src/pkg/brand_new.py "$TG" "$SG")" \
++  "green may write nested source that does NOT exist yet"
++
++cd "$_glob_prevpwd" || return
++rm -rf "$_glob_sandbox"
++
++# The caller's noglob setting must survive unchanged.
++set +f
++tdd_matches_any "src/a.py" "$SG" || true
++case "$-" in *f*) _noglob_leaked=yes ;; *) _noglob_leaked=no ;; esac
++assert_eq "no" "$_noglob_leaked" "tdd_matches_any restores the caller's noglob flag"

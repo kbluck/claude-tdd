@@ -1,0 +1,129 @@
+# Review package: 54edf216d2caa4abc224cf8d25b99c5fd9c208c0..HEAD
+
+## Commits
+bdeaa86 feat: phase-aware path decision rules
+
+## Files changed
+ hooks/lib/rules.sh  | 47 ++++++++++++++++++++++++++++++++++++++++++
+ tests/rules.test.sh | 59 +++++++++++++++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 106 insertions(+)
+
+## Diff
+diff --git a/hooks/lib/rules.sh b/hooks/lib/rules.sh
+new file mode 100644
+index 0000000..e5f9a3f
+--- /dev/null
++++ b/hooks/lib/rules.sh
+@@ -0,0 +1,47 @@
++# Pure decision functions for the TDD guard hook.
++# Sourced, never executed. No I/O, no globals, no side effects.
++
++# tdd_glob_match <pattern> <path>
++# Returns 0 on match. `**` is normalized to `*` because inside [[ ]] a
++# pattern's `*` already crosses `/`.
++tdd_glob_match() {
++  local pat="${1//\*\*/*}"
++  local path="$2"
++  [[ "$path" == $pat ]]
++}
++
++# tdd_matches_any <path> <glob>...
++tdd_matches_any() {
++  local path="$1"; shift
++  local g
++  for g in "$@"; do
++    tdd_glob_match "$g" "$path" && return 0
++  done
++  return 1
++}
++
++# tdd_path_verdict <phase> <mode> <path> <test_globs> <source_globs>
++# Echoes "allow" or "deny: <reason>".
++tdd_path_verdict() {
++  local phase="$1" mode="$2" path="$3"
++  local test_globs="$4" source_globs="$5"
++
++  case "$phase:$mode" in
++    red:write)
++      if tdd_matches_any "$path" $test_globs; then echo "allow"
++      else echo "deny: Red may only write test files; $path is not under the configured test globs"; fi ;;
++    red:read)
++      if tdd_matches_any "$path" $source_globs; then
++        echo "deny: Red may not read source files; $path is under the configured source globs"
++      else echo "allow"; fi ;;
++    green:write|refactor:write|mutation:write)
++      if tdd_matches_any "$path" $source_globs; then echo "allow"
++      else echo "deny: ${phase} may only write source files; $path is not under the configured source globs"; fi ;;
++    green:read|refactor:read|mutation:read)
++      if tdd_matches_any "$path" $test_globs; then
++        echo "deny: ${phase} may not read test files; $path is under the configured test globs. Work from the handover report and the test runner's output."
++      else echo "allow"; fi ;;
++    *)
++      echo "deny: unknown phase '${phase}' or mode '${mode}'; the guard fails closed" ;;
++  esac
++}
+diff --git a/tests/rules.test.sh b/tests/rules.test.sh
+new file mode 100644
+index 0000000..40cb8f4
+--- /dev/null
++++ b/tests/rules.test.sh
+@@ -0,0 +1,59 @@
++# Sourced by tests/run.sh. Do not add a shebang, set -e, or exit.
++# shellcheck disable=SC1091
++. "$REPO_ROOT/hooks/lib/rules.sh"
++
++TG="tests/** **/test_*.py"
++SG="src/**"
++
++# --- glob matching ---
++tdd_glob_match "tests/**" "tests/a/b.py" && r=yes || r=no
++assert_eq "yes" "$r" "** normalizes and matches across directories"
++
++tdd_glob_match "src/**" "tests/a.py" && r=yes || r=no
++assert_eq "no" "$r" "non-matching glob returns 1"
++
++tdd_glob_match "**/test_*.py" "pkg/sub/test_thing.py" && r=yes || r=no
++assert_eq "yes" "$r" "leading ** matches nested path"
++
++# --- red ---
++assert_eq "allow" "$(tdd_path_verdict red write tests/test_a.py "$TG" "$SG")" \
++  "red may write a test file"
++assert_contains "deny" "$(tdd_path_verdict red write src/a.py "$TG" "$SG")" \
++  "red may not write source"
++assert_contains "deny" "$(tdd_path_verdict red read src/a.py "$TG" "$SG")" \
++  "red may not read source"
++assert_eq "allow" "$(tdd_path_verdict red read README.md "$TG" "$SG")" \
++  "red may read an unclassified file"
++assert_eq "allow" "$(tdd_path_verdict red read tests/test_a.py "$TG" "$SG")" \
++  "red may read its own tests"
++
++# --- green ---
++assert_eq "allow" "$(tdd_path_verdict green write src/a.py "$TG" "$SG")" \
++  "green may write source"
++assert_contains "deny" "$(tdd_path_verdict green write tests/test_a.py "$TG" "$SG")" \
++  "green may not write tests"
++assert_contains "deny" "$(tdd_path_verdict green read tests/test_a.py "$TG" "$SG")" \
++  "green may not read tests"
++assert_eq "allow" "$(tdd_path_verdict green read src/a.py "$TG" "$SG")" \
++  "green may read source"
++
++# --- refactor ---
++assert_eq "allow" "$(tdd_path_verdict refactor write src/a.py "$TG" "$SG")" \
++  "refactor may write source"
++assert_contains "deny" "$(tdd_path_verdict refactor read tests/test_a.py "$TG" "$SG")" \
++  "refactor may not read tests"
++
++# --- mutation: same path rules as refactor; the revert discipline is the
++# agent's and the orchestrator's job, not the guard's ---
++assert_eq "allow" "$(tdd_path_verdict mutation write src/a.py "$TG" "$SG")" \
++  "mutation may write source"
++assert_contains "deny" "$(tdd_path_verdict mutation write tests/test_a.py "$TG" "$SG")" \
++  "mutation may not write tests"
++assert_contains "deny" "$(tdd_path_verdict mutation read tests/test_a.py "$TG" "$SG")" \
++  "mutation may not read tests"
++
++# --- fail closed ---
++assert_contains "deny" "$(tdd_path_verdict "" write src/a.py "$TG" "$SG")" \
++  "empty phase denies"
++assert_contains "deny" "$(tdd_path_verdict bogus write src/a.py "$TG" "$SG")" \
++  "unknown phase denies"
