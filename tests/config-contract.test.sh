@@ -81,6 +81,11 @@ for _k in $(jq -r 'paths | .[-1] | select(type=="string")' "$_cfg" | sort -u); d
   assert_eq "$_want" "$_have" "tdd-init's template declares ${_k} (${_want}x)"
   _tpl_seen=$((_tpl_seen + 1))
 done
+# Floor, not an exact count: the fixture currently has 23 distinct key names,
+# and a floor of 19 leaves room for the schema to shrink legitimately while
+# still catching collapse. Do NOT derive the expected count from the same jq
+# filter the loop uses -- one broken filter would then corrupt both sides of
+# the comparison identically and the check would pass.
 assert_eq "yes" "$([ "$_tpl_seen" -ge 19 ] && echo yes || echo no)" \
   "the derived template loop enumerated at least 19 keys (saw ${_tpl_seen})"
 

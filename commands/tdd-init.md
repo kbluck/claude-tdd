@@ -80,6 +80,12 @@ Infer `test`, `source`, and `ignore` from the layout. Typical shapes:
 - `source`: `src/**`, `lib/**`, or the package directory at repo root
 - `ignore`: `docs/**`, `*.md`, manifests, lockfiles, CI config, `.gitignore`
 
+**`ignore` must include `.tdd/**`.** Step 8 commits `.tdd/config.json`, which
+makes it a tracked file — so a partition verified in step 4 without it is
+invalidated by this command's own commit, and `/tdd`'s preflight then fails on
+drift immediately after a successful init. Classify the config you are about to
+write, not just the files that existed before you ran.
+
 ## 4. Verify the partition is exhaustive — do not skip this
 
 Every tracked file must match exactly one of the three lists.
@@ -88,6 +94,10 @@ Every tracked file must match exactly one of the three lists.
 
 For each path, check it against `test`, then `source`, then `ignore`. Report
 every unclassified file to the user and extend the globs until none remain.
+
+Check the files this command is about to add, not only `git ls-files` as it
+stands now — `.tdd/config.json` does not exist yet on a first run and will not
+appear in that listing.
 
 **This is a point-in-time check.** It classifies the files that exist right
 now. A new top-level directory added later matches none of the three globs, and
