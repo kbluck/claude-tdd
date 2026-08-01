@@ -1,9 +1,9 @@
 {
   "version": 1,
   "commands": {
-    "test": "e2e/.venv/bin/pytest -q --ignore=e2e/mutants e2e",
-    "single": "e2e/.venv/bin/pytest -q --ignore=e2e/mutants {testId}",
-    "coverage": "e2e/.venv/bin/pytest -q --ignore=e2e/mutants --cov=e2e/src --cov-report=json:.tdd/coverage.json e2e",
+    "test": "PYTHONDONTWRITEBYTECODE=1 e2e/.venv/bin/pytest -q --ignore=e2e/mutants e2e",
+    "single": "PYTHONDONTWRITEBYTECODE=1 e2e/.venv/bin/pytest -q --ignore=e2e/mutants {testId}",
+    "coverage": "PYTHONDONTWRITEBYTECODE=1 e2e/.venv/bin/pytest -q --ignore=e2e/mutants --cov=e2e/src --cov-report=json:.tdd/coverage.json e2e",
     "complexity": "e2e/.venv/bin/radon cc -j e2e/src",
     "mutation": "e2e/mutmut.sh run"
   },

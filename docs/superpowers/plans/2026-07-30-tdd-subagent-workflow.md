@@ -2391,6 +2391,20 @@ asserting.
 1. Rank the targets. With `crapMode` `native` or `computed`, compute CRAP per method and rank descending. With `crapMode: "unavailable"` there are no scores to rank by — fall back to the source files changed since the last mutation round, longest function first, and say in the report that ranking was unguided. Do not dispatch with an empty target list; that guarantees `mutantsAttempted: 0`.
 2. **Verify the tree is clean before dispatching**: `git status --porcelain` and `git diff HEAD` must both be empty. `tdd-mutate`'s prompt tells it you have already done this, and it skips its own check on that basis — so if you skip it too, nobody checks. A mutate run started on a dirty tree cannot distinguish its own mutations from pre-existing edits, and its restore step would silently revert your work along with its own. Dirty → stop and report; do not dispatch.
 3. Dispatch **`tdd-mutate`** with the ranked target list, `limits.mutantsPerPass`, `knownRed`, and the mutation command if one is configured.
+**Restoring source is not enough — invalidate the language's compiled cache too.**
+`git status` will call the tree clean, because caches are gitignored, while the
+interpreter still holds bytecode compiled from the *mutated* source. Observed on
+the first live pass: after a kill verification the suite reported a failure whose
+traceback showed source that could not produce it, and clearing `__pycache__`
+returned it to green. A false red is the lucky outcome; the same mechanism can
+serve a false green from a cache compiled before a bad restore, and step 5 below
+is exactly where that would be believed.
+
+For Python, prefix the configured commands with `PYTHONDONTWRITEBYTECODE=1` so no
+cache is written at all — verified to suppress `__pycache__` and to still satisfy
+the guard's Bash allowlist. Other toolchains have their own caches; whatever the
+language, the rule is that a restore is not complete until the cache is too.
+
 4. On return, **verify the tree is clean**: `git status --porcelain` must be empty and `git diff HEAD` must be empty. Not clean → **reset and clean** (see *Reverting a dispatch*), record it, and do not trust the report — an agent that failed to revert may also have failed to run the suite honestly between mutants.
 5. Re-run the full suite, **subtracting `knownRed`**. Every test outside that list must pass. This is the last orchestrator-side suite check that did not subtract it, and leaving it flat would dead-end every mutation pass on any run where preflight recorded a non-empty `knownRed` — reproducing the exact failure the threading rule above was added to prevent.
 6. **Group survivors by `missingBehavior` first**, then append one checklist item per distinct behavior. Several mutants routinely map to a single gap — the first live pass returned four survivors of which three were "nothing asserts divide's error message" (mutated to `None`, to an `XX`-wrapped string, and to upper case). One test closes all three, so queueing three Red cycles wastes two of them. Keep every mutant in the item's `mutant` field as evidence, and report the survivor count, not the item count.
