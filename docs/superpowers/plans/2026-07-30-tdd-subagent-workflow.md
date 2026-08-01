@@ -2239,9 +2239,16 @@ agent that failed to revert its own mutations. It detects the problem with
 `git status --porcelain`, which *does* show untracked files, and then applies a
 command that cannot remove them.
 
-Scope both to the globs that role may write — `globs.test` for Red, `globs.source`
-for Green, Refactor and Mutate. An unscoped `git clean -fd` would delete
-legitimately untracked work elsewhere in the tree.
+**Only the `clean` half takes a pathspec.** Scope it to the globs that role may
+write — `globs.test` for Red, `globs.source` for Green, Refactor and Mutate — because
+an unscoped `git clean -fd` would delete legitimately untracked work elsewhere in
+the tree. (`clean` without `-x` spares gitignored paths, so the venv, the
+checklist and the coverage report survive either way; do not add `-x`.)
+
+`git reset --hard` is tree-wide and **cannot** be scoped: `git reset --hard -- <path>`
+fails with `fatal: Cannot do hard reset with paths.` That is safe here only because
+preflight requires a clean tree and exactly one agent writes per dispatch, so the
+only tracked changes to discard are that dispatch's own.
 
 Branches below say **revert** or **reset and clean** and point here. They do not
 name the bare git command, deliberately: an orchestrator reading
