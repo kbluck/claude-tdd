@@ -75,6 +75,23 @@ item, state the count when you present it, and if the spec yields none, say so a
 `status`: `pending` → `red` → `green` → `done`, or terminating at `redundant` or `blocked`. Write the file after every transition.
 An interrupted run resumes from this file, not from your context.
 
+## Reverting a dispatch
+
+Several branches below say to discard an agent's work. **`git checkout -- .` is not sufficient on its own** — it restores tracked
+files but leaves untracked ones in place, and Red's tests are almost always new files. Verified during the first live run: after
+`git checkout -- .`, a rejected `passing-flat` test was still sitting in the tree, where the next item's commit would have swept it
+up.
+
+Revert means both:
+
+    git checkout -- <the role's write globs>     # restore tracked edits
+    git clean -fd -- <the role's write globs>    # remove new files
+
+Scope both to the globs that role may write — `globs.test` for Red, `globs.source` for Green, Refactor and Mutate. An unscoped `git
+clean -fd` would delete legitimately untracked work elsewhere in the tree.
+
+Wherever a branch below says "revert" or `git checkout -- .`, it means this pair.
+
 ## Coverage baselines
 
 All three roles are gated on coverage, and every gate compares against a baseline you capture. Skip all of this if
