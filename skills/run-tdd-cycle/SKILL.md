@@ -155,7 +155,25 @@ a re-dispatch, but your measurement is the one that decides.
    - `passing-covered` → **re-measure coverage yourself before committing.** This branch writes a commit and skips Green entirely on
      the strength of a number the agent computed about its own work; it is the one place nothing else would catch a wrong answer.
      Delta confirmed → commit `test: <behavior>`, status `done`, next item. Delta not confirmed → treat as `passing-flat`.
-   - `passing-flat` → **revert** (see *Reverting a dispatch*), status `redundant`, next item.
+   - `passing-flat` → **revert** (see *Reverting a dispatch*), status `redundant`, next item — **unless the item has
+     `origin: "mutation"`**, in which case see below.
+
+   **Mutation-origin items are judged on killing the mutant, not on coverage.** A surviving mutant means the source is *correct* and
+   the test is weak, so a Red test for that behavior necessarily passes, and it necessarily moves no coverage — the line was already
+   executed by the assertion-free test that let the mutant survive in the first place. Applying the three-way rule unchanged
+   classifies every such item `passing-flat`, discards the test, and the next round rediscovers the identical survivors: the loop
+   runs to `limits.mutationRounds` having closed nothing.
+
+   So for an item carrying `origin: "mutation"`, ignore the coverage delta and verify the kill yourself. For each mutation recorded
+   in the item's `mutant` field: apply it to the source, run Red's new test, confirm it **fails**, then restore. You can do this
+   because you are unconstrained; Red cannot, since it may not write source.
+
+   - Every recorded mutation now fails the test → commit `test: <behavior>`, status `done`, next item. This is a real fix even
+     though nothing went red first and coverage did not move.
+
+   - Any mutation still passes → the test does not close the gap. Re-dispatch once, naming the mutation that survived it. Still
+     surviving → status `blocked`, escalate.
+
    - `blocked` → status `blocked`, record the reason, **stop and escalate**.
 
 `blocked` is not `redundant`. `redundant` means a test was written, passed, and moved no coverage — the behavior is already covered.
@@ -252,13 +270,29 @@ that execute without asserting.
    silently revert your work along with its own. Dirty → stop and report; do not dispatch.
 3. Dispatch **`tdd-mutate`** with the ranked target list, `limits.mutantsPerPass`, `knownRed`, and the mutation command if one is
    configured.
+
+**Restoring source is not enough — invalidate the language's compiled cache too.** `git status` will call the tree clean, because
+caches are gitignored, while the interpreter still holds bytecode compiled from the *mutated* source. Observed on the first live
+pass: after a kill verification the suite reported a failure whose traceback showed source that could not produce it, and clearing
+`__pycache__` returned it to green. A false red is the lucky outcome; the same mechanism can serve a false green from a cache
+compiled before a bad restore, and step 5 below is exactly where that would be believed.
+
+For Python, prefix the configured commands with `PYTHONDONTWRITEBYTECODE=1` so no cache is written at all — verified to suppress
+`__pycache__` and to still satisfy the guard's Bash allowlist. Other toolchains have their own caches; whatever the language, the
+rule is that a restore is not complete until the cache is too.
+
 4. On return, **verify the tree is clean**: `git status --porcelain` must be empty and `git diff HEAD` must be empty. Not clean →
    **reset and clean** (see *Reverting a dispatch*), record it, and do not trust the report — an agent that failed to revert may also
    have failed to run the suite honestly between mutants.
 5. Re-run the full suite, **subtracting `knownRed`**. Every test outside that list must pass. This is the last orchestrator-side
    suite check that did not subtract it, and leaving it flat would dead-end every mutation pass on any run where preflight recorded a
    non-empty `knownRed` — reproducing the exact failure the threading rule above was added to prevent.
-6. For each survivor, append a checklist item:
+6. **Group survivors by `missingBehavior` first**, then append one checklist item per distinct behavior. Several mutants routinely
+   map to a single gap — the first live pass returned four survivors of which three were "nothing asserts divide's error message"
+   (mutated to `None`, to an `XX`-wrapped string, and to upper case). One test closes all three, so queueing three Red cycles wastes
+   two of them. Keep every mutant in the item's `mutant` field as evidence, and report the survivor count, not the item count.
+
+   For each distinct behavior, append:
 
        { "id": <next>, "behavior": "<the survivor's missingBehavior>",
          "status": "pending", "origin": "mutation",
