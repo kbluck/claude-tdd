@@ -64,6 +64,26 @@ assert_contains "deny" "$(tdd_path_verdict green read tests/test_a.py "" "$SG")"
 assert_contains "deny" "$(tdd_path_verdict red write tests/test_a.py "" "$SG")" \
   "empty test globs deny a write"
 
+# --- REGRESSION: alternative spellings of the same path must agree ---
+#
+# guard.sh strips the project root by literal prefix, so an un-normalised
+# `./x` or `x//y` fails to strip and then matches no glob. On a READ that
+# means ALLOW, because reads are a denylist. Verified live before the fix:
+# red was denied `e2e/src/calc/__init__.py` and permitted the identical file
+# spelled `./e2e/src/calc/__init__.py`.
+assert_eq "e2e/src/a.py" "$(tdd_normalize_path "./e2e/src/a.py")" \
+  "leading ./ is stripped"
+assert_eq "e2e/src/a.py" "$(tdd_normalize_path "e2e//src/a.py")" \
+  "repeated slashes collapse"
+assert_eq "e2e/src/a.py" "$(tdd_normalize_path "e2e/./src/a.py")" \
+  "/./ segments collapse"
+assert_eq "e2e/src/a.py" "$(tdd_normalize_path ".//e2e/./src//a.py")" \
+  "all three at once"
+assert_eq "/abs/e2e/src/a.py" "$(tdd_normalize_path "/abs//e2e/./src/a.py")" \
+  "an absolute path keeps its leading slash"
+assert_eq "" "$(tdd_normalize_path "")" \
+  "empty input stays empty rather than erroring"
+
 # --- REGRESSION: the verdict must not depend on what is on disk ---
 #
 # An unquoted glob string undergoes pathname expansion as well as word

@@ -37,6 +37,35 @@ tdd_matches_any() {
   return "$rc"
 }
 
+# tdd_normalize_path <path>
+# Collapses repeated slashes, leading `./`, and `/./` segments.
+#
+# Without this the guard is trivially bypassable. guard.sh strips the project
+# root by literal prefix match, and the glob match then needs the relative path
+# to start with the glob's literal prefix. A path spelled `./e2e/src/a.py`
+# strips to nothing and matches no glob -- and because reads are a DENYLIST,
+# no-match means ALLOW. Verified against the live config: red was denied
+# `e2e/src/calc/__init__.py` and permitted `./e2e/src/calc/__init__.py`, the
+# same file. `e2e//src/...` bypassed identically.
+#
+# Uses `tr -s` rather than `${p//\/\//\/}` deliberately: the replacement half
+# of a bash substitution is not a pattern, so `\/` there leaves a literal
+# backslash -- the same trap that produced the `**` normalization bug in this
+# file's own history.
+tdd_normalize_path() {
+  local p="${1:-}"
+  [ -n "$p" ] || { printf ''; return; }
+  p=$(printf '%s' "$p" | tr -s '/')
+  while :; do
+    case "$p" in
+      ./*)   p="${p#./}" ;;
+      */./*) p="${p%%/./*}/${p#*/./}" ;;
+      *)     break ;;
+    esac
+  done
+  printf '%s' "$p"
+}
+
 # tdd_path_verdict <role> <mode> <path> <test_globs> <source_globs>
 # Echoes "allow" or "deny: <reason>".
 #
