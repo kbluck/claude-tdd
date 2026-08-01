@@ -215,7 +215,9 @@ that execute without asserting.
 4. On return, **verify the tree is clean**: `git status --porcelain` must be empty and `git diff HEAD` must be empty. If the tree is
    not clean → `git reset --hard HEAD`, record it, and do not trust the report — an agent that failed to revert may also have failed
    to run the suite honestly between mutants.
-5. Re-run the full suite. It must be green.
+5. Re-run the full suite, **subtracting `knownRed`**. Every test outside that list must pass. This is the last orchestrator-side
+   suite check that did not subtract it, and leaving it flat would dead-end every mutation pass on any run where preflight recorded a
+   non-empty `knownRed` — reproducing the exact failure the threading rule above was added to prevent.
 6. For each survivor, append a checklist item:
 
        { "id": <next>, "behavior": "<the survivor's missingBehavior>",
@@ -223,7 +225,8 @@ that execute without asserting.
          "mutant": { "file": ..., "line": ..., "mutation": ... } }
 
 7. Survivors found → report the count and **resume the per-item loop**. The new items run as ordinary Red→Green cycles.
-8. No survivors, or `limits.mutationRounds` reached → done.
+8. No survivors, or `mutationRoundsRun` (read from `checklist.json`) has reached `limits.mutationRounds` → done. Read the count from
+   the file, not from memory of this session — on a resumed run your context has no record of passes already spent.
 
 Record the completed round count in `checklist.json` as `mutationRoundsRun` each time a pass finishes. It is the one piece of loop
 state not otherwise on disk, and without it an interrupted run resumes with no idea how many passes it has already spent — which
@@ -255,6 +258,6 @@ The guard needs no teardown — it is inert for any call that carries no `tdd-*`
 
 ## Escalation
 
-Stop and return to the user on: a second guardrail violation by the same agent, Green stuck after `limits.greenAttempts`, any
-`blocked` outcome, or a suite that goes red in a way Refactor did not cause. Do not loop. A stuck agent is information the user
-needs, not a problem to grind on.
+Stop and return to the user on: a guardrail violation by the same agent beyond `limits.violationRetries` re-dispatches, Green stuck
+after `limits.greenAttempts`, any `blocked` outcome, or a suite that goes red in a way Refactor did not cause. Do not loop. A stuck
+agent is information the user needs, not a problem to grind on.
