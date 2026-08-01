@@ -134,6 +134,12 @@ case "/$path/" in
   */../*) deny "tdd guard: path contains a '..' segment and cannot be classified safely: $path" ;;
 esac
 
+# Normalise BOTH sides before the prefix strip. An un-normalised `./x`, `x//y`,
+# or a root with a trailing slash fails to strip, then matches no glob, and a
+# no-match on a read means allow.
+root=$(tdd_normalize_path "$root"); root="${root%/}"
+path=$(tdd_normalize_path "$path")
+
 case "$path" in
   "$root"/*) rel="${path#"$root"/}" ;;   # inside the project
   *)         rel="$path" ;;              # already relative, or outside the project

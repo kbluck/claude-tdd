@@ -172,6 +172,29 @@ assert_contains "2|" "$out" "relative source path is still denied to red"
 out=$(run_guard "tdd-red" payload_write "tests/test_a.py")
 assert_eq "0|" "$out" "relative test path is still allowed to red"
 
+# An un-normalised `./x`, `x//y`, or trailing-slash root strips to something
+# that matches no glob, and because reads are a denylist, no-match means
+# allow. Verified against this repo's own live config before this fix
+# landed: red was denied "e2e/src/calc/__init__.py" but permitted the same
+# file spelled "./e2e/src/calc/__init__.py" or "e2e//src/calc/__init__.py".
+#
+# The green case below deliberately uses a filename that is NOT test_*.py.
+# "**/test_*.py" is a catch-all glob permissive enough to match an
+# un-normalised "./tests/test_a.py" by coincidence (it matches anything
+# ending in "/test_<x>.py" regardless of what precedes it), which would make
+# that assertion pass whether or not normalization actually ran -- the same
+# trap that let "a .. segment denies for green too" pass for the wrong
+# reason in an earlier round. "helpers.py" only matches via "tests/**", so
+# it genuinely exercises the fix.
+out=$(run_guard "tdd-red" payload_read "$SANDBOX/./src/a.py")
+assert_contains "2|" "$out" "a leading ./ segment in an absolute path still denies red reading source"
+out=$(run_guard "tdd-red" payload_read "$SANDBOX//src/a.py")
+assert_contains "2|" "$out" "a doubled slash in an absolute path still denies red reading source"
+out=$(run_guard "tdd-red" payload_read "./src/a.py")
+assert_contains "2|" "$out" "a leading ./ segment in a relative path still denies red reading source"
+out=$(run_guard "tdd-green" payload_read "./tests/helpers.py")
+assert_contains "2|" "$out" "a leading ./ segment in a relative path still denies green reading a test"
+
 # --- fails closed once a role IS recognized ---
 mv "$SANDBOX/.tdd/config.json" "$SANDBOX/.tdd/config.json.bak"
 out=$(run_guard "tdd-red" payload_write "$SANDBOX/tests/test_a.py")
