@@ -18,11 +18,17 @@ Announce: "Using run-tdd-cycle to implement `<spec>`."
 2. **`.tdd/config.json` exists.** Missing → tell the user to run `/tdd-init`. Do not write one yourself.
 3. **`jq` on PATH.** Missing → stop. The guard fails closed without it and would deny every tool call.
 4. **The full suite passes.** Run the configured test command. Green's stop condition is "this test now passes" and Refactor's is
-   "all tests still pass" — both are meaningless against an already-red suite. If red, list the failing test IDs, ask the user
-   whether to proceed, and if so record them as a known-red allowlist excluded from every later comparison.
+   "all tests still pass" — both are meaningless against an already-red suite. If red, list the failing test IDs, ask the user whether
+   to proceed, and if so record them in `checklist.json` as `knownRed`.
+
+   **`knownRed` is not a note to yourself; it must be threaded or it is a lie.** Every later suite comparison is against "the baseline
+   you were given", never against zero failures — and `tdd-refactor` and `tdd-mutate` both stop on a suite that is not green, so they
+   must receive the list or they will refuse to run for the rest of the session. Pass `knownRed` in every Refactor and Mutate dispatch.
+   When you check a suite yourself, subtract it before judging. If you find yourself unable to thread it somewhere, stop and say so
+   rather than proceeding with an allowlist that only exists in the file.
 5. **The glob partition is still exhaustive.** `git ls-files`; every path must match `test`, `source`, or `ignore`. Drift since
    init → stop and tell the user to re-run `/tdd-init`. This is what makes the guard's read denylist sound.
-6. **Spec file readable and non-empty.**
+6. **Spec file readable and non-empty.** Unreadable or empty → stop; there is nothing to decompose.
 7. **The guard actually sees `agent_type`.** Dispatch a throwaway subagent told to read one file under `globs.source` while claiming
    no role, then confirm the guard evaluated it. Cheaper equivalent: dispatch `tdd-red` with the instruction "read `<a source file>`
    and report the first line" and confirm it comes back **denied**.
@@ -97,7 +103,8 @@ a re-dispatch, but your measurement is the one that decides.
 
 1. Dispatch `tdd-red` with: the spec path, the one item, the configured commands, and the current coverage baseline.
 2. On return, **audit**: `git diff --name-only` plus `git status --porcelain`. Every touched path must match `globs.test`.
-   Violation → `git checkout -- .`, re-dispatch once quoting the rule and the offending path. Second violation → stop, escalate.
+   Violation → `git checkout -- .`, re-dispatch quoting the rule and the offending path, up to `limits.violationRetries` times.
+   Beyond that → stop, escalate.
 
    **An empty diff is not a passing audit.** "Every touched path matched" is vacuously true when nothing was touched. If Red reports
    `failing`, `passing-covered`, or `passing-flat`, it claims to have written a test — so at least one path must have changed. Zero
@@ -118,9 +125,15 @@ a re-dispatch, but your measurement is the one that decides.
 
 1. Dispatch `tdd-green` with **only** Red's handover report. Do not paste test source — that is the whole point of the separation.
 2. On return, audit as above against `globs.source`.
-3. `outcome: stuck` → stop and escalate with the agent's attempts.
+3. `outcome: stuck` → record the reason on the item, write the checklist, then stop and escalate with the agent's attempts.
 4. Independently verify: run the configured single-test command against `testId` yourself. Do not take the agent's word for it.
-5. **Coverage gate** (skip entirely if `commands.coverage` is null, or if the baseline reports zero total lines):
+   **Not passing → `git checkout -- .`, treat it as `stuck`, and escalate.** An agent reporting a pass the orchestrator cannot
+   reproduce is worse than one reporting failure, and committing on its word would bury it.
+5. **Run the full suite**, subtracting `knownRed`. Green only ever runs one test, so nothing else in the loop would notice it
+   regressing a previously-passing test elsewhere — the next signal would be a Refactor dispatch that may never fire, or the mutation
+   pass after every item is done. New failure → `git checkout -- .`, re-dispatch once naming the regressed tests. Still failing → stop
+   and escalate.
+6. **Coverage gate** (skip entirely if `commands.coverage` is null, or if the baseline reports zero total lines):
    - Run the coverage command. Compute new uncovered lines against the pre-dispatch baseline.
    - Within `coverageGates.greenMaxNewUncovered` → commit `green: <behavior>`, status `green`.
    - Over → `git checkout -- .` and re-dispatch once, naming the specific uncovered file:line ranges and instructing Green to
@@ -157,7 +170,7 @@ for every method in a file you know is partly untested, the mapping is broken �
 
 No hit → status `done`, next item. This avoids paying for a subagent to conclude "nothing to do", a common case in early cycles.
 
-On dispatch: pass the trigger and the source paths in scope. Audit against `globs.source`.
+On dispatch: pass the trigger, the source paths in scope, and `knownRed`. Audit against `globs.source`.
 
 Then apply the **hard coverage gate**: run coverage yourself and compare against the pre-dispatch baseline. Any increase in
 uncovered lines beyond `coverageGates.refactorMaxNewUncovered` (default 0) → `git reset --hard HEAD` and record `reverted`,
@@ -169,7 +182,10 @@ Branch on all four outcomes:
 - `improved` and the gate passed → commit `refactor: <behavior>`.
 - `no-change-needed` → commit nothing, record it, continue. This is a good outcome, not a failure; the trigger fired and the agent
   judged there was nothing worth doing.
-- `reverted` or `blocked` → record it and continue. A failed refactor is not a failed cycle.
+- `reverted` → record it and continue. A refactor that backed out cleanly is not a failed cycle.
+- `blocked` → **stop and escalate.** Refactor reports `blocked` when it could not evaluate its own work — typically a suite that was
+  already failing. That is a broken precondition, not a judgement call, and continuing past it means every later Refactor dispatch
+  hits the same wall silently. This is the same rule as the Escalation section below; there is no Refactor exemption.
 
 **On `reverted`, verify the tree rather than trusting the report.** Refactor restores by rewriting recorded text with `Edit`/`Write`
 instead of `git checkout`, so an imperfect restore is possible and the coverage gate would not catch one whose uncovered-line count
@@ -186,12 +202,16 @@ Then status `done`, next item.
 Coverage gates prove code was executed. They cannot prove any test would notice if that code were wrong. This pass finds the tests
 that execute without asserting.
 
-1. Compute CRAP for every method and rank descending.
+1. Rank the targets. With `crapMode` `native` or `computed`, compute CRAP per method and rank descending. With
+   `crapMode: "unavailable"` there are no scores to rank by — fall back to the source files changed since the last mutation
+   round, longest function first, and say in the report that ranking was unguided. Do not dispatch with an empty target
+   list; that guarantees `mutantsAttempted: 0`.
 2. **Verify the tree is clean before dispatching**: `git status --porcelain` and `git diff HEAD` must both be empty. `tdd-mutate`'s
    prompt tells it you have already done this, and it skips its own check on that basis — so if you skip it too, nobody checks. A
    mutate run started on a dirty tree cannot distinguish its own mutations from pre-existing edits, and its restore step would
    silently revert your work along with its own. Dirty → stop and report; do not dispatch.
-3. Dispatch **`tdd-mutate`** with the ranked target list, `limits.mutantsPerPass`, and the mutation command if one is configured.
+3. Dispatch **`tdd-mutate`** with the ranked target list, `limits.mutantsPerPass`, `knownRed`, and the mutation command if one is
+   configured.
 4. On return, **verify the tree is clean**: `git status --porcelain` must be empty and `git diff HEAD` must be empty. If the tree is
    not clean → `git reset --hard HEAD`, record it, and do not trust the report — an agent that failed to revert may also have failed
    to run the suite honestly between mutants.
@@ -205,6 +225,10 @@ that execute without asserting.
 7. Survivors found → report the count and **resume the per-item loop**. The new items run as ordinary Red→Green cycles.
 8. No survivors, or `limits.mutationRounds` reached → done.
 
+Record the completed round count in `checklist.json` as `mutationRoundsRun` each time a pass finishes. It is the one piece of loop
+state not otherwise on disk, and without it an interrupted run resumes with no idea how many passes it has already spent — which
+contradicts this file's own claim that the checklist, not your context, is what a resumed run reads.
+
 If the pass skipped mutants because of `mutantsPerPass`, say how many. A capped pass that reports "no survivors" without mentioning
 the cap reads as a clean bill of health it did not earn.
 
@@ -214,7 +238,12 @@ that produced no scores — each yields zero survivors and looks identical to a 
 
 ## Completion
 
-Done when no item is `pending` **and** the mutation pass has either produced no survivors or exhausted `limits.mutationRounds`.
+Done when no item is `pending`, **no item is `blocked`**, and the mutation pass has either produced no survivors or exhausted
+`limits.mutationRounds`.
+
+`blocked` is not `pending`, so a completion test that only looks for `pending` reports success with real work outstanding. That
+cannot happen mid-run, because `blocked` stops immediately — but a resumed run loading a checklist that already contains one would
+sail past it. On resume, re-surface every `blocked` item and ask the user before continuing.
 
 Report the tally: how many items went red→green, how many were `passing-covered`, how many `redundant`, how many originated from
 mutation survivors, and how many mutants were skipped by the cap.
