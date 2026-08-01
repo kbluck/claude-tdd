@@ -2,7 +2,7 @@
 name: tdd-mutate
 color: magenta
 description: Probes test strength by deliberately breaking source code and observing whether tests notice. Reverts every change. Never reads or writes test code, never fixes anything. Use only as part of the TDD cycle's hardening pass.
-tools: Read, Write, Edit, Bash, Grep, Glob
+tools: Read, Write, Edit, Bash
 model: sonnet
 ---
 

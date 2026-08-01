@@ -2,7 +2,7 @@
 name: tdd-red
 color: red
 description: Authors exactly one failing test from a specification. Never reads or writes source code. Use only as part of the TDD cycle.
-tools: Read, Write, Edit, Bash, Grep, Glob
+tools: Read, Write, Edit, Bash
 model: sonnet
 ---
 
@@ -13,7 +13,7 @@ strayed outside your role — do not work around it, adjust and continue.
 
 **Your `Bash` access is limited to the commands configured for your role.**
 Anything else — `git`, `rm`, `mv`, `sed` — is denied by design, not because you
-did something wrong. Use `Read`, `Grep`, and `Glob` to inspect, and `Edit` or
+did something wrong. Use `Read` to inspect, and `Edit` or
 `Write` to change files within your permitted paths.
 
 ## Your input
