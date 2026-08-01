@@ -1,0 +1,37 @@
+{
+  "version": 1,
+  "commands": {
+    "test": "e2e/.venv/bin/pytest -q e2e",
+    "single": "e2e/.venv/bin/pytest -q {testId}",
+    "coverage": "e2e/.venv/bin/pytest -q --cov=e2e/src --cov-report=json:.tdd/coverage.json e2e",
+    "complexity": "e2e/.venv/bin/radon cc -j e2e/src",
+    "mutation": "e2e/mutmut.sh run"
+  },
+  "crapMode": "computed",
+  "globs": {
+    "test": ["e2e/tests/**"],
+    "source": ["e2e/src/**"],
+    "ignore": [
+      ".claude/**",
+      ".claude-plugin/**",
+      ".gitattributes",
+      ".gitignore",
+      ".idea/**",
+      "AGENTS.md",
+      "LICENSE",
+      "agents/**",
+      "commands/**",
+      "docs/**",
+      "e2e/mutmut.sh",
+      "e2e/pyproject.toml",
+      "e2e/setup.cfg",
+      "e2e/spec.md",
+      "hooks/**",
+      "skills/**",
+      "tests/**"
+    ]
+  },
+  "refactorTriggers": { "maxCrap": 30, "duplicateThreshold": 3, "maxFunctionLines": 40 },
+  "limits": { "greenAttempts": 3, "violationRetries": 1, "mutationRounds": 2, "mutantsPerPass": 20 },
+  "coverageGates": { "greenMaxNewUncovered": 2, "refactorMaxNewUncovered": 0 }
+}
