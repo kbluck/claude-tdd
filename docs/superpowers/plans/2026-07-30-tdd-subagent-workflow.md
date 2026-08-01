@@ -2325,7 +2325,7 @@ asserting.
 2. **Verify the tree is clean before dispatching**: `git status --porcelain` and `git diff HEAD` must both be empty. `tdd-mutate`'s prompt tells it you have already done this, and it skips its own check on that basis — so if you skip it too, nobody checks. A mutate run started on a dirty tree cannot distinguish its own mutations from pre-existing edits, and its restore step would silently revert your work along with its own. Dirty → stop and report; do not dispatch.
 3. Dispatch **`tdd-mutate`** with the ranked target list, `limits.mutantsPerPass`, `knownRed`, and the mutation command if one is configured.
 4. On return, **verify the tree is clean**: `git status --porcelain` must be empty and `git diff HEAD` must be empty. Not clean → `git reset --hard HEAD`, record it, and do not trust the report — an agent that failed to revert may also have failed to run the suite honestly between mutants.
-5. Re-run the full suite. It must be green.
+5. Re-run the full suite, **subtracting `knownRed`**. Every test outside that list must pass. This is the last orchestrator-side suite check that did not subtract it, and leaving it flat would dead-end every mutation pass on any run where preflight recorded a non-empty `knownRed` — reproducing the exact failure the threading rule above was added to prevent.
 6. For each survivor, append a checklist item:
 
        { "id": <next>, "behavior": "<the survivor's missingBehavior>",
@@ -2333,7 +2333,7 @@ asserting.
          "mutant": { "file": ..., "line": ..., "mutation": ... } }
 
 7. Survivors found → report the count and **resume the per-item loop**. The new items run as ordinary Red→Green cycles.
-8. No survivors, or `limits.mutationRounds` reached → done.
+8. No survivors, or `mutationRoundsRun` (read from `checklist.json`) has reached `limits.mutationRounds` → done. Read the count from the file, not from memory of this session — on a resumed run your context has no record of passes already spent.
 
 Record the completed round count in `checklist.json` as `mutationRoundsRun` each
 time a pass finishes. It is the one piece of loop state not otherwise on disk,
