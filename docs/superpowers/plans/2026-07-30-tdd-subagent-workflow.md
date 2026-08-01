@@ -2299,7 +2299,14 @@ measurement is the one that decides.
 3. Branch on `outcome`:
    - `failing` → commit `red: <behavior>`, status `red`, continue to Green.
    - `passing-covered` → **re-measure coverage yourself before committing.** This branch writes a commit and skips Green entirely on the strength of a number the agent computed about its own work; it is the one place nothing else would catch a wrong answer. Delta confirmed → commit `test: <behavior>`, status `done`, next item. Delta not confirmed → treat as `passing-flat`.
-   - `passing-flat` → **revert** (see *Reverting a dispatch*), status `redundant`, next item.
+   - `passing-flat` → **revert** (see *Reverting a dispatch*), status `redundant`, next item — **unless the item has `origin: "mutation"`**, in which case see below.
+
+   **Mutation-origin items are judged on killing the mutant, not on coverage.** A surviving mutant means the source is *correct* and the test is weak, so a Red test for that behavior necessarily passes, and it necessarily moves no coverage — the line was already executed by the assertion-free test that let the mutant survive in the first place. Applying the three-way rule unchanged classifies every such item `passing-flat`, discards the test, and the next round rediscovers the identical survivors: the loop runs to `limits.mutationRounds` having closed nothing.
+
+   So for an item carrying `origin: "mutation"`, ignore the coverage delta and verify the kill yourself. For each mutation recorded in the item's `mutant` field: apply it to the source, run Red's new test, confirm it **fails**, then restore. You can do this because you are unconstrained; Red cannot, since it may not write source.
+
+   - Every recorded mutation now fails the test → commit `test: <behavior>`, status `done`, next item. This is a real fix even though nothing went red first and coverage did not move.
+   - Any mutation still passes → the test does not close the gap. Re-dispatch once, naming the mutation that survived it. Still surviving → status `blocked`, escalate.
    - `blocked` → status `blocked`, record the reason, **stop and escalate**.
 
 `blocked` is not `redundant`. `redundant` means a test was written, passed, and
