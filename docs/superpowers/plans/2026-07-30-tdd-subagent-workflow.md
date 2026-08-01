@@ -2413,7 +2413,8 @@ language, the rule is that a restore is not complete until the cache is too.
 
        { "id": <next>, "behavior": "<the survivor's missingBehavior>",
          "status": "pending", "origin": "mutation",
-         "mutant": { "file": ..., "line": ..., "mutation": ... } }
+         "mutant": { "file": ..., "line": ...,
+                     "mutations": [ ...every mutant that revealed this gap... ] } }
 
 7. Survivors found → report the count and **resume the per-item loop**. The new items run as ordinary Red→Green cycles.
 8. No survivors, or `mutationRoundsRun` (read from `checklist.json`) has reached `limits.mutationRounds` → done. Read the count from the file, not from memory of this session — on a resumed run your context has no record of passes already spent.
