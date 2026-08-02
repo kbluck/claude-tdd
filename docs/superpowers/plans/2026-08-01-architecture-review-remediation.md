@@ -51,7 +51,9 @@ Four unknowns, each load-bearing and each cheap to settle:
 3. **How is stdin delivered, and can it be read reliably?** The payload arrives on stdin. `fs.readFileSync(0, 'utf8')` can throw `EAGAIN` on a non-blocking pipe. Establish which read strategy is safe within the 10s timeout.
 4. **Does exit 2 with a JSON body on stdout still block, and is the `systemMessage` delivered verbatim to the subagent?** Iteration 1 established this for the shell form; it is the mechanism the entire design rests on.
 
-**Done when.** Each of the four has an observed answer recorded in the ledger — not an inferred one. If (1) fails, fall back to shell form with an explicit `"shell"` field and re-spike, because that reintroduces the dialect problem the exec form exists to avoid.
+5. **How does the spawned hook resolve `node`, and does it agree with the `Bash` tool?** Exec form spawns without a shell, so `"command": "node"` resolves against Claude Code's environment rather than the orchestrator's. On the development machine these demonstrably disagree: `fnm` supplies node only through an interactive-shell profile, at a per-session directory keyed by shell PID, and **no node exists anywhere else** — a non-interactive spawn finds none. So preflight's `node --version` can pass while the guard cannot launch, and a guard that cannot launch permits. Establish empirically which environment the hook actually gets; if it is not the orchestrator's, preflight's version check is necessary but not sufficient and item 7's probe is the only real check.
+
+**Done when.** Each of the five has an observed answer recorded in the ledger — not an inferred one. If (1) fails, fall back to shell form with an explicit `"shell"` field and re-spike, because that reintroduces the dialect problem the exec form exists to avoid.
 
 ### Task 1b: Finish the ledger block-diff — **before anything deletes the bash sources**
 
@@ -133,7 +135,9 @@ This task also adds the `package.json` and `tsconfig.json` the type checking nee
 
 **Invariant.** A missing or too-old Node is a loud setup failure, never a silent unenforced run.
 
-**Why.** A missing interpreter fails open exactly as a missing shell did. Preflight item 6 changes from "`jq` is on `PATH`" to a **version** check — an interpreter too old to run the guard fails identically to an absent one. Item 7, the probe that dispatches a subagent and confirms an observed denial, is the only check that catches a guard which never launched; it stays, and its importance goes up.
+**Why.** A missing interpreter fails open exactly as a missing shell did. Preflight item 6 changes from "`jq` is on `PATH`" to a **version** check — an interpreter too old to run the guard fails identically to an absent one.
+
+**Item 7 is the check that actually matters, and Task 1's fifth unknown says why.** Preflight's version check runs through the `Bash` tool and proves node is on *that* `PATH`; the hook is spawned by Claude Code with no shell and may resolve differently. Under a per-shell version manager they routinely disagree. Only the probe — dispatch a subagent, confirm an observed denial — exercises the real spawn path. Report both, and do not let a green version check read as proof the guard can start.
 
 `/tdd-init` reports the same at setup, and gains the `commands.singleTerse` detection from Task 8.
 
