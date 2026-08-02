@@ -28,7 +28,8 @@ So each task states the **invariant**, **why it fails today**, the **constraints
 |---|---|
 | Runtime | Node 22 (oldest supported LTS). Pin it in `.node-version` so `fnm` selects it; the dev machine otherwise runs 26. |
 | Hook registration | **Exec form** — `"command": "node", "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/guard.mjs"]`. Spawns directly, no shell, no `${VAR}`-versus-`$env:VAR` dialect. |
-| Module format | ESM (`.mjs`). No dependencies, no `package.json` runtime deps, no build step. |
+| Module format | ESM (`.mjs`). No runtime dependencies and **no build step** — the file the hook runs is the file you edit. |
+| Type checking | `// @ts-check` plus JSDoc, verified with `tsc --noEmit` (checked against TypeScript 7.0.2). Dev dependency only: if it is absent, type checking is lost and the guard still runs correctly. **Not** TypeScript compiled to JS — see the spec, *Types without a compile step*. |
 | Forbidden APIs | `path.matchesGlob` (v22.5.0, experimental — unavailable on early 22.x). The ambient `path` module for **matching** — `path.win32.normalize("e2e/src/x.py")` returns `e2e\src\x.py`, which manufactures the very bypass we are closing. |
 | Test runner | `node:test` + `node:assert`, stable since Node 20. |
 | Exit semantics | Only **2** blocks. Every other non-zero exit permits the tool call. Any uncaught throw is therefore a fail-open. |
@@ -123,6 +124,8 @@ Plus the branches iteration 1 never covered, each of which survived a mutation: 
 **Own the glob matcher.** `*` matches within one segment, `**` crosses `/`, and **a leading `**/` matches at zero depth** — the S3 defect, where `**/test_*.py` missed a root-level `test_foo.py` and `**/*_test.go` missed an idiomatic Go `main_test.go`, so Green could read them.
 
 **Constraints.** Wrap the entire body so that any thrown error becomes a deliberate exit 2 — an uncaught exception exits 1, which permits. Do not call `process.exit()` in the same tick as a stdout write; the write can truncate. `realpath` failures deny.
+
+This task also adds the `package.json` and `tsconfig.json` the type checking needs — `devDependencies` only, `noEmit`, `allowJs` and `checkJs`, with `@types/node` on the 22 line. **Typing the config does not replace validating it**: every degenerate shape in Task 2 must still fail closed at runtime, because the guard parses untrusted JSON and a `@typedef` guarantees nothing about what is on disk.
 
 **Done when.** Task 2's matrix passes in full; the review's Appendix A probes return DENIED on all six read rows; `git show --stat` names `hooks/guard.mjs`, `hooks/lib/rules.mjs` and `hooks/hooks.json`; and the bash files are deleted in the same commit.
 
@@ -260,6 +263,7 @@ Three, so they are not relitigated:
 - **The plan carries design intent, not implementation** (R18). This document is the first instance.
 - **The measurement layer stays** (R19). CRAP, the coverage ratchets and the mutation pass are retained; only found defects are fixed. The mutation pass earned its place by finding a real spec violation; the CRAP pipeline has not yet shown comparable return and is the first thing to reconsider.
 - **The substrate is Node 22**, for the reason in the spec: bash failed open on Windows, and a fail-open on the read path is the failure this design exists to prevent.
+- **Checked JavaScript, not compiled TypeScript.** `target: ES2023` was measured and does not gate the `node:*` API surface — a file calling `path.matchesGlob` and `fs.globSync` compiled clean under it. The deciding argument is fail direction: a stale build artifact runs and fails open, whereas a missing type-checker merely stops checking. Full rationale in the spec under *Types without a compile step*.
 
 One lesson worth stating in its own right (M2): **"green" from a harness that cannot distinguish "no assertion failed" from "no assertion ran" is not evidence.** A one-character `jq` typo once deleted 46 assertions while the suite reported "122 passed, 0 failed". Carry that requirement into `node:test`, which has its own version of the same trap — a `describe` block that throws during collection can report zero failures.
 
