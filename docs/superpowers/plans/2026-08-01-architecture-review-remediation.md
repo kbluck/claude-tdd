@@ -174,11 +174,13 @@ Add a fixture with a non-null `commands.mutation` — one null field currently k
 
 **Invariant.** Every claim about `.tdd/config.json`'s tracked status agrees, and the guard's missing-config behaviour is asserted rather than described.
 
-**Why it fails today** (S4 + S5, Important). The spec gave three answers in three places — the State table said gitignored, two later statements said committed. If an implementer follows the table, `/tdd-init`'s commit becomes a silent no-op (`git add` on an ignored path does nothing without `-f`), breaking the first-run path that step exists to protect. Separately, `AGENTS.md` states that this repo has no `.tdd/config.json` so a `tdd-*` dispatch denies every guarded call — but the file **exists on disk** (untracked), and a live probe returns permitted. The property the paragraph depends on is gone.
+**Why it failed** (S4 + S5, Important). The spec gave three answers in three places — the State table said gitignored, two later statements said committed. If an implementer follows the table, `/tdd-init`'s commit becomes a silent no-op (`git add` on an ignored path does nothing without `-f`), breaking the first-run path that step exists to protect. Separately, `AGENTS.md` claimed this repo has no `.tdd/config.json`, so a `tdd-*` dispatch denies every guarded call with "run /tdd-init" — but the file **exists on disk**, gitignored, and a live probe showed dispatches guarded normally against the fixture's globs (`tdd-red` writing `e2e/tests/test_new.py` is permitted).
 
-**Status.** The spec half is done. What remains: correct `AGENTS.md`, have `/tdd-init` verify `git ls-files .tdd/config.json` is non-empty after committing, and add a real assertion to `tests/guard.test.sh` — point `TDD_PROJECT_DIR` at an empty sandbox and assert exit 2 with the `run /tdd-init` message.
+**Status.** The spec and `AGENTS.md` halves are **done**. The spec now states that target projects commit the config, and that this repository gitignores its own because that config describes the `e2e/` fixture rather than the plugin — a distinction the next reader should not have to re-derive.
 
-**Why the test matters more than the correction.** A safety property verified by *the repository's own incidental state* rather than by a test drifts silently, because nothing runs when it changes. That is the general pattern (M3); this is its clearest instance.
+**What remains.** Have `/tdd-init` verify `git ls-files .tdd/config.json` is non-empty after committing, and add a real assertion to `tests/guard.test.sh` — point `TDD_PROJECT_DIR` at an empty sandbox and assert exit 2 with the `run /tdd-init` message. Note that this asserts the *guard's* missing-config behaviour, which is genuine contract; it is no longer a claim about this repository's incidental state.
+
+**Why the test matters more than the correction.** A safety property verified by *the repository's own incidental state* rather than by a test drifts silently, because nothing runs when it changes. That is the general pattern (M3); this was its clearest instance, and correcting the prose does not close it.
 
 **Done when.** `git show --stat` names `tests/guard.test.sh` and `commands/tdd-init.md`.
 
