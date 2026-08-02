@@ -38,6 +38,10 @@ So each task states the **invariant**, **why it fails today**, the **constraints
 
 So `.node-version` makes the *suite* run on the floor, which is necessary and not sufficient. Treat a green suite as evidence about the floor only, and treat the guard's own startup version check as the thing that actually enforces it.
 
+**And the hook's runtime can change with no project file changing and no restart.** Measured: the host process carried two node entries on its `PATH` at **different majors** — an `fnm` per-session directory resolving 22.23.2 at position 1, and the stable default-alias directory resolving 26.5.1 at position 16. Which one wins depends on whether the per-session directory still exists, and its owning shell was already dead, so it is garbage-collectable. Reaping it would move the guard from 22 to 26 silently.
+
+Two consequences for the implementer. The version check is a **floor** test, never an equality test — 26 passing is correct behaviour, and a guard that demanded the pinned version would deny every call on a perfectly good runtime. And "runs on the floor, tolerates anything newer" is not a precaution here; the fallback on this very machine is a newer major.
+
 ---
 
 ## Tier 0 — the gate
