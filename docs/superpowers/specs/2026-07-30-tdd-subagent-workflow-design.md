@@ -132,7 +132,15 @@ That is the precise failure class this design exists to prevent, so it decides t
 
 **A missing interpreter fails open exactly as a missing shell did**, so the mechanism that catches it must be kept: preflight dispatches a probe subagent and confirms the guard observed a denial (*Preflight*, item 7). That probe is the only check that catches a guard which never launched, whatever the cause.
 
-**Target: Node 22**, the oldest LTS still in support (Maintenance LTS through April 2027; Node 20 reached end of life in April 2026). Two constraints follow:
+**Target: Node 22**, the oldest LTS still in support (Maintenance LTS through April 2027; Node 20 reached end of life in April 2026).
+
+**That is a floor the guard must enforce on itself, not a version anyone can pin.** Nothing in the project chooses the interpreter the hook receives — the host does, and the host is not the developer's shell. Measured on the development machine: Claude Code was running under a JetBrains ACP agent whose `PATH` resolves `node` to an IDE-bundled **24.13.0**, while `fnm` and `.node-version` gave the orchestrator's `Bash` tool **22.23.2**. Same machine, same repository, same moment, two runtimes — and the one the guard would actually run under is the one nobody selected.
+
+Three consequences:
+
+- **The guard checks `process.versions.node` at startup and denies if it is below the floor.** A version requirement that nothing enforces is a comment. Denying is the only safe direction, and it must be a deliberate exit 2 rather than a crash on a missing API, because a crash exits non-2 and permits.
+- **The code must run on the floor and tolerate anything newer.** It cannot assume the pinned version, so it stays on APIs stable across the supported range — which is the second, independent reason to refuse `path.matchesGlob`.
+- **A green suite says nothing about the hook's runtime.** `.node-version` governs the test suite. Only the preflight probe in item 7 executes inside whatever interpreter the host actually supplies.
 
 - **Do not use `path.matchesGlob`.** It landed in v22.5.0 and is experimental, so it is unavailable on early 22.x and its semantics may change. The glob matcher is security-critical and its `**` behaviour is the subject of a live defect — the project owns that matcher and its tests.
 - **Do not use the platform-native `path` module for matching.** See *Separators are normalised before matching*.

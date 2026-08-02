@@ -26,7 +26,7 @@ So each task states the **invariant**, **why it fails today**, the **constraints
 
 | Constraint | Fact |
 |---|---|
-| Runtime | Node 22 (oldest supported LTS). Pin it in `.node-version` so `fnm` selects it; the dev machine otherwise runs 26. |
+| Runtime | Node 22 (oldest supported LTS) as a **floor the guard enforces on itself**, not a pin. `.node-version` selects it for the test suite only — the host chooses the hook's interpreter. Measured: the IDE-hosted Claude Code resolves `node` to a bundled **24.13.0** while `fnm` gives the `Bash` tool **22.23.2**, on the same machine at the same moment. |
 | Hook registration | **Exec form** — `"command": "node", "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/guard.mjs"]`. Spawns directly, no shell, no `${VAR}`-versus-`$env:VAR` dialect. |
 | Module format | ESM (`.mjs`). No runtime dependencies and **no build step** — the file the hook runs is the file you edit. |
 | Type checking | `// @ts-check` plus JSDoc, verified with `tsc --noEmit` (checked against TypeScript 7.0.2). Dev dependency only: if it is absent, type checking is lost and the guard still runs correctly. **Not** TypeScript compiled to JS — see the spec, *Types without a compile step*. |
@@ -34,7 +34,9 @@ So each task states the **invariant**, **why it fails today**, the **constraints
 | Test runner | `node:test` + `node:assert`, stable since Node 20. |
 | Exit semantics | Only **2** blocks. Every other non-zero exit permits the tool call. Any uncaught throw is therefore a fail-open. |
 
-**The instrument hazard has moved, not gone.** Iteration 1's was sourcing a bash library into zsh. This iteration's is **developing on Node 26 while targeting Node 22**: an API added after 22 works perfectly on the dev machine and fails for users. `.node-version` plus `fnm` is the mitigation; treat a green suite on the wrong major as no evidence at all.
+**The instrument hazard has moved, not gone.** Iteration 1's was sourcing a bash library into zsh. This iteration's is sharper than "develop on the wrong major", because the wrong major cannot be corrected by pinning: **the interpreter the hook runs under is chosen by whatever hosts Claude Code, and it is not the one `fnm` gives your shell.** Verified — an IDE-bundled 24.13.0 for the hook against 22.23.2 for the `Bash` tool, simultaneously.
+
+So `.node-version` makes the *suite* run on the floor, which is necessary and not sufficient. Treat a green suite as evidence about the floor only, and treat the guard's own startup version check as the thing that actually enforces it.
 
 ---
 
@@ -126,6 +128,8 @@ Plus the branches iteration 1 never covered, each of which survived a mutation: 
 **Own the glob matcher.** `*` matches within one segment, `**` crosses `/`, and **a leading `**/` matches at zero depth** — the S3 defect, where `**/test_*.py` missed a root-level `test_foo.py` and `**/*_test.go` missed an idiomatic Go `main_test.go`, so Green could read them.
 
 **Constraints.** Wrap the entire body so that any thrown error becomes a deliberate exit 2 — an uncaught exception exits 1, which permits. Do not call `process.exit()` in the same tick as a stdout write; the write can truncate. `realpath` failures deny.
+
+**Check `process.versions.node` first, before anything else can throw**, and deny below the floor. This is the only mechanism that enforces the version requirement, because nothing in the project selects the hook's interpreter — measured divergence: a bundled 24.13.0 for the hook against 22.23.2 for the `Bash` tool. A guard that instead discovers the problem by calling a missing API crashes, exits non-2, and permits.
 
 This task also adds the `package.json` and `tsconfig.json` the type checking needs — `devDependencies` only, `noEmit`, `allowJs` and `checkJs`, with `@types/node` on the 22 line. **Typing the config does not replace validating it**: every degenerate shape in Task 2 must still fail closed at runtime, because the guard parses untrusted JSON and a `@typedef` guarantees nothing about what is on disk.
 
