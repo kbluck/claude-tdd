@@ -137,6 +137,25 @@ That is the precise failure class this design exists to prevent, so it decides t
 - **Do not use `path.matchesGlob`.** It landed in v22.5.0 and is experimental, so it is unavailable on early 22.x and its semantics may change. The glob matcher is security-critical and its `**` behaviour is the subject of a live defect — the project owns that matcher and its tests.
 - **Do not use the platform-native `path` module for matching.** See *Separators are normalised before matching*.
 
+### Types without a compile step *(iteration 2)*
+
+The guard is plain ESM checked with `// @ts-check` and JSDoc, not TypeScript compiled to JavaScript.
+
+**TypeScript's `target` does not deliver the runtime-compatibility guarantee it appears to.** Verified against `target: ES2023`, `lib: ["ES2023"]`, `module: nodenext` and `@types/node@22`: a file calling `path.matchesGlob` and `fs.globSync` — both unavailable or experimental on early 22.x — **compiled clean**. `target` governs ECMAScript syntax and lib, not the `node:*` API surface. Nor does pinning the types help: `@types/node@22` resolves to 22.20.1, which types everything added across the whole 22.x line. Only running the suite on the target runtime catches this, which is what `.node-version` is for.
+
+**The decisive reason is fail direction.** Compiling produces a generated artifact, and the plugin ships via `source: "./"`, so the guard users run would be committed build output — the source and the artifact kept in sync by a process, with the enforcing file not being the file anyone edits. That is precisely the topology that produced the fix which landed in the plan and never in the code, three times. Compare the two failure modes:
+
+| Approach | If the step is skipped, stale, or silently fails |
+|---|---|
+| TypeScript compiled | the stale guard runs, reads fail open, and nothing leaves a diff signature |
+| `// @ts-check` | no type checking; the source still runs correctly |
+
+One fails dangerous and one fails safe, which is the same reasoning this design applies at every branch of the guard, applied one level up.
+
+**The checking is not given up.** Verified on a plain `.mjs` file with JSDoc `@typedef`s: `tsc --noEmit` with `checkJs` caught a typo'd `commands.mutaton` key — the exact typo that survived a mutation in iteration 1 — along with a glob array treated as a string and an unguarded null. The cost is a `package.json` with dev dependencies in a repository that currently has none.
+
+**Types are not runtime validation.** The guard parses untrusted JSON from disk. Every degenerate config shape must still fail closed at runtime; a `@typedef` describes what the file is supposed to contain and guarantees nothing about what it does contain.
+
 ### State
 
 | Path | Committed | Purpose |
