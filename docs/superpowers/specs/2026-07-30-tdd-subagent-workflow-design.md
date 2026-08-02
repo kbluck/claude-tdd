@@ -116,7 +116,9 @@ Each part has one job:
 
 **The config is committed** *(iteration 2 — this row previously read "no — gitignored" and contradicted two later statements).* It is the single source of truth for a security boundary, and the partition guarantee is only as good as the review that config receives. Gitignoring it would also make `/tdd-init`'s own commit a silent no-op — `git add` on an ignored path does nothing without `-f` — breaking the first-run path in exactly the way that step exists to prevent.
 
-This says nothing about *this plugin's own repository*, which deliberately carries no `.tdd/config.json` so that a `tdd-*` dispatch here denies every guarded call. That is a property of the development repo, not of target projects.
+This governs target projects. *This plugin's own repository* gitignores its `.tdd/config.json` because that config describes the `e2e/` fixture rather than the plugin, and committing a config whose globs point into a test fixture would be misleading. A `tdd-*` dispatch here is therefore guarded normally against the fixture's globs, not denied for want of a config.
+
+**The guard resolves the project root from `TDD_PROJECT_DIR`, else `CLAUDE_PROJECT_DIR`, else the payload's `cwd`.** The first exists so the suite can point the guard at a sandbox holding a fixture config; it is part of the contract rather than a test affordance, because anything that can relocate the root can relocate the boundary.
 
 Run state is separated from config so an interrupted `/tdd` resumes from disk. **`checklist.json` also carries the coverage baselines** each gate compares against *(iteration 2)*. They were previously held only in the orchestrator's conversation, so a compaction between capturing a baseline and comparing against it left the gate comparing against nothing, or against a wrong figure — silently. The compaction claim covers only what is on disk; anything a gate needs across a dispatch boundary belongs in the file.
 
