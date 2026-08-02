@@ -1,0 +1,13 @@
+{
+  "name": "claude-tdd",
+  "description": "TDD subagent workflow",
+  "owner": { "name": "kbluck", "email": "kevin.bluck@gmail.com" },
+  "plugins": [
+    {
+      "name": "claude-tdd",
+      "description": "Red-Green-Refactor TDD via role-constrained subagents",
+      "version": "0.1.0",
+      "source": "./"
+    }
+  ]
+}

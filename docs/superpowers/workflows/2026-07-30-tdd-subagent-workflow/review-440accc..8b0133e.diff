@@ -1,0 +1,208 @@
+# Review package: 440accc..HEAD
+
+## Commits
+8b0133e fix: deny bash templates whose static prefix is empty or whitespace
+19bdc1c fix: deny a configured command with no static prefix
+
+## Files changed
+ .../plans/2026-07-30-tdd-subagent-workflow.md      | 40 ++++++++++++++++++++--
+ hooks/lib/rules.sh                                 | 22 ++++++++++--
+ tests/rules.test.sh                                | 16 +++++++++
+ 3 files changed, 74 insertions(+), 4 deletions(-)
+
+## Diff
+diff --git a/docs/superpowers/plans/2026-07-30-tdd-subagent-workflow.md b/docs/superpowers/plans/2026-07-30-tdd-subagent-workflow.md
+index 1dba132..8c958dd 100644
+--- a/docs/superpowers/plans/2026-07-30-tdd-subagent-workflow.md
++++ b/docs/superpowers/plans/2026-07-30-tdd-subagent-workflow.md
+@@ -592,20 +592,22 @@ git commit -m "feat: phase-aware path decision rules"
+ 
+ **Design notes:**
+ 
+ Detecting mutation by parsing shell commands is unbounded — `sed -i`, `cat >`, `mv`, a codegen script, and arbitrarily many more. Invert it: the agents only ever legitimately run the commands in `config.json`.
+ 
+ The rule has two parts:
+ 
+ 1. The command must start with the template's **static prefix** — everything before the first `{` placeholder, trailing whitespace trimmed. For `pytest -q {testId}` the prefix is `pytest -q`.
+ 2. The **delta** — what the agent supplied beyond that prefix — must contain none of `;` `|` `&` `>` `` ` `` `$(` `<` `\n`.
+ 
++**A template with no static prefix must deny.** If everything before the first `{` is empty or whitespace, the prefix test degenerates to `case "$cmd" in *)`, which matches every string — leaving only the metacharacter ban, so `cp -r /etc /tmp/exfil` would be permitted. This is the one input that turns the allowlist off entirely, and it must fail closed.
++
+ The metacharacter ban applies to the delta, *not* the template. A configured command is trusted: the user confirmed it at init, and some toolchains genuinely need a redirect to emit coverage. Banning metacharacters in the template itself would make those toolchains unexpressible, and the failure would surface as an unexplained rejection at init.
+ 
+ - [ ] **Step 1: Write the failing tests**
+ 
+ Append to `tests/rules.test.sh`:
+ 
+ ```bash
+ # --- bash allowlist ---
+ T_SINGLE="pytest -q {testId}"
+ T_FULL="pytest -q"
+@@ -627,20 +629,36 @@ assert_contains "deny" "$(tdd_bash_verdict "pytest -q | tee out.txt" "$T_FULL")"
+ assert_contains "deny" "$(tdd_bash_verdict "pytest -q > out.txt" "$T_FULL")" \
+   "redirect in delta is denied"
+ assert_contains "deny" "$(tdd_bash_verdict 'pytest -q $(whoami)' "$T_FULL")" \
+   "command substitution in delta is denied"
+ assert_contains "deny" "$(tdd_bash_verdict "pytest -q && rm -rf src" "$T_FULL")" \
+   "and-chain in delta is denied"
+ assert_contains "deny" "$(tdd_bash_verdict "sed -i s/a/b/ src/a.py" "$T_SINGLE")" \
+   "in-place edit via bash is denied"
+ assert_contains "deny" "$(tdd_bash_verdict "pytest -q" "")" \
+   "empty template denies"
++
++# --- REGRESSION: a template with no static prefix must not wave everything
++# through. An empty prefix makes the prefix test `case "$cmd" in *)`, which
++# matches any string, leaving only the metacharacter ban -- so an arbitrary
++# command with clean punctuation would be permitted.
++assert_contains "deny" "$(tdd_bash_verdict "cp -r /etc /tmp/exfil" "   ")" \
++  "whitespace-only template denies rather than allowing any clean command"
++assert_contains "deny" "$(tdd_bash_verdict "rm -rf /tmp/pwned" "{cmd}")" \
++  "placeholder-only template denies"
++assert_contains "deny" "$(tdd_bash_verdict "anything at all" "{a} {b}")" \
++  "template starting with a placeholder denies"
++
++# A tab before the placeholder must be trimmed like a space, or every normal
++# invocation would fail the prefix match.
++assert_eq "allow" "$(tdd_bash_verdict "pytest -q tests/t.py::x" "$(printf 'pytest -q\t{testId}')")" \
++  "trailing tab is trimmed from the static prefix"
+ ```
+ 
+ The redirect case is the one that matters most: `T_COV`'s template contains `:` and is allowed verbatim, while an agent-appended `>` is denied. That is the delta rule doing its job.
+ 
+ - [ ] **Step 2: Run to verify they fail**
+ 
+ Run: `bash tests/run.sh`
+ Expected: FAIL — `tdd_bash_verdict: command not found`
+ 
+ - [ ] **Step 3: Write the implementation**
+@@ -657,22 +675,40 @@ Append to `hooks/lib/rules.sh`:
+ # itself is trusted and may contain them.
+ tdd_bash_verdict() {
+   local cmd="$1" template="$2"
+ 
+   if [ -z "$template" ]; then
+     echo "deny: no command is configured for this phase; the guard fails closed"
+     return
+   fi
+ 
+   local prefix="${template%%\{*}"
+-  # trim trailing whitespace from the prefix
+-  while [ "${prefix% }" != "$prefix" ]; do prefix="${prefix% }"; done
++
++  # Trim trailing whitespace. [[:space:]] rather than a literal space, so a
++  # tab before the placeholder does not survive into the prefix and cause
++  # every normal space-separated invocation to fail the match.
++  while :; do
++    case "$prefix" in
++      *[[:space:]]) prefix="${prefix%?}" ;;
++      *) break ;;
++    esac
++  done
++
++  # An empty static prefix would make the prefix test `case "$cmd" in *)`,
++  # which matches everything -- silently degrading the allowlist to "any
++  # command without shell metacharacters". `cp -r /etc /tmp/exfil` would be
++  # permitted. A template that is whitespace-only, or that starts with its
++  # placeholder, must deny rather than wave everything through.
++  if [ -z "$prefix" ]; then
++    echo "deny: the configured command for this phase has no static prefix, so it cannot constrain anything; the guard fails closed"
++    return
++  fi
+ 
+   case "$cmd" in
+     "$prefix"*) ;;
+     *) echo "deny: only the configured command for this phase may be run; expected it to start with '${prefix}'"
+        return ;;
+   esac
+ 
+   local delta="${cmd#"$prefix"}"
+   case "$delta" in
+     *";"*|*"|"*|*"&"*|*">"*|*"<"*|*'`'*|*'$('*|*"
+diff --git a/hooks/lib/rules.sh b/hooks/lib/rules.sh
+index 6fa3fc9..9e99941 100644
+--- a/hooks/lib/rules.sh
++++ b/hooks/lib/rules.sh
+@@ -96,22 +96,40 @@ tdd_path_verdict() {
+ # bug must degrade to deny, never to a crash that permits.
+ tdd_bash_verdict() {
+   local cmd="${1:-}" template="${2:-}"
+ 
+   if [ -z "$template" ]; then
+     echo "deny: no command is configured for this phase; the guard fails closed"
+     return
+   fi
+ 
+   local prefix="${template%%\{*}"
+-  # trim trailing whitespace from the prefix
+-  while [ "${prefix% }" != "$prefix" ]; do prefix="${prefix% }"; done
++
++  # Trim trailing whitespace. [[:space:]] rather than a literal space, so a
++  # tab before the placeholder does not survive into the prefix and cause
++  # every normal space-separated invocation to fail the match.
++  while :; do
++    case "$prefix" in
++      *[[:space:]]) prefix="${prefix%?}" ;;
++      *) break ;;
++    esac
++  done
++
++  # An empty static prefix would make the prefix test `case "$cmd" in *)`,
++  # which matches everything -- silently degrading the allowlist to "any
++  # command without shell metacharacters". `cp -r /etc /tmp/exfil` would be
++  # permitted. A template that is whitespace-only, or that starts with its
++  # placeholder, must deny rather than wave everything through.
++  if [ -z "$prefix" ]; then
++    echo "deny: the configured command for this phase has no static prefix, so it cannot constrain anything; the guard fails closed"
++    return
++  fi
+ 
+   case "$cmd" in
+     "$prefix"*) ;;
+     *) echo "deny: only the configured command for this phase may be run; expected it to start with '${prefix}'"
+        return ;;
+   esac
+ 
+   local delta="${cmd#"$prefix"}"
+   case "$delta" in
+     *";"*|*"|"*|*"&"*|*">"*|*"<"*|*'`'*|*'$('*|*"
+diff --git a/tests/rules.test.sh b/tests/rules.test.sh
+index d1b7413..9e29b5b 100644
+--- a/tests/rules.test.sh
++++ b/tests/rules.test.sh
+@@ -122,20 +122,36 @@ assert_contains "deny" "$(tdd_bash_verdict "pytest -q > out.txt" "$T_FULL")" \
+   "redirect in delta is denied"
+ assert_contains "deny" "$(tdd_bash_verdict 'pytest -q $(whoami)' "$T_FULL")" \
+   "command substitution in delta is denied"
+ assert_contains "deny" "$(tdd_bash_verdict "pytest -q && rm -rf src" "$T_FULL")" \
+   "and-chain in delta is denied"
+ assert_contains "deny" "$(tdd_bash_verdict "sed -i s/a/b/ src/a.py" "$T_SINGLE")" \
+   "in-place edit via bash is denied"
+ assert_contains "deny" "$(tdd_bash_verdict "pytest -q" "")" \
+   "empty template denies"
+ 
++# --- REGRESSION: a template with no static prefix must not wave everything
++# through. An empty prefix makes the prefix test `case "$cmd" in *)`, which
++# matches any string, leaving only the metacharacter ban -- so an arbitrary
++# command with clean punctuation would be permitted.
++assert_contains "deny" "$(tdd_bash_verdict "cp -r /etc /tmp/exfil" "   ")" \
++  "whitespace-only template denies rather than allowing any clean command"
++assert_contains "deny" "$(tdd_bash_verdict "rm -rf /tmp/pwned" "{cmd}")" \
++  "placeholder-only template denies"
++assert_contains "deny" "$(tdd_bash_verdict "anything at all" "{a} {b}")" \
++  "template starting with a placeholder denies"
++
++# A tab before the placeholder must be trimmed like a space, or every normal
++# invocation would fail the prefix match.
++assert_eq "allow" "$(tdd_bash_verdict "pytest -q tests/t.py::x" "$(printf 'pytest -q\t{testId}')")" \
++  "trailing tab is trimmed from the static prefix"
++
+ # --- REGRESSION: glob characters in the agent-supplied portion are data,
+ # not a pattern. `case` only reinterprets the pattern side of a match, never
+ # the subject, but this pins it directly rather than trusting that reasoning
+ # -- pytest parametrized node ids routinely contain `[` and `-k` expressions
+ # routinely contain `*`.
+ assert_eq "allow" "$(tdd_bash_verdict "pytest -q tests/test_a.py::test_x[case-1]" "$T_SINGLE")" \
+   "glob characters in a parametrized test id are treated as data, not a pattern"
+ assert_eq "allow" "$(tdd_bash_verdict "pytest -q -k test_*" "$T_FULL")" \
+   "glob characters after the prefix are treated as literal data, not a pattern"
+ 

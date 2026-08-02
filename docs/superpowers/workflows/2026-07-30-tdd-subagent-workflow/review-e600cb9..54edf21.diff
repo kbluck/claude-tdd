@@ -1,0 +1,98 @@
+# Review package: e600cb924968ac99f4728f3f30c56e240e93655c..HEAD
+
+## Commits
+54edf21 feat: plugin manifest and zero-dependency test harness
+
+## Files changed
+ .claude-plugin/marketplace.json | 13 +++++++++++++
+ .claude-plugin/plugin.json      |  8 ++++++++
+ tests/run.sh                    | 36 ++++++++++++++++++++++++++++++++++++
+ tests/smoke.test.sh             |  4 ++++
+ 4 files changed, 61 insertions(+)
+
+## Diff
+diff --git a/.claude-plugin/marketplace.json b/.claude-plugin/marketplace.json
+new file mode 100644
+index 0000000..764779f
+--- /dev/null
++++ b/.claude-plugin/marketplace.json
+@@ -0,0 +1,13 @@
++{
++  "name": "claude-tdd",
++  "description": "TDD subagent workflow",
++  "owner": { "name": "kbluck", "email": "kevin.bluck@gmail.com" },
++  "plugins": [
++    {
++      "name": "claude-tdd",
++      "description": "Red-Green-Refactor TDD via role-constrained subagents",
++      "version": "0.1.0",
++      "source": "./"
++    }
++  ]
++}
+diff --git a/.claude-plugin/plugin.json b/.claude-plugin/plugin.json
+new file mode 100644
+index 0000000..a30a85c
+--- /dev/null
++++ b/.claude-plugin/plugin.json
+@@ -0,0 +1,8 @@
++{
++  "name": "claude-tdd",
++  "version": "0.1.0",
++  "description": "Red-Green-Refactor TDD via role-constrained subagents that never write both a test and the code that satisfies it",
++  "author": { "name": "kbluck", "email": "kevin.bluck@gmail.com" },
++  "license": "MIT",
++  "keywords": ["tdd", "testing", "subagents", "red-green-refactor"]
++}
+diff --git a/tests/run.sh b/tests/run.sh
+new file mode 100755
+index 0000000..cb3214f
+--- /dev/null
++++ b/tests/run.sh
+@@ -0,0 +1,36 @@
++#!/usr/bin/env bash
++# Zero-dependency test harness. Sources every *.test.sh in this directory.
++set -uo pipefail
++
++PASS=0
++FAIL=0
++
++assert_eq() { # expected actual name
++  if [ "$1" = "$2" ]; then
++    printf '  PASS: %s\n' "$3"; PASS=$((PASS + 1))
++  else
++    printf '  FAIL: %s\n    expected: %s\n    actual:   %s\n' "$3" "$1" "$2"
++    FAIL=$((FAIL + 1))
++  fi
++}
++
++assert_contains() { # needle haystack name
++  case "$2" in
++    *"$1"*) printf '  PASS: %s\n' "$3"; PASS=$((PASS + 1)) ;;
++    *) printf '  FAIL: %s\n    expected to contain: %s\n    actual: %s\n' "$3" "$1" "$2"
++       FAIL=$((FAIL + 1)) ;;
++  esac
++}
++
++TESTS_DIR="$(cd "$(dirname "$0")" && pwd)"
++export REPO_ROOT="$(cd "$TESTS_DIR/.." && pwd)"
++
++for t in "$TESTS_DIR"/*.test.sh; do
++  [ -e "$t" ] || continue
++  printf '\n--- %s ---\n' "$(basename "$t")"
++  # shellcheck disable=SC1090
++  . "$t"
++done
++
++printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
++[ "$FAIL" -eq 0 ]
+diff --git a/tests/smoke.test.sh b/tests/smoke.test.sh
+new file mode 100644
+index 0000000..d36dbdc
+--- /dev/null
++++ b/tests/smoke.test.sh
+@@ -0,0 +1,4 @@
++# Sourced by tests/run.sh. Do not add a shebang, set -e, or exit.
++
++assert_eq "hello" "$(printf 'hello')" "harness compares equal strings"
++assert_contains "ell" "hello" "harness finds a substring"

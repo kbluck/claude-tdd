@@ -32,7 +32,19 @@
     "ENABLE_TOOL_SEARCH":           "auto"
   },
 
+  "extraKnownMarketplaces": {
+    "claude-tdd": {
+      "source": {
+        "source": "directory",
+        "path": "."
+      },
+      "installLocation": ".",
+      "lastUpdated": "2026-08-01T19:47:19.116Z"
+    }
+  },
+
   "enabledPlugins": {
+    "claude-tdd@claude-tdd":               true,
     "remember@claude-plugins-official":    true,
     "superpowers@claude-plugins-official": true
   }

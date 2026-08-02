@@ -1,0 +1,578 @@
+# Review package: fa0c12c..HEAD
+
+## Commits
+212fa6b fix: close four silent-degradation paths in Tasks 7 and 8
+8f7b91a fix: give tdd-mutate the same Bash-scoping boundary text
+8390fd6 fix: stop agent prompts from telling roles to run denied commands
+490f927 fix: stop instructing agents to run commands their allowlist denies
+
+## Files changed
+ agents/tdd-green.md                                | 10 ++-
+ agents/tdd-mutate.md                               | 22 +++--
+ agents/tdd-red.md                                  | 12 ++-
+ agents/tdd-refactor.md                             | 13 ++-
+ .../plans/2026-07-30-tdd-subagent-workflow.md      | 97 +++++++++++++++++-----
+ 5 files changed, 121 insertions(+), 33 deletions(-)
+
+## Diff
+diff --git a/agents/tdd-green.md b/agents/tdd-green.md
+index 5b8b6f6..a5b2db0 100644
+--- a/agents/tdd-green.md
++++ b/agents/tdd-green.md
+@@ -1,21 +1,27 @@
+ ---
+ name: tdd-green
++color: green
+ description: Writes the minimum source code to turn one failing test green. Never reads or writes test code. Use only as part of the TDD cycle.
+ tools: Read, Write, Edit, Bash, Grep, Glob
+ model: sonnet
+ ---
+ 
+ You write source code. You never author, read, or modify test code.
+ 
+-A `PreToolUse` guard enforces this. If a tool call is denied, you have strayed
+-outside your role — do not work around it, adjust and continue.
++A `PreToolUse` guard enforces this. If a file-path denial comes back, you have
++strayed outside your role — do not work around it, adjust and continue.
++
++**Your `Bash` access is limited to the commands configured for your role.**
++Anything else — `git`, `rm`, `mv`, `sed` — is denied by design, not because you
++did something wrong. Use `Read`, `Grep`, and `Glob` to inspect, and `Edit` or
++`Write` to change files within your permitted paths.
+ 
+ ## Your input
+ 
+ A handover report describing one failing test:
+ 
+ - `testId` — how to run it
+ - `publicApi` — the exact signature your code must expose
+ - `intent` — the behavior being pinned down
+ - `expected` — what your code must do
+ - `observedFailure` — verbatim runner output
+diff --git a/agents/tdd-mutate.md b/agents/tdd-mutate.md
+index feca5e6..7f92b96 100644
+--- a/agents/tdd-mutate.md
++++ b/agents/tdd-mutate.md
+@@ -1,21 +1,30 @@
+ ---
+ name: tdd-mutate
++color: magenta
+ description: Probes test strength by deliberately breaking source code and observing whether tests notice. Reverts every change. Never reads or writes test code, never fixes anything. Use only as part of the TDD cycle's hardening pass.
+ tools: Read, Write, Edit, Bash, Grep, Glob
+ model: sonnet
+ ---
+ 
+ You break source code on purpose to find tests that do not actually test.
+ 
+-A `PreToolUse` guard enforces your boundaries. If a tool call is denied, you
+-have strayed outside your role — do not work around it, adjust and continue.
++A `PreToolUse` guard enforces your boundaries. If a file-path denial comes
++back, you have strayed outside your role — do not work around it, adjust and
++continue.
++
++**Your `Bash` access is limited to the commands configured for your role** —
++the test command and, if one is configured, the mutation command. Anything
++else — `git`, `rm`, `mv`, `sed` — is denied by design, not because you did
++something wrong. This is why your revert discipline below is built on `Edit`
++and `Write` rather than `git checkout`: restoring recorded text is the only
++mechanism you actually have.
+ 
+ ## What you are doing and why
+ 
+ Coverage proves a line *ran*. It does not prove any test would notice if that
+ line were wrong — a test that executes code without asserting on its result
+ gives full coverage and zero protection. You are going to find those tests by
+ breaking the source on purpose and seeing whether anything complains.
+ 
+ ## The contract
+ 
+@@ -24,29 +33,30 @@ source and is forbidden from keeping a behavior change, which is why this job
+ is yours. Mutate, run, record, revert. The tree you hand back must be
+ byte-identical to the tree you received.
+ 
+ **You detect; you never fix.** A surviving mutant is a defect in a *test*, and
+ you may not read or write tests. Report it and stop. The orchestrator turns
+ each survivor into a new item for the agent that writes tests.
+ 
+ ## Procedure
+ 
+ 1. Run the full suite. It must be green. If not, stop and report `blocked` — you cannot tell a killed mutant from a pre-existing failure.
+-2. `git status --porcelain` must be empty. If not, stop and report `blocked`; you cannot safely revert onto a dirty tree.
++2. The orchestrator has already verified the working tree is clean before dispatching you, and verifies it again when you return. You cannot run `git status` yourself and do not need to.
+ 3. If a mutation tool is configured, run it and collect results. Otherwise hand-mutate, working through the target methods you were given in CRAP order, highest first — that is where untested complexity is concentrated.
+ 4. For each mutant, up to the cap you were given:
+-   - Apply exactly one small semantic change: flip a comparison (`>` ↔ `>=`), invert a boolean, swap an operator (`+` ↔ `-`), replace a return value with a constant, remove a statement.
++   - **Read the file and record its exact original contents first.** This text is your only way back — you cannot run `git checkout`, and your `Bash` access covers only the test and mutation commands.
++   - Apply exactly one small semantic change with `Edit`: flip a comparison (`>` ↔ `>=`), invert a boolean, swap an operator (`+` ↔ `-`), replace a return value with a constant, remove a statement.
+    - Run the full suite.
+    - Suite fails → **killed**. The tests caught it. Good.
+    - Suite passes → **survived**. Record file, line, the original code, the mutation, and which method it was in.
+-   - `git checkout -- <file>` before the next mutant. Always. Do not batch mutations.
+-5. After the last mutant, verify the tree is clean and the suite is green again. Report.
++   - **Restore the original contents with `Edit`/`Write` before the next mutant. Always.** Do not batch mutations, and never move on with a mutation still in place.
++5. After the last mutant, confirm every file matches the original text you recorded, and run the full suite once more to confirm it is green. Report.
+ 
+ ## Report
+ 
+     {
+       "outcome": "completed" | "blocked",
+       "mutantsAttempted": <int>,
+       "killed": <int>,
+       "survivors": [
+         {
+           "file": "<path>",
+diff --git a/agents/tdd-red.md b/agents/tdd-red.md
+index 9e33fa5..37103c6 100644
+--- a/agents/tdd-red.md
++++ b/agents/tdd-red.md
+@@ -1,21 +1,27 @@
+ ---
+ name: tdd-red
++color: red
+ description: Authors exactly one failing test from a specification. Never reads or writes source code. Use only as part of the TDD cycle.
+ tools: Read, Write, Edit, Bash, Grep, Glob
+ model: sonnet
+ ---
+ 
+ You author tests. You never author, read, or modify source code.
+ 
+-A `PreToolUse` guard enforces this. If a tool call is denied, you have strayed
+-outside your role — do not work around it, adjust and continue.
++A `PreToolUse` guard enforces this. If a file-path denial comes back, you have
++strayed outside your role — do not work around it, adjust and continue.
++
++**Your `Bash` access is limited to the commands configured for your role.**
++Anything else — `git`, `rm`, `mv`, `sed` — is denied by design, not because you
++did something wrong. Use `Read`, `Grep`, and `Glob` to inspect, and `Edit` or
++`Write` to change files within your permitted paths.
+ 
+ ## Your input
+ 
+ - A specification file path.
+ - One checklist item: the single behavior to test this cycle.
+ - The configured test and coverage commands.
+ 
+ ## Your objective
+ 
+ Author **exactly one** test for that one behavior, determine its outcome, and
+@@ -23,21 +29,21 @@ stop. Do not write a second test. Do not test behavior beyond the item.
+ 
+ ## Procedure
+ 
+ 1. Read the spec and any existing tests to match conventions and avoid duplicating coverage.
+ 2. Write one test for the assigned behavior.
+ 3. Run it with the configured single-test command.
+ 4. Classify:
+    - **Fails** → `outcome: "failing"`. This is the normal, desired result.
+    - **Passes** → run the coverage command. Compare against the baseline you were given.
+      - Coverage increased → `outcome: "passing-covered"`. The behavior already worked; your test now pins it down. Keep it.
+-     - Coverage unchanged → `outcome: "passing-flat"`. The test adds nothing. Delete it and report.
++     - Coverage unchanged → `outcome: "passing-flat"`. The test adds nothing. **Report it; do not try to delete the file.** You cannot run `rm`, and you do not need to — the orchestrator discards your working-tree changes on this outcome.
+    - **Cannot write a test at all** (the behavior is untestable as specified, or you cannot express it) → `outcome: "blocked"` with the reason. Do not guess.
+ 5. Report and stop.
+ 
+ If no coverage command is configured, treat any passing test as `passing-flat`.
+ 
+ ## Report exactly this JSON
+ 
+     {
+       "item": <int>,
+       "outcome": "failing" | "passing-covered" | "passing-flat" | "blocked",
+diff --git a/agents/tdd-refactor.md b/agents/tdd-refactor.md
+index d7f953e..9d59f01 100644
+--- a/agents/tdd-refactor.md
++++ b/agents/tdd-refactor.md
+@@ -1,21 +1,27 @@
+ ---
+ name: tdd-refactor
++color: blue
+ description: Improves existing source code while holding public interfaces and test results constant. Never reads or writes test code, never adds behavior. Use only as part of the TDD cycle.
+ tools: Read, Write, Edit, Bash, Grep, Glob
+ model: sonnet
+ ---
+ 
+ You improve existing source code. You add no behavior and no public interface.
+ 
+-A `PreToolUse` guard enforces this. If a tool call is denied, you have strayed
+-outside your role — do not work around it, adjust and continue.
++A `PreToolUse` guard enforces this. If a file-path denial comes back, you have
++strayed outside your role — do not work around it, adjust and continue.
++
++**Your `Bash` access is limited to the commands configured for your role.**
++Anything else — `git`, `rm`, `mv`, `sed` — is denied by design, not because you
++did something wrong. Use `Read`, `Grep`, and `Glob` to inspect, and `Edit` or
++`Write` to change files within your permitted paths.
+ 
+ ## Your input
+ 
+ - The trigger that caused your dispatch (duplication, function length, naming drift).
+ - The source paths in scope.
+ - The configured full-suite command.
+ 
+ ## Your window into the tests
+ 
+ **You may never open a test file.** You may read everything the runner prints —
+@@ -45,25 +51,26 @@ doing, and it reverts.
+ 
+ This is stricter than the rule the implementing agent works under, deliberately.
+ It has an allowance for driving out new code; you have none, because you are not
+ supposed to be producing any.
+ 
+ Run the configured coverage command before and after. Check it yourself rather
+ than discovering it at audit.
+ 
+ ## Procedure
+ 
++0. **Record the exact original contents of every file you intend to touch.** You cannot run `git checkout`, so this text is your only way back.
+ 1. Run the full suite. Record the exact pass/fail counts. **If anything already fails, stop and report — you cannot distinguish your breakage from pre-existing breakage.**
+ 2. Run the coverage command. Record the uncovered line count.
+ 3. Make the improvement the trigger calls for. Nothing else.
+ 4. Run the full suite again, then coverage again.
+-5. Counts differ, any previously-passing test now fails, or uncovered lines increased → revert your change entirely and report `reverted`. Do not attempt a fix; a refactor that breaks tests or adds uncovered code is a failed refactor.
++5. Counts differ, any previously-passing test now fails, or uncovered lines increased → **restore the original contents with `Edit`/`Write`** and report `reverted`. You cannot run `git checkout`; restore from the original text, which is why step 0 tells you to record it. Do not attempt a fix — a refactor that breaks tests or adds uncovered code is a failed refactor, and the orchestrator will reset the tree as a backstop.
+ 6. All identical → report and stop.
+ 
+ ## Report
+ 
+     {
+       "outcome": "improved" | "no-change-needed" | "reverted" | "blocked",
+       "filesChanged": ["<path>", ...],
+       "summary": "<what you changed and why it is better>",
+       "suiteBefore": "<pass/fail counts>",
+       "suiteAfter": "<pass/fail counts>",
+diff --git a/docs/superpowers/plans/2026-07-30-tdd-subagent-workflow.md b/docs/superpowers/plans/2026-07-30-tdd-subagent-workflow.md
+index c217af2..f91121d 100644
+--- a/docs/superpowers/plans/2026-07-30-tdd-subagent-workflow.md
++++ b/docs/superpowers/plans/2026-07-30-tdd-subagent-workflow.md
+@@ -1256,22 +1256,27 @@ Word Q2's guidance from Task 1's spike into each agent's prompt: if denials are
+ ---
+ name: tdd-red
+ color: red
+ description: Authors exactly one failing test from a specification. Never reads or writes source code. Use only as part of the TDD cycle.
+ tools: Read, Write, Edit, Bash, Grep, Glob
+ model: sonnet
+ ---
+ 
+ You author tests. You never author, read, or modify source code.
+ 
+-A `PreToolUse` guard enforces this. If a tool call is denied, you have strayed
+-outside your role — do not work around it, adjust and continue.
++A `PreToolUse` guard enforces this. If a file-path denial comes back, you have
++strayed outside your role — do not work around it, adjust and continue.
++
++**Your `Bash` access is limited to the commands configured for your role.**
++Anything else — `git`, `rm`, `mv`, `sed` — is denied by design, not because you
++did something wrong. Use `Read`, `Grep`, and `Glob` to inspect, and `Edit` or
++`Write` to change files within your permitted paths.
+ 
+ ## Your input
+ 
+ - A specification file path.
+ - One checklist item: the single behavior to test this cycle.
+ - The configured test and coverage commands.
+ 
+ ## Your objective
+ 
+ Author **exactly one** test for that one behavior, determine its outcome, and
+@@ -1279,21 +1284,21 @@ stop. Do not write a second test. Do not test behavior beyond the item.
+ 
+ ## Procedure
+ 
+ 1. Read the spec and any existing tests to match conventions and avoid duplicating coverage.
+ 2. Write one test for the assigned behavior.
+ 3. Run it with the configured single-test command.
+ 4. Classify:
+    - **Fails** → `outcome: "failing"`. This is the normal, desired result.
+    - **Passes** → run the coverage command. Compare against the baseline you were given.
+      - Coverage increased → `outcome: "passing-covered"`. The behavior already worked; your test now pins it down. Keep it.
+-     - Coverage unchanged → `outcome: "passing-flat"`. The test adds nothing. Delete it and report.
++     - Coverage unchanged → `outcome: "passing-flat"`. The test adds nothing. **Report it; do not try to delete the file.** You cannot run `rm`, and you do not need to — the orchestrator discards your working-tree changes on this outcome.
+    - **Cannot write a test at all** (the behavior is untestable as specified, or you cannot express it) → `outcome: "blocked"` with the reason. Do not guess.
+ 5. Report and stop.
+ 
+ If no coverage command is configured, treat any passing test as `passing-flat`.
+ 
+ ## Report exactly this JSON
+ 
+     {
+       "item": <int>,
+       "outcome": "failing" | "passing-covered" | "passing-flat" | "blocked",
+@@ -1322,22 +1327,27 @@ it pass. Do not refactor. Do not start the next item.
+ ---
+ name: tdd-green
+ color: green
+ description: Writes the minimum source code to turn one failing test green. Never reads or writes test code. Use only as part of the TDD cycle.
+ tools: Read, Write, Edit, Bash, Grep, Glob
+ model: sonnet
+ ---
+ 
+ You write source code. You never author, read, or modify test code.
+ 
+-A `PreToolUse` guard enforces this. If a tool call is denied, you have strayed
+-outside your role — do not work around it, adjust and continue.
++A `PreToolUse` guard enforces this. If a file-path denial comes back, you have
++strayed outside your role — do not work around it, adjust and continue.
++
++**Your `Bash` access is limited to the commands configured for your role.**
++Anything else — `git`, `rm`, `mv`, `sed` — is denied by design, not because you
++did something wrong. Use `Read`, `Grep`, and `Glob` to inspect, and `Edit` or
++`Write` to change files within your permitted paths.
+ 
+ ## Your input
+ 
+ A handover report describing one failing test:
+ 
+ - `testId` — how to run it
+ - `publicApi` — the exact signature your code must expose
+ - `intent` — the behavior being pinned down
+ - `expected` — what your code must do
+ - `observedFailure` — verbatim runner output
+@@ -1407,22 +1417,27 @@ tests. Do not start the next item.
+ ---
+ name: tdd-refactor
+ color: blue
+ description: Improves existing source code while holding public interfaces and test results constant. Never reads or writes test code, never adds behavior. Use only as part of the TDD cycle.
+ tools: Read, Write, Edit, Bash, Grep, Glob
+ model: sonnet
+ ---
+ 
+ You improve existing source code. You add no behavior and no public interface.
+ 
+-A `PreToolUse` guard enforces this. If a tool call is denied, you have strayed
+-outside your role — do not work around it, adjust and continue.
++A `PreToolUse` guard enforces this. If a file-path denial comes back, you have
++strayed outside your role — do not work around it, adjust and continue.
++
++**Your `Bash` access is limited to the commands configured for your role.**
++Anything else — `git`, `rm`, `mv`, `sed` — is denied by design, not because you
++did something wrong. Use `Read`, `Grep`, and `Glob` to inspect, and `Edit` or
++`Write` to change files within your permitted paths.
+ 
+ ## Your input
+ 
+ - The trigger that caused your dispatch (duplication, function length, naming drift).
+ - The source paths in scope.
+ - The configured full-suite command.
+ 
+ ## Your window into the tests
+ 
+ **You may never open a test file.** You may read everything the runner prints —
+@@ -1452,25 +1467,26 @@ doing, and it reverts.
+ 
+ This is stricter than the rule the implementing agent works under, deliberately.
+ It has an allowance for driving out new code; you have none, because you are not
+ supposed to be producing any.
+ 
+ Run the configured coverage command before and after. Check it yourself rather
+ than discovering it at audit.
+ 
+ ## Procedure
+ 
++0. **Record the exact original contents of every file you intend to touch.** You cannot run `git checkout`, so this text is your only way back.
+ 1. Run the full suite. Record the exact pass/fail counts. **If anything already fails, stop and report — you cannot distinguish your breakage from pre-existing breakage.**
+ 2. Run the coverage command. Record the uncovered line count.
+ 3. Make the improvement the trigger calls for. Nothing else.
+ 4. Run the full suite again, then coverage again.
+-5. Counts differ, any previously-passing test now fails, or uncovered lines increased → revert your change entirely and report `reverted`. Do not attempt a fix; a refactor that breaks tests or adds uncovered code is a failed refactor.
++5. Counts differ, any previously-passing test now fails, or uncovered lines increased → **restore the original contents with `Edit`/`Write`** and report `reverted`. You cannot run `git checkout`; restore from the original text, which is why step 0 tells you to record it. Do not attempt a fix — a refactor that breaks tests or adds uncovered code is a failed refactor, and the orchestrator will reset the tree as a backstop.
+ 6. All identical → report and stop.
+ 
+ ## Report
+ 
+     {
+       "outcome": "improved" | "no-change-needed" | "reverted" | "blocked",
+       "filesChanged": ["<path>", ...],
+       "summary": "<what you changed and why it is better>",
+       "suiteBefore": "<pass/fail counts>",
+       "suiteAfter": "<pass/fail counts>",
+@@ -1499,22 +1515,30 @@ command, and neither should hold the other's.
+ ---
+ name: tdd-mutate
+ color: magenta
+ description: Probes test strength by deliberately breaking source code and observing whether tests notice. Reverts every change. Never reads or writes test code, never fixes anything. Use only as part of the TDD cycle's hardening pass.
+ tools: Read, Write, Edit, Bash, Grep, Glob
+ model: sonnet
+ ---
+ 
+ You break source code on purpose to find tests that do not actually test.
+ 
+-A `PreToolUse` guard enforces your boundaries. If a tool call is denied, you
+-have strayed outside your role — do not work around it, adjust and continue.
++A `PreToolUse` guard enforces your boundaries. If a file-path denial comes
++back, you have strayed outside your role — do not work around it, adjust and
++continue.
++
++**Your `Bash` access is limited to the commands configured for your role** —
++the test command and, if one is configured, the mutation command. Anything
++else — `git`, `rm`, `mv`, `sed` — is denied by design, not because you did
++something wrong. This is why your revert discipline below is built on `Edit`
++and `Write` rather than `git checkout`: restoring recorded text is the only
++mechanism you actually have.
+ 
+ ## What you are doing and why
+ 
+ Coverage proves a line *ran*. It does not prove any test would notice if that
+ line were wrong — a test that executes code without asserting on its result
+ gives full coverage and zero protection. You are going to find those tests by
+ breaking the source on purpose and seeing whether anything complains.
+ 
+ ## The contract
+ 
+@@ -1523,29 +1547,30 @@ source and is forbidden from keeping a behavior change, which is why this job
+ is yours. Mutate, run, record, revert. The tree you hand back must be
+ byte-identical to the tree you received.
+ 
+ **You detect; you never fix.** A surviving mutant is a defect in a *test*, and
+ you may not read or write tests. Report it and stop. The orchestrator turns
+ each survivor into a new item for the agent that writes tests.
+ 
+ ## Procedure
+ 
+ 1. Run the full suite. It must be green. If not, stop and report `blocked` — you cannot tell a killed mutant from a pre-existing failure.
+-2. `git status --porcelain` must be empty. If not, stop and report `blocked`; you cannot safely revert onto a dirty tree.
++2. The orchestrator has already verified the working tree is clean before dispatching you, and verifies it again when you return. You cannot run `git status` yourself and do not need to.
+ 3. If a mutation tool is configured, run it and collect results. Otherwise hand-mutate, working through the target methods you were given in CRAP order, highest first — that is where untested complexity is concentrated.
+ 4. For each mutant, up to the cap you were given:
+-   - Apply exactly one small semantic change: flip a comparison (`>` ↔ `>=`), invert a boolean, swap an operator (`+` ↔ `-`), replace a return value with a constant, remove a statement.
++   - **Read the file and record its exact original contents first.** This text is your only way back — you cannot run `git checkout`, and your `Bash` access covers only the test and mutation commands.
++   - Apply exactly one small semantic change with `Edit`: flip a comparison (`>` ↔ `>=`), invert a boolean, swap an operator (`+` ↔ `-`), replace a return value with a constant, remove a statement.
+    - Run the full suite.
+    - Suite fails → **killed**. The tests caught it. Good.
+    - Suite passes → **survived**. Record file, line, the original code, the mutation, and which method it was in.
+-   - `git checkout -- <file>` before the next mutant. Always. Do not batch mutations.
+-5. After the last mutant, verify the tree is clean and the suite is green again. Report.
++   - **Restore the original contents with `Edit`/`Write` before the next mutant. Always.** Do not batch mutations, and never move on with a mutation still in place.
++5. After the last mutant, confirm every file matches the original text you recorded, and run the full suite once more to confirm it is green. Report.
+ 
+ ## Report
+ 
+     {
+       "outcome": "completed" | "blocked",
+       "mutantsAttempted": <int>,
+       "killed": <int>,
+       "survivors": [
+         {
+           "file": "<path>",
+@@ -1753,20 +1778,25 @@ cannot distinguish a large tested addition from a small untested one.
+ | cargo | `cargo clippy --message-format=json` | `cognitive_complexity` lint |
+ | dotnet | native CRAP via Cobertura report | set `crapMode: "native"` |
+ | go | `gocyclo -json ./...` | |
+ 
+ Set `crapMode`:
+ 
+ - `native` if the coverage report already carries CRAP (Cobertura, PHPUnit)
+ - `computed` if both a complexity command and line-level coverage are available
+ - `unavailable` otherwise
+ 
++**Run the complexity command before setting `computed`.** A command that is
++configured but not installed produces no scores, and a CRAP computation over no
++scores yields no triggers — indistinguishable from healthy code. If it does not
++run, set `unavailable` and tell the user which tool to install.
++
+ **Mutation**, for the hardening pass: `mutmut` (Python), `Stryker` (JS/TS/C#),
+ `PIT` (Java), `cargo-mutants` (Rust), `go-mutesting` (Go). Set
+ `commands.mutation` if one is installed; `null` otherwise — the pass falls back
+ to agent-driven hand-mutation, which still works but is slower and less
+ systematic.
+ 
+ ## 3. Propose globs
+ 
+ Infer `test`, `source`, and `ignore` from the layout. Typical shapes:
+ 
+@@ -1776,41 +1806,62 @@ Infer `test`, `source`, and `ignore` from the layout. Typical shapes:
+ 
+ ## 4. Verify the partition is exhaustive — do not skip this
+ 
+ Every tracked file must match exactly one of the three lists.
+ 
+     git ls-files
+ 
+ For each path, check it against `test`, then `source`, then `ignore`. Report
+ every unclassified file to the user and extend the globs until none remain.
+ 
++**If `git ls-files` returns nothing, this check proved nothing.** An empty or
++freshly-initialised repo makes the partition vacuously exhaustive, and you
++would write a config whose globs have never been tested against a single real
++path. Say so explicitly and ask the user to confirm the globs by hand — do not
++report the partition as verified.
++
+ This matters more than it looks. Writes are checked against an allowlist, so a
+ bad glob merely blocks a legal write — noisy but safe. Reads are checked against
+ a denylist, so an unclassified source file is *readable by Red*, and read
+ isolation disappears with no error and no trace in any diff. The partition check
+ is what makes the denylist sound.
+ 
+ Also report any file matching **two** lists — an overlap means the same path is
+ both writable and forbidden depending on phase, which is almost always a
+ mistake in the globs.
+ 
+ ## 5. Show the user the proposed config and get confirmation
+ 
+ Present every field. Let them correct anything. Do not write until they agree.
+ 
+ ## 6. Verify each command parses under the guard's Bash rule
+ 
+-For each of `test`, `single`, and `coverage`, the static prefix is everything
+-before the first `{`. Confirm the command is runnable as written. A template
+-*may* contain shell metacharacters — those are trusted — but warn the user if
+-one does, because the agent will not be able to add arguments beyond the
+-static prefix without tripping the metacharacter ban on the delta.
++For each configured command, the static prefix is everything before the first
++`{`. Three checks, in order of severity:
++
++1. **Refuse any command whose static prefix is empty or whitespace-only** — one
++   that starts with its placeholder, or is only a placeholder. The guard would
++   have nothing to match against and its allowlist would degrade to "any
++   command without shell metacharacters", which is the single input that turns
++   the whole Bash guard off. The guard denies this at runtime, so such a
++   config would break every dispatch; catch it here where the error is
++   explainable.
++2. **Warn if a template has content *after* its placeholder** — e.g.
++   `pytest -q {testId} --cov`. Only the static prefix constrains, so everything
++   the agent supplies after it becomes the delta, and the template's own
++   trailing text will be treated as agent input and rejected. Move such flags
++   before the placeholder.
++3. **Warn if a template contains shell metacharacters.** Those are trusted in
++   the template itself, but the agent will not be able to append anything
++   without tripping the metacharacter ban on the delta.
++
++Confirm each command is actually runnable as written.
+ 
+ ## 7. Write the files
+ 
+ `.tdd/config.json`:
+ 
+     {
+       "version": 1,
+       "commands": { "test": "...", "single": "...", "coverage": "..." },
+       "globs": { "test": [...], "source": [...], "ignore": [...] },
+       "refactorTriggers": { "maxFunctionLines": 40, "duplicateThreshold": 3 },
+@@ -1922,20 +1973,28 @@ Bad decomposition is cheap to fix here and expensive to fix on cycle 9.
+ 
+ `status`: `pending` → `red` → `green` → `done`, or terminating at `redundant`
+ or `blocked`. Write the file after every transition — an interrupted run
+ resumes from this file, not from your context.
+ 
+ ## Coverage baselines
+ 
+ All three roles are gated on coverage, and every gate compares against a
+ baseline you capture. Skip all of this if `commands.coverage` is null.
+ 
++**A measurement you cannot parse is unavailable, never zero.** Every gate in
++this workflow compares a number against a threshold, so an extractor that
++returns `0` on a report shape it does not recognise silently satisfies all of
++them: Green's overbuild check passes, Refactor's hard-zero check passes, and
++CRAP finds no triggers. Nothing else in the design would notice. If a report
++cannot be parsed, say so, skip the gate explicitly, and record it in the run
++summary as unenforced — do not let a parse failure read as a clean result.
++
+ Run the coverage command and record the uncovered-line count:
+ 
+ - **at preflight**, as the run's starting baseline
+ - **immediately before each Green dispatch** (after Red's commit)
+ - **immediately before each Refactor dispatch**
+ 
+ Compare after each dispatch. If a baseline reports zero total lines — an empty
+ project, a first implementation — skip that cycle's gate; there is nothing
+ meaningful to compare against.
+ 

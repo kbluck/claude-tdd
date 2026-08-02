@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "commands": {
+    "test": "pytest -q",
+    "single": "pytest -q {testId}",
+    "coverage": "pytest -q --cov --cov-report=json:.tdd/coverage.json",
+    "complexity": "radon cc -j -s src",
+    "mutation": null
+  },
+  "globs": {
+    "test": ["tests/**", "**/test_*.py"],
+    "source": ["src/**"],
+    "ignore": ["docs/**", "*.md"]
+  },
+  "crapMode": "computed",
+  "refactorTriggers": { "maxCrap": 30, "duplicateThreshold": 3, "maxFunctionLines": 40 },
+  "limits": { "greenAttempts": 3, "violationRetries": 1, "mutationRounds": 2, "mutantsPerPass": 20 },
+  "coverageGates": { "greenMaxNewUncovered": 2, "refactorMaxNewUncovered": 0 }
+}

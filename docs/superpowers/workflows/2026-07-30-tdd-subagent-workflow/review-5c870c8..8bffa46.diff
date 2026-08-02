@@ -1,0 +1,751 @@
+# Review package: 5c870c86eba6ee137510074083fb34336995ae66..HEAD
+
+## Commits
+8bffa46 fix(plan): drop Grep and Glob from the agents' inspection guidance
+53ed8ae docs: repair the config paragraph and drop the stale Grep/Glob note
+0417c2c fix(agent): remove Grep and Glob from tools, the guard cannot cover them
+bab3a0b fix(plugin): untrack the e2e config, harden the Go template
+d51b5ff fix(hook): normalise paths before the root-prefix strip
+3456f9c fix(hook): normalize paths before glob matching to close a read bypass
+1f933db fix(plan): normalise paths before matching, and drop Grep/Glob
+
+## Files changed
+ .gitignore                                         |  1 +
+ .tdd/config.json                                   | 54 ----------------
+ AGENTS.md                                          | 19 +++++-
+ agents/tdd-green.md                                |  4 +-
+ agents/tdd-mutate.md                               |  2 +-
+ agents/tdd-red.md                                  |  4 +-
+ agents/tdd-refactor.md                             |  4 +-
+ commands/tdd-init.md                               |  2 +-
+ .../plans/2026-07-30-tdd-subagent-workflow.md      | 73 +++++++++++++++++++---
+ hooks/guard.sh                                     |  6 ++
+ hooks/lib/rules.sh                                 | 29 +++++++++
+ tests/guard.test.sh                                | 23 +++++++
+ tests/rules.test.sh                                | 20 ++++++
+ 13 files changed, 168 insertions(+), 73 deletions(-)
+
+## Diff
+diff --git a/.gitignore b/.gitignore
+index f1cbd4b..b858f77 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -164,10 +164,11 @@ e2e/.coverage
+ e2e/coverage.json
+ .coverage
+ mutants/
+ e2e/mutants/
+ .pytest_cache/
+ e2e/.pytest_cache/
+ .tdd/checklist.json
+ .tdd/coverage.json
+ __pycache__/
+ *.pyc
++.tdd/config.json
+diff --git a/.tdd/config.json b/.tdd/config.json
+deleted file mode 100644
+index 597e7b9..0000000
+--- a/.tdd/config.json
++++ /dev/null
+@@ -1,54 +0,0 @@
+-{
+-  "version": 1,
+-  "commands": {
+-    "test": "PYTHONDONTWRITEBYTECODE=1 e2e/.venv/bin/pytest -q --ignore=e2e/mutants e2e",
+-    "single": "PYTHONDONTWRITEBYTECODE=1 e2e/.venv/bin/pytest -q --ignore=e2e/mutants {testId}",
+-    "coverage": "PYTHONDONTWRITEBYTECODE=1 e2e/.venv/bin/pytest -q --ignore=e2e/mutants --cov=e2e/src --cov-report=json:.tdd/coverage.json e2e",
+-    "complexity": "e2e/.venv/bin/radon cc -j e2e/src",
+-    "mutation": "e2e/mutmut.sh run"
+-  },
+-  "crapMode": "computed",
+-  "globs": {
+-    "test": [
+-      "e2e/tests/**"
+-    ],
+-    "source": [
+-      "e2e/src/**"
+-    ],
+-    "ignore": [
+-      ".claude-plugin/**",
+-      ".claude/**",
+-      ".gitattributes",
+-      ".gitignore",
+-      ".idea/**",
+-      ".tdd/**",
+-      "AGENTS.md",
+-      "LICENSE",
+-      "agents/**",
+-      "commands/**",
+-      "docs/**",
+-      "e2e/mutmut.sh",
+-      "e2e/pyproject.toml",
+-      "e2e/setup.cfg",
+-      "e2e/spec.md",
+-      "hooks/**",
+-      "skills/**",
+-      "tests/**"
+-    ]
+-  },
+-  "refactorTriggers": {
+-    "maxCrap": 30,
+-    "duplicateThreshold": 3,
+-    "maxFunctionLines": 40
+-  },
+-  "limits": {
+-    "greenAttempts": 3,
+-    "violationRetries": 1,
+-    "mutationRounds": 2,
+-    "mutantsPerPass": 20
+-  },
+-  "coverageGates": {
+-    "greenMaxNewUncovered": 2,
+-    "refactorMaxNewUncovered": 0
+-  }
+-}
+diff --git a/AGENTS.md b/AGENTS.md
+index 43c3617..fa8e340 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -5,36 +5,49 @@ agent writes both a test and the code satisfying it. It is pure Bash 3.2 + `jq`
+ 
+ ## Working in this repo
+ 
+ Read all SDD documentation before changing anything substantial:
+ 
+ - `docs/**/specs/*.md` — the design contract.
+ - `docs/**/plans/*.md` — task-by-task implementation detail.
+ - `.superpowers/**/progress.md` — decisions made, defects found, deferred minor issues.
+ - `.remember/*.md` — memories from prior sessions
+ 
+-Note that the `claude-tdd@claude-tdd` plugin is enabled here, but there is no `.tdd/config.json` at the root. Instead, there is
+-`tests/fixtures/config.json`, which the tests copy into a sandbox. Dispatching a `tdd-*` subagent therefore denies every guarded
+-tool call with "run /tdd-init". That is the guard working. Note `Grep` and `Glob` are outside the hook's matcher and pass through.
++The `claude-tdd@claude-tdd` plugin is enabled here, but there is deliberately no `.tdd/config.json` at the root — it is
++gitignored. Dispatching a `tdd-*` subagent therefore denies every guarded tool call with "run /tdd-init", and that is the guard
++working. Do not commit one; its absence is what keeps that behaviour observable.
++
++The tests do not depend on it either way: they copy `tests/fixtures/config.json` into a sandbox and point the guard at it with
++`TDD_PROJECT_DIR`.
+ 
+ Commits follow Conventional Commits — refer to skill `conventional-commits`.
+ Stage explicit paths. Never `git add -A` — a subagent may be mid-edit.
+ Combine commits into the same type and scope. Separate commits with different type or scope.
+ Add a scope to every commit type except `chore`. Split commit if multiple scopes would be included. List of scopes:
+ - plugin — the entire project or the plugin config
+ - spec — Specification
+ - plan — Task plan
+ - agent — Subagent definitions
+ - command — Slash commands
+ - hook — Hook scripts
+ - skill — Skill definitions
+ 
++## Running the plugin against itself
++
++`e2e/` is a small pytest fixture used to exercise the workflow end to end. It is
++development-only — it ships with the plugin because the marketplace source is
++`./`, but Claude Code loads nothing from it.
++
++To re-run the end-to-end workflow, run `/tdd-init` (it detects the fixture and
++writes a gitignored `.tdd/config.json`), then `/tdd e2e/spec.md`. The venv under
++`e2e/.venv` needs `pytest`, `pytest-cov`, `radon` and `mutmut`.
++
+ ## Tests
+ 
+ ```bash
+ bash tests/run.sh          # whole suite, ~1.3s, exits non-zero on any failure
+ ```
+ 
+ There is no single-test selector. `run.sh` globs `tests/*.test.sh`. The suite is fast enough that running all tests is acceptable.
+ 
+ Test files are **sourced**, not executed: no shebang, no `set -e`, no `exit`. They call `assert_eq` and `assert_contains` from
+ `run.sh` and use `$REPO_ROOT`.
+diff --git a/agents/tdd-green.md b/agents/tdd-green.md
+index a5b2db0..e29a912 100644
+--- a/agents/tdd-green.md
++++ b/agents/tdd-green.md
+@@ -1,26 +1,26 @@
+ ---
+ name: tdd-green
+ color: green
+ description: Writes the minimum source code to turn one failing test green. Never reads or writes test code. Use only as part of the TDD cycle.
+-tools: Read, Write, Edit, Bash, Grep, Glob
++tools: Read, Write, Edit, Bash
+ model: sonnet
+ ---
+ 
+ You write source code. You never author, read, or modify test code.
+ 
+ A `PreToolUse` guard enforces this. If a file-path denial comes back, you have
+ strayed outside your role — do not work around it, adjust and continue.
+ 
+ **Your `Bash` access is limited to the commands configured for your role.**
+ Anything else — `git`, `rm`, `mv`, `sed` — is denied by design, not because you
+-did something wrong. Use `Read`, `Grep`, and `Glob` to inspect, and `Edit` or
++did something wrong. Use `Read` to inspect, and `Edit` or
+ `Write` to change files within your permitted paths.
+ 
+ ## Your input
+ 
+ A handover report describing one failing test:
+ 
+ - `testId` — how to run it
+ - `publicApi` — the exact signature your code must expose
+ - `intent` — the behavior being pinned down
+ - `expected` — what your code must do
+diff --git a/agents/tdd-mutate.md b/agents/tdd-mutate.md
+index 41abd0f..b60a478 100644
+--- a/agents/tdd-mutate.md
++++ b/agents/tdd-mutate.md
+@@ -1,15 +1,15 @@
+ ---
+ name: tdd-mutate
+ color: magenta
+ description: Probes test strength by deliberately breaking source code and observing whether tests notice. Reverts every change. Never reads or writes test code, never fixes anything. Use only as part of the TDD cycle's hardening pass.
+-tools: Read, Write, Edit, Bash, Grep, Glob
++tools: Read, Write, Edit, Bash
+ model: sonnet
+ ---
+ 
+ You break source code on purpose to find tests that do not actually test.
+ 
+ A `PreToolUse` guard enforces your boundaries. If a file-path denial comes
+ back, you have strayed outside your role — do not work around it, adjust and
+ continue.
+ 
+ **Your `Bash` access is limited to the commands configured for your role** —
+diff --git a/agents/tdd-red.md b/agents/tdd-red.md
+index 37103c6..fd7aeaa 100644
+--- a/agents/tdd-red.md
++++ b/agents/tdd-red.md
+@@ -1,26 +1,26 @@
+ ---
+ name: tdd-red
+ color: red
+ description: Authors exactly one failing test from a specification. Never reads or writes source code. Use only as part of the TDD cycle.
+-tools: Read, Write, Edit, Bash, Grep, Glob
++tools: Read, Write, Edit, Bash
+ model: sonnet
+ ---
+ 
+ You author tests. You never author, read, or modify source code.
+ 
+ A `PreToolUse` guard enforces this. If a file-path denial comes back, you have
+ strayed outside your role — do not work around it, adjust and continue.
+ 
+ **Your `Bash` access is limited to the commands configured for your role.**
+ Anything else — `git`, `rm`, `mv`, `sed` — is denied by design, not because you
+-did something wrong. Use `Read`, `Grep`, and `Glob` to inspect, and `Edit` or
++did something wrong. Use `Read` to inspect, and `Edit` or
+ `Write` to change files within your permitted paths.
+ 
+ ## Your input
+ 
+ - A specification file path.
+ - One checklist item: the single behavior to test this cycle.
+ - The configured test and coverage commands.
+ 
+ ## Your objective
+ 
+diff --git a/agents/tdd-refactor.md b/agents/tdd-refactor.md
+index 7c249c6..1643b81 100644
+--- a/agents/tdd-refactor.md
++++ b/agents/tdd-refactor.md
+@@ -1,26 +1,26 @@
+ ---
+ name: tdd-refactor
+ color: blue
+ description: Improves existing source code while holding public interfaces and test results constant. Never reads or writes test code, never adds behavior. Use only as part of the TDD cycle.
+-tools: Read, Write, Edit, Bash, Grep, Glob
++tools: Read, Write, Edit, Bash
+ model: sonnet
+ ---
+ 
+ You improve existing source code. You add no behavior and no public interface.
+ 
+ A `PreToolUse` guard enforces this. If a file-path denial comes back, you have
+ strayed outside your role — do not work around it, adjust and continue.
+ 
+ **Your `Bash` access is limited to the commands configured for your role.**
+ Anything else — `git`, `rm`, `mv`, `sed` — is denied by design, not because you
+-did something wrong. Use `Read`, `Grep`, and `Glob` to inspect, and `Edit` or
++did something wrong. Use `Read` to inspect, and `Edit` or
+ `Write` to change files within your permitted paths.
+ 
+ ## Your input
+ 
+ - The trigger that caused your dispatch (duplication, function length, naming drift).
+ - The source paths in scope.
+ - The configured full-suite command.
+ 
+ ## Your window into the tests
+ 
+diff --git a/commands/tdd-init.md b/commands/tdd-init.md
+index 04830a4..7fa0a4e 100644
+--- a/commands/tdd-init.md
++++ b/commands/tdd-init.md
+@@ -12,21 +12,21 @@ guard hook on every subsequent tool call.
+ - The project is a git repository with at least one commit.
+ 
+ ## 2. Detect the toolchain
+ 
+ | Marker | Toolchain | test | single | coverage |
+ |---|---|---|---|---|
+ | `pytest.ini`, or `pyproject.toml` mentioning pytest | pytest | `pytest -q` | `pytest -q {testId}` | `pytest -q --cov --cov-report=json:.tdd/coverage.json` |
+ | `package.json` with `jest` | jest | `npx jest` | `npx jest -t {testId}` | `npx jest --coverage --coverageReporters=json-summary` |
+ | `package.json` with `vitest` | vitest | `npx vitest run` | `npx vitest run -t {testId}` | `npx vitest run --coverage` |
+ | `Cargo.toml` | cargo | `cargo test` | `cargo test {testId}` | `cargo llvm-cov --json` |
+-| `go.mod` | go | `go test ./...` | `go test -run {testId} ./...` | `go test -cover ./...` |
++| `go.mod` | go | `go test ./...` | `go test ./... -run {testId}` | `go test -cover ./...` |
+ | `*.csproj`, `*.sln` | dotnet | `dotnet test` | `dotnet test --filter {testId}` | `dotnet test --collect:"XPlat Code Coverage"` |
+ 
+ No marker matches, or several do → ask the user rather than guessing.
+ 
+ ## 2c. Report every degradation explicitly
+ 
+ Each missing tool removes a mechanical check and silently replaces it with
+ prompt discipline. Tell the user which guarantees they are actually getting:
+ 
+ | Missing | Lost |
+diff --git a/docs/superpowers/plans/2026-07-30-tdd-subagent-workflow.md b/docs/superpowers/plans/2026-07-30-tdd-subagent-workflow.md
+index c72575b..cbf9d6d 100644
+--- a/docs/superpowers/plans/2026-07-30-tdd-subagent-workflow.md
++++ b/docs/superpowers/plans/2026-07-30-tdd-subagent-workflow.md
+@@ -452,20 +452,40 @@ assert_contains "deny" "$(tdd_path_verdict "" write src/a.py "$TG" "$SG")" \
+   "empty role denies"
+ assert_contains "deny" "$(tdd_path_verdict bogus write src/a.py "$TG" "$SG")" \
+   "unknown role denies"
+ assert_contains "deny" "$(tdd_path_verdict red read src/a.py "$TG" "")" \
+   "empty source globs deny a read rather than permitting it"
+ assert_contains "deny" "$(tdd_path_verdict green read tests/test_a.py "" "$SG")" \
+   "empty test globs deny a read rather than permitting it"
+ assert_contains "deny" "$(tdd_path_verdict red write tests/test_a.py "" "$SG")" \
+   "empty test globs deny a write"
+ 
++# --- REGRESSION: alternative spellings of the same path must agree ---
++#
++# guard.sh strips the project root by literal prefix, so an un-normalised
++# `./x` or `x//y` fails to strip and then matches no glob. On a READ that
++# means ALLOW, because reads are a denylist. Verified live before the fix:
++# red was denied `e2e/src/calc/__init__.py` and permitted the identical file
++# spelled `./e2e/src/calc/__init__.py`.
++assert_eq "e2e/src/a.py" "$(tdd_normalize_path "./e2e/src/a.py")" \
++  "leading ./ is stripped"
++assert_eq "e2e/src/a.py" "$(tdd_normalize_path "e2e//src/a.py")" \
++  "repeated slashes collapse"
++assert_eq "e2e/src/a.py" "$(tdd_normalize_path "e2e/./src/a.py")" \
++  "/./ segments collapse"
++assert_eq "e2e/src/a.py" "$(tdd_normalize_path ".//e2e/./src//a.py")" \
++  "all three at once"
++assert_eq "/abs/e2e/src/a.py" "$(tdd_normalize_path "/abs//e2e/./src/a.py")" \
++  "an absolute path keeps its leading slash"
++assert_eq "" "$(tdd_normalize_path "")" \
++  "empty input stays empty rather than erroring"
++
+ # --- REGRESSION: the verdict must not depend on what is on disk ---
+ #
+ # An unquoted glob string undergoes pathname expansion as well as word
+ # splitting, so `src/**` would be replaced by whatever files exist. That made
+ # `red read src/pkg/module.py` return "allow" from a directory containing
+ # src/, and "deny" from anywhere else -- a silent fail-open on the one rule
+ # nothing else in the design can enforce.
+ #
+ # These run inside a scratch tree whose shape would trigger the bug.
+ _glob_sandbox="$(mktemp -d)"
+@@ -538,20 +558,49 @@ tdd_matches_any() {
+   esac
+ 
+   for g in $globs; do
+     if tdd_glob_match "$g" "$path"; then rc=0; break; fi
+   done
+ 
+   if [ "$restore" = 1 ]; then set +f; fi
+   return "$rc"
+ }
+ 
++# tdd_normalize_path <path>
++# Collapses repeated slashes, leading `./`, and `/./` segments.
++#
++# Without this the guard is trivially bypassable. guard.sh strips the project
++# root by literal prefix match, and the glob match then needs the relative path
++# to start with the glob's literal prefix. A path spelled `./e2e/src/a.py`
++# strips to nothing and matches no glob -- and because reads are a DENYLIST,
++# no-match means ALLOW. Verified against the live config: red was denied
++# `e2e/src/calc/__init__.py` and permitted `./e2e/src/calc/__init__.py`, the
++# same file. `e2e//src/...` bypassed identically.
++#
++# Uses `tr -s` rather than `${p//\/\//\/}` deliberately: the replacement half
++# of a bash substitution is not a pattern, so `\/` there leaves a literal
++# backslash -- the same trap that produced the `**` normalization bug in this
++# file's own history.
++tdd_normalize_path() {
++  local p="${1:-}"
++  [ -n "$p" ] || { printf ''; return; }
++  p=$(printf '%s' "$p" | tr -s '/')
++  while :; do
++    case "$p" in
++      ./*)   p="${p#./}" ;;
++      */./*) p="${p%%/./*}/${p#*/./}" ;;
++      *)     break ;;
++    esac
++  done
++  printf '%s' "$p"
++}
++
+ # tdd_path_verdict <role> <mode> <path> <test_globs> <source_globs>
+ # Echoes "allow" or "deny: <reason>".
+ #
+ # Every parameter defaults to empty rather than tripping `set -u`: this file
+ # is sourced under `set -u`, where an unset positional aborts the whole
+ # script. An aborted guard exits non-zero-but-not-2, which is treated as a
+ # non-blocking error and lets the tool call through. A caller bug must
+ # degrade to deny, never to a crash that permits.
+ tdd_path_verdict() {
+   local role="${1:-}" mode="${2:-}" path="${3:-}"
+@@ -1157,20 +1206,26 @@ path=$(printf '%s' "$input" | jq -r --arg k "$path_key" '.tool_input[$k] // empt
+ [ -n "$path" ] || deny "tdd guard: this ${tool} call from ${agent} carries no file_path, so it cannot be checked; the guard fails closed"
+ 
+ # Reject traversal BEFORE stripping the root prefix. "$root/../<repo>/src/a.py"
+ # resolves back inside the project but does not start with "$root/", so it
+ # would survive as an absolute path, match no glob, and be permitted on a
+ # read -- the same silent fail-open shape as the Task 3 defect.
+ case "/$path/" in
+   */../*) deny "tdd guard: path contains a '..' segment and cannot be classified safely: $path" ;;
+ esac
+ 
++# Normalise BOTH sides before the prefix strip. An un-normalised `./x`, `x//y`,
++# or a root with a trailing slash fails to strip, then matches no glob, and a
++# no-match on a read means allow.
++root=$(tdd_normalize_path "$root"); root="${root%/}"
++path=$(tdd_normalize_path "$path")
++
+ case "$path" in
+   "$root"/*) rel="${path#"$root"/}" ;;   # inside the project
+   *)         rel="$path" ;;              # already relative, or outside the project
+ esac
+ 
+ verdict=$(tdd_path_verdict "$role" "$mode" "$rel" "$test_globs" "$source_globs")
+ [ "$verdict" = "allow" ] && exit 0
+ deny "$verdict"
+ ```
+ 
+@@ -1286,47 +1341,49 @@ git commit -m "feat: PreToolUse guard enforcing role boundaries"
+   "testFile": "tests/test_parser.py",
+   "publicApi": "parse(text: str) -> Node",
+   "intent": "empty input is an error, not an empty tree",
+   "expected": "raises ParseError('empty input')",
+   "observedFailure": "<verbatim runner output>"
+ }
+ ```
+ 
+ `outcome` is one of `failing`, `passing-covered`, `passing-flat`, `blocked`. `publicApi` is load-bearing — Green cannot read the test, so without an explicit signature it cannot know what to implement.
+ 
+-All four files use frontmatter `name`, `description`, `tools`, `model`, `color`. `tools` is `Read, Write, Edit, Bash, Grep, Glob` for all of them — path scoping is the hook's job, not the frontmatter's.
++All four files use frontmatter `name`, `description`, `tools`, `model`, `color`. `tools` is `Read, Write, Edit, Bash` for all of them — path scoping is the hook's job, not the frontmatter's.
++
++**`Grep` and `Glob` are deliberately not granted.** The `PreToolUse` matcher covers `Read|Write|Edit|MultiEdit|NotebookEdit|NotebookRead|Bash`; a `Grep` call would never reach the guard at all — not even its fail-closed arm — and `Grep` returns file *content*, so Red could read source wholesale through it. Widening the matcher is not a simple fix either: `Grep` and `Glob` are scoped to a directory rather than a file, and the guard classifies file paths against globs. Granting a tool the guard cannot classify is how a boundary becomes decorative, so the roles get file-level tools only.
+ 
+ **The `name:` field is load-bearing.** The guard's dispatch table matches on it via the payload's `agent_type`, so `name: tdd-red` must be exact. A typo does not fail loudly — it makes the guard fall through to "not our agent" and permit everything that agent does.
+ 
+ Mutation ships as its own agent rather than a mode on `tdd-refactor` precisely because the guard keys on identity: a separate `agent_type` gets a separate Bash allowlist for free. `tdd-refactor` needs the complexity command, `tdd-mutate` needs the mutation command, and neither should have the other's.
+ 
+ Word Q2's guidance from Task 1's spike into each agent's prompt: if denials are correctable, tell the agent a denial means "you strayed, adjust and continue"; if fatal, tell it to check its boundaries before acting rather than probing.
+ 
+ - [ ] **Step 1: Write `agents/tdd-red.md`**
+ 
+ ```markdown
+ ---
+ name: tdd-red
+ color: red
+ description: Authors exactly one failing test from a specification. Never reads or writes source code. Use only as part of the TDD cycle.
+-tools: Read, Write, Edit, Bash, Grep, Glob
++tools: Read, Write, Edit, Bash
+ model: sonnet
+ ---
+ 
+ You author tests. You never author, read, or modify source code.
+ 
+ A `PreToolUse` guard enforces this. If a file-path denial comes back, you have
+ strayed outside your role — do not work around it, adjust and continue.
+ 
+ **Your `Bash` access is limited to the commands configured for your role.**
+ Anything else — `git`, `rm`, `mv`, `sed` — is denied by design, not because you
+-did something wrong. Use `Read`, `Grep`, and `Glob` to inspect, and `Edit` or
++did something wrong. Use `Read` to inspect, and `Edit` or
+ `Write` to change files within your permitted paths.
+ 
+ ## Your input
+ 
+ - A specification file path.
+ - One checklist item: the single behavior to test this cycle.
+ - The configured test and coverage commands.
+ 
+ ## Your objective
+ 
+@@ -1372,32 +1429,32 @@ Stop the moment you have classified one test. Do not implement source to make
+ it pass. Do not refactor. Do not start the next item.
+ ```
+ 
+ - [ ] **Step 2: Write `agents/tdd-green.md`**
+ 
+ ```markdown
+ ---
+ name: tdd-green
+ color: green
+ description: Writes the minimum source code to turn one failing test green. Never reads or writes test code. Use only as part of the TDD cycle.
+-tools: Read, Write, Edit, Bash, Grep, Glob
++tools: Read, Write, Edit, Bash
+ model: sonnet
+ ---
+ 
+ You write source code. You never author, read, or modify test code.
+ 
+ A `PreToolUse` guard enforces this. If a file-path denial comes back, you have
+ strayed outside your role — do not work around it, adjust and continue.
+ 
+ **Your `Bash` access is limited to the commands configured for your role.**
+ Anything else — `git`, `rm`, `mv`, `sed` — is denied by design, not because you
+-did something wrong. Use `Read`, `Grep`, and `Glob` to inspect, and `Edit` or
++did something wrong. Use `Read` to inspect, and `Edit` or
+ `Write` to change files within your permitted paths.
+ 
+ ## Your input
+ 
+ A handover report describing one failing test:
+ 
+ - `testId` — how to run it
+ - `publicApi` — the exact signature your code must expose
+ - `intent` — the behavior being pinned down
+ - `expected` — what your code must do
+@@ -1462,32 +1519,32 @@ Stop the moment the test passes. Do not improve unrelated code. Do not write
+ tests. Do not start the next item.
+ ```
+ 
+ - [ ] **Step 3: Write `agents/tdd-refactor.md`**
+ 
+ ```markdown
+ ---
+ name: tdd-refactor
+ color: blue
+ description: Improves existing source code while holding public interfaces and test results constant. Never reads or writes test code, never adds behavior. Use only as part of the TDD cycle.
+-tools: Read, Write, Edit, Bash, Grep, Glob
++tools: Read, Write, Edit, Bash
+ model: sonnet
+ ---
+ 
+ You improve existing source code. You add no behavior and no public interface.
+ 
+ A `PreToolUse` guard enforces this. If a file-path denial comes back, you have
+ strayed outside your role — do not work around it, adjust and continue.
+ 
+ **Your `Bash` access is limited to the commands configured for your role.**
+ Anything else — `git`, `rm`, `mv`, `sed` — is denied by design, not because you
+-did something wrong. Use `Read`, `Grep`, and `Glob` to inspect, and `Edit` or
++did something wrong. Use `Read` to inspect, and `Edit` or
+ `Write` to change files within your permitted paths.
+ 
+ ## Your input
+ 
+ - The trigger that caused your dispatch (duplication, function length, naming drift).
+ - The source paths in scope.
+ - The configured full-suite command.
+ 
+ ## Your window into the tests
+ 
+@@ -1560,21 +1617,21 @@ Do not expand scope to code the trigger did not name.
+ Its own agent, not a mode flag on `tdd-refactor`. The guard keys on
+ `agent_type`, so a separate identity gets a separate Bash allowlist for free:
+ `tdd-refactor` needs the complexity command, `tdd-mutate` needs the mutation
+ command, and neither should hold the other's.
+ 
+ ```markdown
+ ---
+ name: tdd-mutate
+ color: magenta
+ description: Probes test strength by deliberately breaking source code and observing whether tests notice. Reverts every change. Never reads or writes test code, never fixes anything. Use only as part of the TDD cycle's hardening pass.
+-tools: Read, Write, Edit, Bash, Grep, Glob
++tools: Read, Write, Edit, Bash
+ model: sonnet
+ ---
+ 
+ You break source code on purpose to find tests that do not actually test.
+ 
+ A `PreToolUse` guard enforces your boundaries. If a file-path denial comes
+ back, you have strayed outside your role — do not work around it, adjust and
+ continue.
+ 
+ **Your `Bash` access is limited to the commands configured for your role** —
+diff --git a/hooks/guard.sh b/hooks/guard.sh
+index 2f28bee..33ed041 100755
+--- a/hooks/guard.sh
++++ b/hooks/guard.sh
+@@ -127,18 +127,24 @@ path=$(printf '%s' "$input" | jq -r --arg k "$path_key" '.tool_input[$k] // empt
+ [ -n "$path" ] || deny "tdd guard: this ${tool} call from ${agent} carries no file_path, so it cannot be checked; the guard fails closed"
+ 
+ # Reject traversal BEFORE stripping the root prefix. "$root/../<repo>/src/a.py"
+ # resolves back inside the project but does not start with "$root/", so it
+ # would survive as an absolute path, match no glob, and be permitted on a
+ # read -- the same silent fail-open shape as the Task 3 defect.
+ case "/$path/" in
+   */../*) deny "tdd guard: path contains a '..' segment and cannot be classified safely: $path" ;;
+ esac
+ 
++# Normalise BOTH sides before the prefix strip. An un-normalised `./x`, `x//y`,
++# or a root with a trailing slash fails to strip, then matches no glob, and a
++# no-match on a read means allow.
++root=$(tdd_normalize_path "$root"); root="${root%/}"
++path=$(tdd_normalize_path "$path")
++
+ case "$path" in
+   "$root"/*) rel="${path#"$root"/}" ;;   # inside the project
+   *)         rel="$path" ;;              # already relative, or outside the project
+ esac
+ 
+ verdict=$(tdd_path_verdict "$role" "$mode" "$rel" "$test_globs" "$source_globs")
+ [ "$verdict" = "allow" ] && exit 0
+ deny "$verdict"
+diff --git a/hooks/lib/rules.sh b/hooks/lib/rules.sh
+index 9e99941..f3b251a 100644
+--- a/hooks/lib/rules.sh
++++ b/hooks/lib/rules.sh
+@@ -30,20 +30,49 @@ tdd_matches_any() {
+   esac
+ 
+   for g in $globs; do
+     if tdd_glob_match "$g" "$path"; then rc=0; break; fi
+   done
+ 
+   if [ "$restore" = 1 ]; then set +f; fi
+   return "$rc"
+ }
+ 
++# tdd_normalize_path <path>
++# Collapses repeated slashes, leading `./`, and `/./` segments.
++#
++# Without this the guard is trivially bypassable. guard.sh strips the project
++# root by literal prefix match, and the glob match then needs the relative path
++# to start with the glob's literal prefix. A path spelled `./e2e/src/a.py`
++# strips to nothing and matches no glob -- and because reads are a DENYLIST,
++# no-match means ALLOW. Verified against the live config: red was denied
++# `e2e/src/calc/__init__.py` and permitted `./e2e/src/calc/__init__.py`, the
++# same file. `e2e//src/...` bypassed identically.
++#
++# Uses `tr -s` rather than `${p//\/\//\/}` deliberately: the replacement half
++# of a bash substitution is not a pattern, so `\/` there leaves a literal
++# backslash -- the same trap that produced the `**` normalization bug in this
++# file's own history.
++tdd_normalize_path() {
++  local p="${1:-}"
++  [ -n "$p" ] || { printf ''; return; }
++  p=$(printf '%s' "$p" | tr -s '/')
++  while :; do
++    case "$p" in
++      ./*)   p="${p#./}" ;;
++      */./*) p="${p%%/./*}/${p#*/./}" ;;
++      *)     break ;;
++    esac
++  done
++  printf '%s' "$p"
++}
++
+ # tdd_path_verdict <role> <mode> <path> <test_globs> <source_globs>
+ # Echoes "allow" or "deny: <reason>".
+ #
+ # Every parameter defaults to empty rather than tripping `set -u`: this file
+ # is sourced under `set -u`, where an unset positional aborts the whole
+ # script. An aborted guard exits non-zero-but-not-2, which is treated as a
+ # non-blocking error and lets the tool call through. A caller bug must
+ # degrade to deny, never to a crash that permits.
+ tdd_path_verdict() {
+   local role="${1:-}" mode="${2:-}" path="${3:-}"
+diff --git a/tests/guard.test.sh b/tests/guard.test.sh
+index 4a72a8d..95781cc 100644
+--- a/tests/guard.test.sh
++++ b/tests/guard.test.sh
+@@ -165,19 +165,42 @@ assert_contains "2|" "$out" "a .. segment denies rather than escaping classifica
+ # traversal guard removed, so it would not prove the guard is live.
+ out=$(run_guard "tdd-green" payload_read "$SANDBOX/../$(basename "$SANDBOX")/src/a.py")
+ assert_contains "2|" "$out" "a .. segment denies for green even on a path it could otherwise read"
+ 
+ # Repo-relative paths must classify identically to absolute ones.
+ out=$(run_guard "tdd-red" payload_read "src/a.py")
+ assert_contains "2|" "$out" "relative source path is still denied to red"
+ out=$(run_guard "tdd-red" payload_write "tests/test_a.py")
+ assert_eq "0|" "$out" "relative test path is still allowed to red"
+ 
++# An un-normalised `./x`, `x//y`, or trailing-slash root strips to something
++# that matches no glob, and because reads are a denylist, no-match means
++# allow. Verified against this repo's own live config before this fix
++# landed: red was denied "e2e/src/calc/__init__.py" but permitted the same
++# file spelled "./e2e/src/calc/__init__.py" or "e2e//src/calc/__init__.py".
++#
++# The green case below deliberately uses a filename that is NOT test_*.py.
++# "**/test_*.py" is a catch-all glob permissive enough to match an
++# un-normalised "./tests/test_a.py" by coincidence (it matches anything
++# ending in "/test_<x>.py" regardless of what precedes it), which would make
++# that assertion pass whether or not normalization actually ran -- the same
++# trap that let "a .. segment denies for green too" pass for the wrong
++# reason in an earlier round. "helpers.py" only matches via "tests/**", so
++# it genuinely exercises the fix.
++out=$(run_guard "tdd-red" payload_read "$SANDBOX/./src/a.py")
++assert_contains "2|" "$out" "a leading ./ segment in an absolute path still denies red reading source"
++out=$(run_guard "tdd-red" payload_read "$SANDBOX//src/a.py")
++assert_contains "2|" "$out" "a doubled slash in an absolute path still denies red reading source"
++out=$(run_guard "tdd-red" payload_read "./src/a.py")
++assert_contains "2|" "$out" "a leading ./ segment in a relative path still denies red reading source"
++out=$(run_guard "tdd-green" payload_read "./tests/helpers.py")
++assert_contains "2|" "$out" "a leading ./ segment in a relative path still denies green reading a test"
++
+ # --- fails closed once a role IS recognized ---
+ mv "$SANDBOX/.tdd/config.json" "$SANDBOX/.tdd/config.json.bak"
+ out=$(run_guard "tdd-red" payload_write "$SANDBOX/tests/test_a.py")
+ assert_contains "2|" "$out" "missing config denies even for an otherwise-legal write"
+ out=$(run_guard "" payload_write "$SANDBOX/src/a.py")
+ assert_eq "0|" "$out" "missing config still permits the main thread"
+ mv "$SANDBOX/.tdd/config.json.bak" "$SANDBOX/.tdd/config.json"
+ 
+ rm -rf "$SANDBOX"
+diff --git a/tests/rules.test.sh b/tests/rules.test.sh
+index 9e29b5b..228d5ab 100644
+--- a/tests/rules.test.sh
++++ b/tests/rules.test.sh
+@@ -57,20 +57,40 @@ assert_contains "deny" "$(tdd_path_verdict "" write src/a.py "$TG" "$SG")" \
+   "empty role denies"
+ assert_contains "deny" "$(tdd_path_verdict bogus write src/a.py "$TG" "$SG")" \
+   "unknown role denies"
+ assert_contains "deny" "$(tdd_path_verdict red read src/a.py "$TG" "")" \
+   "empty source globs deny a read rather than permitting it"
+ assert_contains "deny" "$(tdd_path_verdict green read tests/test_a.py "" "$SG")" \
+   "empty test globs deny a read rather than permitting it"
+ assert_contains "deny" "$(tdd_path_verdict red write tests/test_a.py "" "$SG")" \
+   "empty test globs deny a write"
+ 
++# --- REGRESSION: alternative spellings of the same path must agree ---
++#
++# guard.sh strips the project root by literal prefix, so an un-normalised
++# `./x` or `x//y` fails to strip and then matches no glob. On a READ that
++# means ALLOW, because reads are a denylist. Verified live before the fix:
++# red was denied `e2e/src/calc/__init__.py` and permitted the identical file
++# spelled `./e2e/src/calc/__init__.py`.
++assert_eq "e2e/src/a.py" "$(tdd_normalize_path "./e2e/src/a.py")" \
++  "leading ./ is stripped"
++assert_eq "e2e/src/a.py" "$(tdd_normalize_path "e2e//src/a.py")" \
++  "repeated slashes collapse"
++assert_eq "e2e/src/a.py" "$(tdd_normalize_path "e2e/./src/a.py")" \
++  "/./ segments collapse"
++assert_eq "e2e/src/a.py" "$(tdd_normalize_path ".//e2e/./src//a.py")" \
++  "all three at once"
++assert_eq "/abs/e2e/src/a.py" "$(tdd_normalize_path "/abs//e2e/./src/a.py")" \
++  "an absolute path keeps its leading slash"
++assert_eq "" "$(tdd_normalize_path "")" \
++  "empty input stays empty rather than erroring"
++
+ # --- REGRESSION: the verdict must not depend on what is on disk ---
+ #
+ # An unquoted glob string undergoes pathname expansion as well as word
+ # splitting, so `src/**` would be replaced by whatever files exist. That made
+ # `red read src/pkg/module.py` return "allow" from a directory containing
+ # src/, and "deny" from anywhere else -- a silent fail-open on the one rule
+ # nothing else in the design can enforce.
+ #
+ # These run inside a scratch tree whose shape would trigger the bug.
+ _glob_sandbox="$(mktemp -d)"

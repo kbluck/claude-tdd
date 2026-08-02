@@ -1,0 +1,8 @@
+{
+  "name": "claude-tdd",
+  "version": "0.1.0",
+  "description": "Red-Green-Refactor TDD via role-constrained subagents that never write both a test and the code that satisfies it",
+  "author": { "name": "kbluck", "email": "kevin.bluck@gmail.com" },
+  "license": "MIT",
+  "keywords": ["tdd", "testing", "subagents", "red-green-refactor"]
+}
