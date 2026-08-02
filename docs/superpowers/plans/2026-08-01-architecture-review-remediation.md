@@ -52,6 +52,20 @@ Four unknowns, each load-bearing and each cheap to settle:
 
 **Done when.** Each of the four has an observed answer recorded in the ledger — not an inferred one. If (1) fails, fall back to shell form with an explicit `"shell"` field and re-spike, because that reintroduces the dialect problem the exec form exists to avoid.
 
+### Task 1b: Finish the ledger block-diff — **before anything deletes the bash sources**
+
+**This is in Tier 0 because it has an expiry.** Task 3 deletes `hooks/guard.sh` and `hooks/lib/rules.sh`; after that the comparison target no longer exists and this audit becomes impossible. Scheduling it late and relying on a note in the Ordering section is the weaker half of the very pattern this iteration exists to correct.
+
+**Invariant.** Every code block iteration 1's plan embeds matches the artifact it was transcribed into, or the difference is recorded.
+
+**Status.** Four files done and the result bounds the rest: `hooks/guard.sh` and `tests/fixtures/config.json` match byte for byte, `tests/run.sh` differs only in variable naming and stripped comments, and `hooks/lib/rules.sh` is missing exactly one line — the `*/.)` case the ledger recorded as FIXED. That is the only drift in the security-critical files.
+
+A commit-stat scan flags 18 ledger SHAs as documentation-only, but that measure over-reports under iteration 1's plan-as-source model, where fixing the plan before transcription was the intended workflow. Spot-checks confirm those reached the code.
+
+**What remains.** Extend the diff to `agents/*.md`, `commands/*.md`, `skills/run-tdd-cycle/SKILL.md` and `hooks/hooks.json`.
+
+**Done when.** The ledger records the result and the count of blocks compared.
+
 ---
 
 ## Tier 1 — the port
@@ -239,15 +253,7 @@ The ledger records **8 of 20 defects found only by running the system**, includi
 
 ## Tier 4 — process
 
-### Task 14: Finish the ledger re-audit
-
-**Status: substantially done, and the result bounds the work.** A direct diff of every code block iteration 1's plan embeds against its shipped counterpart found **exactly one** drift — the `*/.)` case missing from `hooks/lib/rules.sh`. `hooks/guard.sh` and the fixture match byte for byte; `tests/run.sh` differs only in variable naming and stripped comments.
-
-A commit-stat scan flags 18 ledger SHAs as documentation-only, but that measure over-reports under iteration 1's plan-as-source model, where fixing the plan before transcription was the intended workflow. Spot-checks confirm those reached the code.
-
-**What remains.** Extend the block-diff to `agents/*.md`, `commands/*.md`, `skills/run-tdd-cycle/SKILL.md` and `hooks/hooks.json`. Do this **before Task 3 deletes the bash files**, or the comparison target is gone.
-
-### Task 15: Record the decisions
+### Task 14: Record the decisions
 
 Three, so they are not relitigated:
 
@@ -261,7 +267,7 @@ One lesson worth stating in its own right (M2): **"green" from a harness that ca
 
 ## Ordering
 
-Tier 0 gates everything. Within Tier 1 the order is strict: 2 → 3 → 4. Task 14's block-diff must run **before** Task 3 deletes the bash sources.
+Tier 0 gates everything, and Task 1b is in Tier 0 precisely because Task 3 destroys its comparison target. Within Tier 1 the order is strict: 2 → 3 → 4.
 
 Tier 2 and Tier 3 are independent of the port and of each other, except that Task 12 needs Tasks 6 and 7 landed, since its new cases exercise them.
 
