@@ -376,6 +376,10 @@ tdd-red | tdd-green | tdd-refactor
         | tdd-mutate                     → apply that role's rules
 ```
 
+**The payload shape differs by caller, and that difference is the dispatch** *(iteration 2, measured under exec form)*. A subagent call carries `agent_id` and `agent_type`; a main-thread call omits **both keys entirely**. The key is absent, not present-and-null — a distinction worth preserving in code, because treating "absent" and "null" as one case is how a fail-open hides.
+
+**`tool_input.file_path` arrives absolute**, even when the agent was given a relative path: a dispatch asking for `e2e/spec.md` produced `/Users/…/claude-tdd/e2e/spec.md` in the payload. The path layer must not assume repo-relative input.
+
 **The namespace strip is not an implementation detail** *(iteration 2: the pseudocode above previously omitted it)*. Plugin-provided agents arrive namespaced — `claude-tdd:tdd-red`, verified empirically on Claude Code 2.1.220. Matching the bare name alone misses every real dispatch, falls through to permit, and renders the guard **entirely inert** while every test using a bare-name payload still passes. This was the single most consequential defect in the project, and the canonical pseudocode has to show its fix. Stripping is deliberately broad: another plugin shipping its own `tdd-red` is also constrained here — a false denial, loud and safe, versus matching too narrowly and permitting silently.
 
 **Detection where prevention is impossible** *(iteration 2)*. The orchestrator already reads everything and audits every commit, so it is the right place for the counter-measure the hook cannot provide: scan Red's committed test files for source-file reads (`open(`, `require(`, `include`, `File.read`) targeting a `globs.source` path, and treat a hit as a guardrail violation under the existing revert-and-re-dispatch rule. That converts the strongest bypass from undetectable to detected-at-commit, using the same prevent-and-verify split the design relies on everywhere else.
@@ -390,7 +394,11 @@ Dropping the marker also removes the stale-marker failure mode and the strictly-
 
 **The one failure the guard cannot make fail closed is its own.** An uncaught exception, a syntax error, or a missing interpreter exits non-zero-but-not-2, which `PreToolUse` treats as a non-blocking error and permits. Two consequences the implementation must honour: wrap the whole body so that *any* thrown error becomes a deliberate exit 2 rather than a stack trace, and keep the preflight probe, which is the only check that catches a guard that never ran at all.
 
-**Emit the verdict before exiting.** Writing to stdout and calling `process.exit()` in the same tick can truncate the write, because `process.exit` does not wait for asynchronous flushes. A truncated verdict on the allow path yields malformed JSON from a hook that believed it succeeded. Set the exit code and let the process end, or write synchronously.
+**The denial goes to stderr. On exit 2, stdout is ignored entirely** *(iteration 2, measured — the earlier draft of this paragraph said stdout and was wrong)*. A probe that wrote its JSON body to stdout and exited 2 blocked the call correctly and had its message **dropped**: the transcript reported "No stderr output". Rewritten to stderr, the same body arrived verbatim. The shipped bash guard always did this correctly; the spec did not.
+
+This matters more than a stream name. A guard whose denials are silently discarded still blocks, so it looks like it works — the agent is stopped but never learns which rule it violated, and the design depends on that message being correctable feedback rather than an opaque refusal.
+
+**Emit before exiting.** Calling `process.exit()` in the same tick as the write can truncate it, because `process.exit` does not wait for asynchronous flushes. Set `process.exitCode` and let the process end naturally, or write synchronously.
 
 Before that point the guard exits 0 without reading anything, so installing this plugin does not perturb unrelated sessions.
 
