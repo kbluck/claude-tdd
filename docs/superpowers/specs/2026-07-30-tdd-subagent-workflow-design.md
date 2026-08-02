@@ -5,6 +5,8 @@
 
 **Iteration 2** folds in `docs/superpowers/reviews/2026-08-01-architecture-review.md`. That review reproduced live read-isolation bypasses against the shipped guard and found that the enforcement claim below overstated what the mechanism delivers. Sections revised for it carry a *(iteration 2)* marker. The remediation tasks live in `docs/superpowers/plans/2026-08-01-architecture-review-remediation.md`.
 
+**Iteration 2 also changes the implementation substrate from bash to Node.** See *Why the guard is written in Node*. The role model, the boundaries, the handover contract and the orchestrator loop are unaffected — they are Markdown prompts and they do not move.
+
 **Claims in this document describe the design, not necessarily the shipped code.** Where the two are known to differ, the text says so explicitly. That distinction exists because the review found a security fix that had landed in the plan and the spec but never in the code, recorded as complete.
 
 ## Purpose
@@ -27,7 +29,7 @@ Every enforcement claim in this document is scoped to one adversary. Naming it i
 
 **What is enforced.** Read isolation against *incidental* violation: an agent reaching for `Read` on the wrong file. That is the common case, and the guard catches it reliably and loudly.
 
-**What is not enforced.** Read isolation against *motivated* violation. Three channels carry forbidden content past the guard with zero denials, and none can be closed in `hooks/guard.sh`:
+**What is not enforced.** Read isolation against *motivated* violation. Three channels carry forbidden content past the guard with zero denials, and none can be closed in the guard at all — they are properties of the workflow, not of its implementation:
 
 1. **The permitted runner executing an agent-authored file.** The configured test command is a general-purpose code execution engine, and each role is permitted to author the file that engine executes. Red writes a test containing `print(open("<source>").read())`, runs its own configured command, and the source comes back under captured stdout. Green does the symmetric thing through a source file the test imports. Both were reproduced against the shipped guard. Any design in which a constrained role writes the test *and* runs the runner has this property; no metacharacter rule touches it, because no metacharacters are involved.
 2. **`observedFailure` on the normal path.** See *Handover artifact* — a default traceback reproduces the failing test's body, and the workflow hands that to Green as required input.
@@ -49,6 +51,8 @@ Each is defensible as a v1 boundary. None is defensible as a surprise.
 - **Monorepos are architecturally excluded, not merely under-detected.** The schema has one `commands` object and one `globs` partition. A repo with a Python backend and a TypeScript frontend has no path forward. The claim under *Configuration* that adding a toolchain is "a table row rather than new code" holds only for single-toolchain repos.
 - **"Exactly one test" is undefined for parametrized and table-driven tests.** `@pytest.mark.parametrize`, Go table tests, and a function carrying several unrelated assertions all satisfy the letter of Red's stop condition while violating its intent. Neither the coverage nor the CRAP machinery can distinguish them from an atomic test.
 - **Agents are pinned to `sonnet`** in their frontmatter — a cost decision, recorded here because it was previously undocumented policy. It interacts with the threat model: the weaker the agent model, the less likely the rationalisation route; the stronger the model, the more likely it is to find it.
+- **Node of at least the supported LTS must be on `PATH`.** Claude Code's native installer does not provide one. Preflight checks the version, and the probe in item 7 catches the case where it is absent — but a user without Node cannot run this plugin. That is a real requirement, traded knowingly for Windows support that does not depend on WSL or Git Bash.
+- **Windows support is by construction, not by verification, until it is exercised there.** The path layer is written so that separator dialect and case are data rather than platform behaviour, and the spelling matrix asserts both from a POSIX machine. That is not the same as having run it on Windows, and the claim should not be made until someone has.
 
 ## Roles
 
@@ -96,15 +100,42 @@ claude-tdd/
 │       └── SKILL.md         orchestrator loop
 └── hooks/
     ├── hooks.json           PreToolUse matcher
-    └── guard.sh             role-aware path and command guard
+    ├── guard.mjs            role-aware path and command guard
+    └── lib/rules.mjs        pure decision functions
 ```
 
 Each part has one job:
 
 - **`skills/run-tdd-cycle`** holds the loop. `/tdd` is a thin entry point that invokes it, so the loop is also reachable by the model recognizing it applies.
 - **`agents/*.md`** are pure role definitions — constraints and stop conditions, no orchestration logic.
-- **`hooks/guard.sh`** is the only executable and is stateless: read `agent_type` from the payload and `.tdd/config.json` from disk, decide, exit.
+- **`hooks/guard.mjs`** is the only executable and is stateless: read `agent_type` from the payload and `.tdd/config.json` from disk, decide, exit.
 - **`.tdd/`** lives in the target project, not the plugin.
+
+## Why the guard is written in Node *(iteration 2)*
+
+The first iteration was bash 3.2 plus `jq`. That choice failed on one platform in the worst available way.
+
+**The failure.** Claude Code runs a `type: command` hook in shell form through `sh -c` on macOS and Linux, **Git Bash on Windows, or PowerShell when Git Bash is not installed**. A Windows developer without Git Bash therefore hands `hooks/guard.sh` to PowerShell, which cannot execute it. And for `PreToolUse`, **only exit code 2 blocks** — every other non-zero exit is a non-blocking error, and the tool call proceeds. So the guard did not merely fail to work on Windows; it failed *open*, on the read path, which leaves no signature in any diff. The plugin would install, appear healthy, and enforce nothing.
+
+That is the precise failure class this design exists to prevent, so it decides the substrate.
+
+**Why Node rather than PowerShell or Python.** PowerShell 5.1 on Windows versus `pwsh` 7 elsewhere reproduces the bash-3.2-versus-5 dialect problem this project already paid for. Python's Windows story has the same shape (Store aliases, `py` versus `python`, venv variance). Node runs the same code on all three platforms from one file.
+
+**The hook is registered in exec form**, which spawns the interpreter directly with no shell involved, so no `${VAR}`-versus-`$env:VAR` expansion dialect can intervene:
+
+```json
+{ "type": "command", "command": "node",
+  "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/guard.mjs"], "timeout": 10 }
+```
+
+**Node is a dependency, not a free win.** Claude Code now ships a native installer that requires no Node.js, so its presence cannot be assumed. What the port buys is a *swap*: one interpreter in place of `jq`, whose 11 call sites disappear because JSON is native. The asymmetry that matters is that a Windows developer can install Node trivially, whereas installing bash means WSL or Git Bash — the requirement being removed.
+
+**A missing interpreter fails open exactly as a missing shell did**, so the mechanism that catches it must be kept: preflight dispatches a probe subagent and confirms the guard observed a denial (*Preflight*, item 7). That probe is the only check that catches a guard which never launched, whatever the cause.
+
+**Target: Node 22**, the oldest LTS still in support (Maintenance LTS through April 2027; Node 20 reached end of life in April 2026). Two constraints follow:
+
+- **Do not use `path.matchesGlob`.** It landed in v22.5.0 and is experimental, so it is unavailable on early 22.x and its semantics may change. The glob matcher is security-critical and its `**` behaviour is the subject of a live defect — the project owns that matcher and its tests.
+- **Do not use the platform-native `path` module for matching.** See *Separators are normalised before matching*.
 
 ### State
 
@@ -136,7 +167,7 @@ There is no phase marker. The hook learns the caller's role from the payload's `
 4. **Spec file is readable and non-empty.**
 
 5. **The glob partition is still exhaustive** — `git ls-files` produces no file matching neither `test`, `source`, nor `ignore`. Catches drift from edits made between runs. See *Writes are an allowlist; reads are a denylist* below for why this is load-bearing.
-6. **`jq` is on `PATH`** — `guard.sh` parses its stdin with it.
+6. **Node is on `PATH` and is at least the supported LTS** — `guard.mjs` runs under it. Check the version, not merely the presence: an interpreter too old to run the guard fails exactly like a missing one, and both fail open.
 7. **The guard sees `agent_type`** — dispatch a trivial probe subagent and confirm the hook observed a non-empty `agent_type`. If it did not, the guard silently permits everything a subagent does; stop rather than run unenforced. This is the one check that verifies the enforcement mechanism itself is alive.
 
 ### Decompose
@@ -251,20 +282,34 @@ The guard strips the project root by literal prefix, and the glob match then nee
 
 Note the asymmetry that makes this dangerous rather than merely wrong: `Write E2E/src/...` is correctly *denied*, because writes are an allowlist and fail closed. Only reads leak.
 
-**Lexical normalisation cannot establish path identity, and the project proved it the expensive way.** Path identity on a real filesystem involves case-folding rules, symlinks, hardlinks, and mount aliases — none of them lexical properties. Four separate one-spelling fixes shipped (`./x`, `x//y`, a root ending `/.`, traversal), and the review still reproduced live bypasses in every remaining spelling: `E2E/src/...` and `e2e/SRC/...` resolve to the same files on a case-insensitive filesystem while the matcher treats them as different, in both directions; and a root spelled `$ROOT/.` defeated the prefix strip entirely. **That last one is the fix the ledger recorded as complete: it landed in the plan and the spec, and never in `hooks/lib/rules.sh`.** A direct diff of the plan's embedded `rules.sh` against the shipped file shows exactly one missing line.
+**Lexical normalisation cannot establish path identity, and the project proved it the expensive way.** Path identity on a real filesystem involves case-folding rules, symlinks, hardlinks, and mount aliases — none of them lexical properties. Four separate one-spelling fixes shipped (`./x`, `x//y`, a root ending `/.`, traversal), and the review still reproduced live bypasses in every remaining spelling: `E2E/src/...` and `e2e/SRC/...` resolve to the same files on a case-insensitive filesystem while the matcher treats them as different, in both directions; and a root spelled `$ROOT/.` defeated the prefix strip entirely. **That last one is the fix the ledger recorded as complete: it landed in the plan and the spec, and never in the code.** A direct diff of the plan's embedded `rules.sh` against the shipped file showed exactly one missing line.
+
+The bash implementation is retired by the port, but the lesson is not, and neither is the evidence: this class was discovered one spelling at a time across four fixes because the tests sampled spellings instead of asserting the property. Re-implementing in Node closes the spellings that were lexical accidents; it does nothing for the sampling habit that hid them. The matrix is the part that must survive the port.
 
 **Canonicalise, do not normalise.** Resolve both root and target through the filesystem, then compare:
 
-- Canonicalise the **directory** portion with `cd "$dir" && pwd -P`, then re-append the basename. `pwd -P` is POSIX, resolves symlinks, and — verified on macOS — **returns the true stored case of every directory component**: `cd E2E/SRC` yields `.../e2e/src`. That closes the directory-case bypass and the symlink route together, with no case-detection and no configuration.
-- **Walk up to the nearest existing ancestor first.** BSD `realpath` has no `-m` and the directory portion does not always exist: every `Write` of a test in a new subdirectory has a non-existent parent. Canonicalise the deepest ancestor that does exist and re-append the non-existent tail, lexically normalised. Canonicalising only `dirname` — the obvious recipe — denies legitimate new-subdirectory writes.
-- **The basename is the residual.** It is not a directory component, so `pwd -P` does not recover its case: `E2E/tests/TEST_divide.py` canonicalises to `.../e2e/tests/TEST_divide.py`, which misses `**/test_*.py`. Close it by **folding case only in the direction that fails closed**: a read matches the denylist against the literal path *or* its case-folded form, and either match denies; a write must match the allowlist on the literal path only, since folding a write comparison would permit more, not less. This needs no filesystem probe and is correct on case-sensitive and case-insensitive filesystems alike. On a case-sensitive filesystem it costs a false denial for a repo that genuinely has both `src/` and `SRC/` — loud and safe, the same trade already accepted for the plugin-namespace strip.
-- **`${v,,}` is bash 4+ and unavailable** — this project targets the bash 3.2.57 that ships with macOS. Fold with `tr '[:upper:]' '[:lower:]'`.
+- **`fs.realpathSync.native`** resolves symlinks and returns the filesystem's own stored spelling of every component, which on macOS and Windows means the true case. One call replaces the whole lexical layer, closes the case bypass and the symlink route together, and needs no case-sensitivity probe and no configuration.
+- **Resolve the nearest existing ancestor, then re-append the tail.** `realpath` throws `ENOENT` on a path that does not exist, and the target does not always exist: every `Write` of a new test has a non-existent leaf, and a new subdirectory has a non-existent parent. Walk up to the deepest ancestor that resolves, then re-append the remainder. Resolving only the parent directory — the obvious recipe — rejects a legitimate write into a new subdirectory.
+- **The non-existent tail is the residual, and folding it is asymmetric.** The filesystem cannot report the stored case of a component that does not exist yet, so a `Write` of `TESTS/test_new.py` into a directory that does not exist resolves no further than the case the caller supplied. Close it by **folding case only in the direction that fails closed**: a *read* matches the denylist against the resolved path **or** its case-folded form, and either match denies; a *write* matches the allowlist on the resolved path only, since folding a write comparison would permit more rather than less. On a case-sensitive filesystem this costs a false denial for a repository carrying both `src/` and `SRC/` — loud and safe, the same trade already accepted for the plugin-namespace strip.
+- **`realpath` failures deny.** A permissions error, a broken symlink, a path that resolves outside the root: none can be evaluated, and an unevaluable check on a read must not reach `allow`.
 
 Correctness here is a property of *spellings*, not of any one spelling, so it is tested as a matrix: for each role × mode × canonical target, every spelling of that target must produce an identical verdict. A new spelling becomes one row rather than one more review finding.
 
+### Separators are normalised before matching *(iteration 2)*
+
+Cross-platform support introduces a bypass that did not exist while the plugin was macOS-only, and it is the same shape as every other one: **`e2e\src\calc\x.py` matches no POSIX-spelled glob, and a read that matches nothing is permitted.** Windows tool payloads carry backslashes, and the configured globs are written with forward slashes.
+
+The trap is that the platform-native API makes it worse rather than better. Verified: `path.win32.normalize("e2e/src/x.py")` returns `e2e\src\x.py`, and `path.win32.join` produces backslashes. **Using the ambient `path` module for matching would manufacture the bypass on Windows** — every glob comparison would be made against a string the globs cannot match.
+
+The rule is therefore: **globs are a POSIX-spelled dialect, and every path is converted into that dialect before any comparison.** Convert separators to `/` on both root and target immediately after canonicalisation, and match with the project's own matcher rather than any platform-aware helper. Drive-letter case (`C:\` versus `c:\`) is covered by the same asymmetric fold as the rest of the path.
+
+This must be tested on a POSIX machine, because that is where it will be developed: the matcher takes the spelling as data, so a backslash-spelled path is a row in the spelling matrix like any other, not a test that requires Windows.
+
 ### `**` at the start of a glob must match zero depth *(iteration 2)*
 
-`tdd_glob_match` rewrites `**` to `*`, relying on bash's `*` crossing `/` inside `[[ ]]`. That is correct for `src/**`. It is wrong at the start of a pattern: `**/test_*.py` becomes `*/test_*.py`, which requires at least one directory component. A root-level `test_foo.py` therefore matches **no** test glob, and Green may read it.
+The bash matcher rewrote `**` to `*`, relying on bash's `*` crossing `/` inside `[[ ]]`. That is correct for `src/**`. It is wrong at the start of a pattern: `**/test_*.py` becomes `*/test_*.py`, which requires at least one directory component. A root-level `test_foo.py` therefore matches **no** test glob, and Green may read it.
+
+The port does not make this go away — it makes it a decision. The matcher is written explicitly rather than delegated, so the dialect is defined here and asserted in tests: `*` matches within one segment, `**` crosses `/`, and a leading `**/` matches at zero depth.
 
 In every glob dialect a config author knows — git pathspec, `.gitignore`, minimatch, Python `pathlib` — `**/x` matches `x` at zero depth. This implementation diverges silently, and `/tdd-init` proposes exactly these globs. `**/*_test.go` is the worst case: a root-level `main_test.go` is idiomatic Go.
 
@@ -308,7 +353,11 @@ tdd-red | tdd-green | tdd-refactor
 
 Dropping the marker also removes the stale-marker failure mode and the strictly-sequential constraint, which existed only because one global file cannot describe two concurrent cycles.
 
-**The hook fails closed — but only once it knows the caller is a constrained role.** For a recognized `tdd-*` agent, a missing `jq`, an unreadable `.tdd/config.json`, or an unmappable role all deny. A guard that cannot evaluate must not default to permitting; that would disable read isolation silently, which is the exact failure this design exists to prevent. `/tdd-init` and preflight both check `jq` so the loud failure lands at setup rather than mid-cycle.
+**The hook fails closed — but only once it knows the caller is a constrained role.** For a recognized `tdd-*` agent, an unreadable or unparseable `.tdd/config.json`, an unresolvable path, or an unmappable role all deny. A guard that cannot evaluate must not default to permitting; that would disable read isolation silently, which is the exact failure this design exists to prevent. `/tdd-init` and preflight both check the interpreter so the loud failure lands at setup rather than mid-cycle.
+
+**The one failure the guard cannot make fail closed is its own.** An uncaught exception, a syntax error, or a missing interpreter exits non-zero-but-not-2, which `PreToolUse` treats as a non-blocking error and permits. Two consequences the implementation must honour: wrap the whole body so that *any* thrown error becomes a deliberate exit 2 rather than a stack trace, and keep the preflight probe, which is the only check that catches a guard that never ran at all.
+
+**Emit the verdict before exiting.** Writing to stdout and calling `process.exit()` in the same tick can truncate the write, because `process.exit` does not wait for asynchronous flushes. A truncated verdict on the allow path yields malformed JSON from a hook that believed it succeeded. Set the exit code and let the process end, or write synchronously.
 
 Before that point the guard exits 0 without reading anything, so installing this plugin does not perturb unrelated sessions.
 
@@ -323,6 +372,8 @@ Detecting mutation by parsing shell commands is unbounded and will lose — `sed
 Invert it. The three agents only ever legitimately need to run the commands in `config.json`. The hook permits a `Bash` call only when it prefix-matches a configured command for the current phase. Everything else is denied. `Read` covers the inspection the agents would otherwise shell out for. `Grep` and `Glob` are deliberately not granted: they sit outside the `PreToolUse` matcher, so such a call would never reach the guard at all, and `Grep` returns file content.
 
 **The metacharacter ban applies to the delta, not the template.** A configured command is trusted — it was authored or confirmed by the user at init time, and some toolchains legitimately need a pipe or redirect to produce coverage. What the agent supplies beyond the template (the `{testId}` substitution, any appended flags) must contain no `;`, `|`, `&&`, `&`, `>`, `<`, backtick, `$(`, or a literal newline *(iteration 2: this list previously omitted `&`, `<` and the newline, all of which the shipped code bans)*. Banning metacharacters in the template itself would make the rule unsatisfiable for those toolchains, and the failure would surface at init time as an unexplained rejection.
+
+**The ban list is shell-agnostic on purpose** *(iteration 2)*. On Windows the agent's `Bash` tool may be backed by Git Bash or by PowerShell, whose metacharacters differ — backtick is an escape, `$(...)` is a subexpression, `&` and `;` are separators in both. The list bans a superset of what either shell treats as special, so it stays correct without the guard needing to know which shell will receive the command. It cannot know: the guard sees the command string, not the interpreter.
 
 **The delta check must also reject traversal** *(iteration 2)*. The path half of the guard explicitly rejects `..` before matching; the Bash half checks only for metacharacters. Where `{testId}` is a filesystem path — pytest node IDs are — a fabricated `testId` in Red's handover report invokes the configured runner against a path outside the test tree, and the two halves of the guard disagree about whether traversal matters. The primary fix is orchestrator-side, and is cheaper and more precise: **validate `testId` against `globs.test` before dispatching it**, rather than executing whatever Red reported. Rejecting `..` in the delta is defence in depth behind that.
 
@@ -522,7 +573,7 @@ Data-driven, so supporting a new toolchain is a table row rather than new code.
 ## Build Order
 
 1. **Spike the two risks above.** Nothing else is worth building until the hook's behavior inside subagents is known.
-2. **`hooks/guard.sh`** — unit-tested against piped JSON fixtures, following the shape of `plugin-dev/skills/hook-development/scripts/test-hook.sh`.
+2. **`hooks/guard.mjs`** — unit-tested against piped JSON fixtures.
 3. **`agents/*.md`** — validated with `plugin-dev/skills/agent-development/scripts/validate-agent.sh`.
 4. **`/tdd-init`** — detection table and config writer.
 5. **`skills/run-tdd-cycle`** — the orchestrator loop.
