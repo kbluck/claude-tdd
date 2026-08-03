@@ -207,3 +207,68 @@ test("the spec no longer claims require(/include are unconditional content-scan 
     'the spec still lists all four tokens uniformly as hit-triggers',
   );
 });
+
+// ---------------------------------------------------------------------------
+// Found by the first live resume run (2026-08-03), which is the only way it
+// could have been found: bucket 2 is an exact `path::name` comparison, but a
+// pytest collection error reports a bare file with no `::` at all. Measured:
+//
+//   $ pytest -q ptshape
+//   ERROR ptshape/tests/test_collect_err.py
+//   !!!!!! Interrupted: 1 error during collection !!!!!!
+//   1 error in 0.06s          <- the sibling failing test never ran
+//
+// That is the ORDINARY interrupted state, not an edge case -- Red writes a
+// test importing a symbol Green has not written yet, so the module will not
+// import. Bucket 2 therefore missed the one state it exists to exempt, and
+// the failure fell to bucket 3, whose ask invites the user to baseline it.
+//
+// Scoped to the Resume bucket list. BOTH anchors are asserted below: a
+// broken end anchor would let the range run to EOF and silently re-widen
+// this to the whole-file grep it exists to avoid (AGENTS.md, "Verification
+// instruments lie").
+// ---------------------------------------------------------------------------
+
+const resumeBucketSection = extractSection(
+  skillText,
+  /^\s+- \*\*Resume\*\* \(checklist present with items\)\./,
+  /^\s+\*\*`knownRed` is not a note to yourself/,
+);
+
+test('SKILL.md located the Resume bucket-classification section, and it ends before the knownRed-threading paragraph', () => {
+  assert.notEqual(resumeBucketSection, null, 'could not locate the Resume bucket list');
+  assert.ok(/1\. \*\*Already in the recorded `knownRed`/.test(resumeBucketSection ?? ''), 'extraction does not contain bucket 1');
+  assert.ok(/3\. \*\*Neither of the above\.\*\*/.test(resumeBucketSection ?? ''), 'extraction does not contain bucket 3');
+  assert.ok(
+    !/is not a note to yourself/.test(resumeBucketSection ?? ''),
+    'end anchor failed: the extraction ran past the bucket list into the knownRed-threading paragraph, re-widening the scope',
+  );
+});
+
+test('SKILL.md bucket 2 handles a failure that carries no :: — the collection-error shape an exact comparison can never match', () => {
+  const section = resumeBucketSection ?? '';
+  assert.ok(
+    /no `::`|without a `::`|carries no `::`/.test(section),
+    'bucket 2 does not address a failure ID that carries no `::`, so a collection error still cannot match it',
+  );
+  assert.ok(
+    /collection error/i.test(section),
+    'bucket 2 does not name the collection error as the shape that produces a `::`-less failure',
+  );
+  assert.ok(
+    /up to (its|the) `::`|portion .{0,40}`::`/.test(section),
+    'bucket 2 does not say to compare against the stored testId\'s file portion, which is the actual fix',
+  );
+});
+
+test('SKILL.md bucket 3 states what baselining a collection error actually costs — the whole suite, not one file', () => {
+  const section = resumeBucketSection ?? '';
+  assert.ok(
+    /Interrupted|interrupts|no other test/i.test(section),
+    'bucket 3 does not tell the user that a collection error stops the whole run',
+  );
+  assert.ok(
+    /every later suite comparison|masks every|reads? an aborted collection as green/i.test(section),
+    'bucket 3 understates the cost: it must say the mask persists across later suite comparisons, not just the named file',
+  );
+});
