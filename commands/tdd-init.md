@@ -37,21 +37,25 @@ guard hook on every subsequent tool call.
 
 No marker matches, or several do → ask the user rather than guessing.
 
-**`singleTerse` notes — do not invent a flag you have not verified.** Each row above is one of three cases, and which case applies
-is a fact about the toolchain, not a preference:
+**`singleTerse` notes — do not invent a flag you have not verified.** Each row above is one of three cases. Say which kind of
+evidence backs the row when you present it — a documented flag and an inferred default are not the same confidence, and the user
+should not read them as identical just because both landed in the same column:
 
-- **pytest**: `--tb=line` is a documented traceback style that prints one line per failure instead of reproducing the source of the
-  failing test function. This is the case the field exists for.
-- **cargo and go**: the *same* command as `single`, not a distinct flag. Their default failure output (a panic message with
-  `file:line`, or the `t.Errorf`/`t.Fatalf` message with `file:line`) never reproduces the test function's source the way pytest's
-  default traceback does, and Rust's backtrace is off unless `RUST_BACKTRACE=1` is set in the environment — so there is nothing
-  further to truncate. Setting `singleTerse` to `null` here would trigger the degradation warning below ("carries the full
-  traceback") for a toolchain where that claim is false. Reuse the command and say so when you present it to the user, so it does
-  not read as a copy-paste mistake.
-- **jest, vitest, dotnet**: `null`. Each has flags that reduce *some* output (`--noStackTrace` for jest, alternate reporters for
-  vitest, `--verbosity` for dotnet), but none is documented to suppress the source-code frame or the multi-frame stack trace
-  specifically — the part of the output this field exists to cut. Do not configure one of these speculatively; confirm the
-  degradation with the user instead (see 2c).
+- **pytest — doc-verified.** `--tb=line` is a documented traceback style that prints one line per failure instead of reproducing
+  the source of the failing test function. This is the case the field exists for.
+- **cargo and go — inferred, not doc-verified; say so.** These reuse the *same* command as `single`, not a distinct flag, on the
+  reasoning that Rust's default test-failure output (a panic message plus `file:line`, backtrace off unless `RUST_BACKTRACE=1`) and
+  Go's default non-`-v` failure output (the `t.Errorf`/`t.Fatalf` message plus `file:line`) do not reproduce the test function's
+  source the way pytest's default traceback does. That is general knowledge of how the two toolchains behave, not a flag pinned to
+  a doc page the way `--tb=line` is. Tell the user this explicitly: "cargo/go's default failure output is already terse — reusing
+  `single` is deliberate, not a copy-paste mistake — but this wasn't verified against your specific test setup the way the pytest
+  flag was; watch the first `observedFailure` this produces and flag it if it's carrying more than a failure line and location."
+  Setting `singleTerse` to `null` here would trigger the degradation warning below ("carries the full traceback") for a toolchain
+  where that claim is probably false, which is worse than a hedged inference.
+- **jest, vitest, dotnet — verified absence.** `null`. Each has flags that reduce *some* output (`--noStackTrace` for jest,
+  alternate reporters for vitest, `--verbosity` for dotnet), but none is documented to suppress the source-code frame or the
+  multi-frame stack trace specifically — the part of the output this field exists to cut. Do not configure one of these
+  speculatively; confirm the degradation with the user instead (see 2c).
 
 ## 2c. Report every degradation explicitly
 
@@ -155,6 +159,15 @@ mistake in the globs.
 ## 5. Show the user the proposed config and get confirmation
 
 Present every field. Let them correct anything. Do not write until they agree.
+
+**If `commands.singleTerse` equals `commands.single`, say so explicitly.** The
+committed JSON cannot carry a comment explaining why two fields hold the same
+string, and a later reader who does not know the reasoning will read it as a
+copy-paste mistake and "clean it up" to `null` — which is not equivalent: it
+changes the meaning from "this toolchain's default output is already terse"
+to "no terse form exists" and turns on the full-traceback degradation
+warning. State the one-sentence reason now, while the user is looking at the
+proposal, not only in this command's own prose.
 
 ## 6. Verify each command parses under the guard's Bash rule
 
