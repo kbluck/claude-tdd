@@ -163,18 +163,25 @@ glob by construction, and a `clean` scoped to the glob can never reach it. Two c
 - **A check found concrete paths responsible for the discard.** Red's audit and Green's each name the paths that failed the glob
   match (see *Per item*). Refactor's incomplete-restore check and the mutation pass's tree-clean recovery each re-run `git status
   --porcelain` (and `git diff HEAD`) and find it non-empty when it was supposed to be clean — that finding **is** a list of
-  concrete paths, the same way an audit's is. In every one of these, scope `clean` to **every path the check found**, not only
-  the subset that broke the glob match. A dispatch that violated the glob usually also wrote legitimate in-glob files alongside
-  the rogue one — leaving those behind after `clean` reproduces the exact bug this section opens with (a rejected file surviving
-  to be swept into a later commit), just for the half of the dispatch that happened to pass the glob check. And a dirty tree
-  after Refactor's or Mutate's own restore is not automatically confined to `globs.source`: the guard that normally keeps them
-  inside it is the same fallible mechanism Preflight item 7 exists to probe, so a dirty path outside the glob at these two sites
-  is the backstop scenario, not a hypothetical one.
-- **No check found anything — the discard follows a judgment made from an already-clean audit.** Red's `passing-flat` outcome,
-  Green's unreproducible pass or full-suite regression, and either coverage gate's overrun are decisions made *after* that
-  dispatch's own audit already passed with nothing flagged. There is no list of problem paths to name here, only the earlier
-  confirmation that everything this dispatch touched was inside the role's glob. Fall back to `globs.test` for Red, `globs.source`
-  for Green, Refactor and Mutate.
+  concrete paths, the same way an audit's is. **Refactor's hard coverage gate belongs here too, for a reason specific to
+  Refactor:** its own audit step (see *Per item*) is one clause with no defined violation branch, so unlike Green's coverage-gate
+  overrun below — which fires only after an audit that *does* gate conformance — reaching Refactor's gate proves nothing about
+  whether every touched path stayed inside `globs.source`. Run the same `git diff --name-only` / `git status --porcelain` Red's
+  and Green's audits use, fresh, at the point the gate fires, and scope `clean` to what it returns instead. In every one of
+  these five sites, scope `clean` to **every path the check found**, not only the subset that broke the glob match where one
+  exists. A dispatch that violated the glob usually also wrote legitimate in-glob files alongside the rogue one — leaving those
+  behind after `clean` reproduces the exact bug this section opens with (a rejected file surviving to be swept into a later
+  commit), just for the half of the dispatch that happened to pass the glob check. And a dirty path found at any of these sites
+  is not automatically confined to `globs.source`: the guard that normally keeps Refactor and Mutate inside it is the same
+  fallible mechanism Preflight item 7 exists to probe, so a dirty path outside the glob here is the backstop scenario, not a
+  hypothetical one.
+- **No check found anything — the discard follows a judgment made from an already-clean audit that gates conformance.** Red's
+  `passing-flat` outcome, Green's unreproducible pass, Green's full-suite regression, and Green's coverage-gate overrun are
+  decisions made *after* that dispatch's own audit already passed with nothing flagged — and, unlike Refactor's audit, Red's and
+  Green's each have a defined `Violation → revert` branch (see *Per item*), which is what makes "the audit already confirmed
+  everything is inside the glob" a fact rather than an assumption. There is no list of problem paths to name here, only that
+  earlier confirmation. Fall back to `globs.test` for Red, `globs.source` for Green. Refactor and Mutate have no site in this
+  bucket: every one of their discards is the found-paths case above.
 
 Either way, an unscoped `git clean -fd` would delete legitimately untracked work elsewhere in the tree, so never run `clean`
 without one of these two pathspecs. (`clean` without `-x` spares gitignored paths, so the venv, the checklist and the coverage
@@ -311,9 +318,12 @@ No hit → status `done`, next item. This avoids paying for a subagent to conclu
 On dispatch: pass the trigger, the source paths in scope, and `knownRed`. Audit against `globs.source`.
 
 Then apply the **hard coverage gate**: run coverage yourself and compare against the pre-dispatch baseline. Any increase in
-uncovered lines beyond `coverageGates.refactorMaxNewUncovered` (default 0) → **reset and clean** (see *Reverting a dispatch*) and
-record `reverted`, regardless of what the agent reported. New uncovered lines mean new behavior, and Refactor adding behavior is a
-boundary violation, not a quality issue. There is no re-dispatch — reverting is the correct outcome.
+uncovered lines beyond `coverageGates.refactorMaxNewUncovered` (default 0) → **reset and clean** (see *Reverting a dispatch*),
+scoped to `git diff --name-only` plus `git status --porcelain` run fresh at this point — the "Audit against `globs.source`" step
+above has no defined violation consequence, so nothing has yet confirmed every touched path stayed inside `globs.source`, and
+falling back to that glob here would carry the gap into the one site meant to catch it — and record `reverted`, regardless of
+what the agent reported. New uncovered lines mean new behavior, and Refactor adding behavior is a boundary violation, not a
+quality issue. There is no re-dispatch — reverting is the correct outcome.
 
 Branch on all four outcomes:
 
