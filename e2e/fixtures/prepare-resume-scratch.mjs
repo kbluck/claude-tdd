@@ -73,12 +73,13 @@ export function prepareResumeScratch(targetDir) {
     try {
       git(['worktree', 'remove', '--force', dir], REPO_ROOT);
     } finally {
+      // Deliberately NOT `git worktree prune`: `remove --force` above already
+      // deregisters *this* worktree, and `prune` sweeps every worktree entry
+      // whose directory is currently unreachable -- including a developer's
+      // own unrelated worktree if its volume happens to be unmounted at this
+      // moment. This script must never touch state it did not create in the
+      // real repository's .git.
       fs.rmSync(dir, { recursive: true, force: true });
-      try {
-        git(['worktree', 'prune'], REPO_ROOT);
-      } catch {
-        // best-effort
-      }
     }
   };
 

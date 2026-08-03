@@ -112,6 +112,31 @@ check('seeded regression: breaking subtract() fails the configured test command,
   const needle = 'def subtract(a, b):\n    return a - b';
   assert.ok(original.includes(needle), 'fixture source has drifted from what this seeded mutation expects — update the mutation');
   const mutated = original.replace(needle, 'def subtract(a, b):\n    return a + b');
+
+  // This is the one check in this file that mutates real TRACKED source. The
+  // `finally` below covers a thrown assertion, but not a kill signal or an
+  // uncaught crash between here and there -- and an unrestored mutation is a
+  // regression a developer could then commit. Belt and braces: a synchronous
+  // restore registered against both an ordinary exit and the signals that
+  // would otherwise terminate the process before `finally` ever runs.
+  let restored = false;
+  function restore() {
+    if (restored) return;
+    restored = true;
+    fs.writeFileSync(CALC_SRC, original);
+  }
+  const onSigint = () => {
+    restore();
+    process.exit(130);
+  };
+  const onSigterm = () => {
+    restore();
+    process.exit(143);
+  };
+  process.once('exit', restore);
+  process.once('SIGINT', onSigint);
+  process.once('SIGTERM', onSigterm);
+
   try {
     fs.writeFileSync(CALC_SRC, mutated);
     const redResult = runFixturePytest();
@@ -122,7 +147,12 @@ check('seeded regression: breaking subtract() fails the configured test command,
       `expected the subtract test to be named as a failure, got:\n${redResult.stdout}`,
     );
   } finally {
-    fs.writeFileSync(CALC_SRC, original);
+    restore();
+    process.removeListener('SIGINT', onSigint);
+    process.removeListener('SIGTERM', onSigterm);
+    // The 'exit' listener is intentionally left registered: it is idempotent
+    // (the `restored` guard makes any later invocation a no-op) and 'exit'
+    // only fires once, at real process shutdown.
   }
   const greenResult = runFixturePytest();
   assert.equal(greenResult.status, 0, `restoring the source did not restore a green suite\n${greenResult.stdout}\n${greenResult.stderr}`);
@@ -176,7 +206,15 @@ function gitStatus(dir) {
   return git(['status', '--porcelain'], dir);
 }
 
-/** The orchestrator's audit: every path `git status --porcelain` names, parsed to bare paths. @param {string} dir */
+/**
+ * The orchestrator's audit: every path `git status --porcelain` names, parsed
+ * to bare paths. NOT a general-purpose porcelain parser -- `line.slice(3)` is
+ * only correct for the plain modified/untracked entries `seedGlobViolation`
+ * produces here. A rename (`R  old -> new`) or a quoted path (spaces,
+ * non-ASCII, under `core.quotePath`) would break it. Good enough for this
+ * sandbox; do not reuse this as the reference implementation of the audit.
+ * @param {string} dir
+ */
 function foundPaths(dir) {
   return gitStatus(dir)
     .split('\n')
