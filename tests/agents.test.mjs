@@ -62,11 +62,44 @@ test('agents/*.md exists and was actually enumerated', () => {
   assert.equal(files.length, 4, `expected exactly 4 agent files (one per ROLES entry), found ${files.length}`);
 });
 
+/**
+ * Extract the `tools:` frontmatter field as a sorted array of tool names,
+ * matching the comma-separated form the agent files use (`tools: Read,
+ * Write, Edit, Bash`).
+ */
+function frontmatterTools(filePath) {
+  const text = fs.readFileSync(filePath, 'utf8');
+  const match = text.match(/^tools:[ \t]*(.+)$/m);
+  if (!match) return null;
+  return match[1].split(',').map((t) => t.trim()).filter(Boolean).sort();
+}
+
+// Grep/Glob sit outside the PreToolUse matcher (hooks/hooks.json), so a call
+// to either never reaches the guard at all, and Grep returns file content --
+// the spec makes their absence here explicitly load-bearing (design spec:
+// "The three agents only ever legitimately need to run the commands in
+// config.json ... Grep and Glob are deliberately not granted"). This is an
+// EQUALITY check, not a subset check: a subset check would permit an agent
+// file gaining an extra tool, and an addition (not a removal) is the
+// direction that actually opens a bypass.
+const EXPECTED_TOOLS = ['Bash', 'Edit', 'Read', 'Write'];
+
 for (const file of agentFiles()) {
   test(`${path.basename(file)}: declares a name: field that is a member of ROLES`, () => {
     const name = frontmatterName(file);
     assert.notEqual(name, null, `${path.basename(file)} has no 'name:' frontmatter field`);
     assert.ok(ROLES.includes(name), `${path.basename(file)} declares name '${name}', which is not in ROLES (${ROLES.join(', ')})`);
+  });
+
+  test(`${path.basename(file)}: declares tools: exactly Read, Write, Edit, Bash -- no more, no less`, () => {
+    const tools = frontmatterTools(file);
+    assert.notEqual(tools, null, `${path.basename(file)} has no 'tools:' frontmatter field`);
+    assert.deepEqual(
+      tools,
+      EXPECTED_TOOLS,
+      `${path.basename(file)} declares tools: ${tools.join(', ')}; expected exactly ${EXPECTED_TOOLS.join(', ')} -- ` +
+        'Grep/Glob must never appear here (they bypass the PreToolUse matcher entirely)',
+    );
   });
 
   test(`${path.basename(file)}: its declared name is what the guard dispatches on`, () => {
