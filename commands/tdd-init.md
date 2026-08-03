@@ -8,7 +8,20 @@ guard hook on every subsequent tool call.
 
 ## 1. Check prerequisites
 
-- `jq` on PATH (`command -v jq`). Missing → stop and tell the user to install it. The guard parses its input with `jq` and fails closed without it, which would deny every tool call mid-cycle.
+- Node is on `PATH` and is at least the floor `hooks/lib/rules.mjs` exports as `NODE_FLOOR` — a floor, not a pin; a newer major is
+  fine. Check with `node --version` through the `Bash` tool. Missing, or below the floor → stop and tell the user to install or
+  upgrade it. This is a hard stop, not a degradation: with no interpreter, or too old an interpreter, there is no
+  reduced-guarantee mode to fall back to — the guard cannot be trusted to run at all.
+
+  **The two failures are not the same shape.** A too-old-but-*present* Node does launch `guard.mjs`, which checks its own version
+  first and denies loudly with exit 2 — that path is genuinely fail-closed on its own. A missing Node never launches the guard at
+  all: `PreToolUse` sees a non-2 exit and silently *permits* the call — a missing interpreter fails open, exactly like a missing
+  shell did. Catching both here, at setup, is what turns the open failure into a loud one.
+
+  This only proves node is on the `Bash` tool's `PATH`, not on the `PATH` Claude Code spawns the hook with — the two can disagree
+  under a per-shell version manager (`fnm`, `nvm`). `/tdd`'s preflight (item 7) is what actually proves the guard can start, by
+  dispatching a probe subagent and observing a denial. Report both results to the user; a green version check here is not proof
+  by itself.
 - The project is a git repository with at least one commit.
 
 ## 2. Detect the toolchain
