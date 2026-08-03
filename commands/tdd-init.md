@@ -8,14 +8,10 @@ guard hook on every subsequent tool call.
 
 ## 1. Check prerequisites
 
-- Node is on `PATH` and is at least the floor `${CLAUDE_PLUGIN_ROOT}/hooks/lib/rules.mjs` exports as `NODE_FLOOR` — a floor, not
-  a pin; a newer major is fine. `hooks/lib/rules.mjs` lives inside the plugin's own directory, not the project you are
-  initializing, so read it by the `${CLAUDE_PLUGIN_ROOT}`-relative path — a bare `hooks/lib/rules.mjs` resolves against the wrong
-  cwd and will not exist there. Check with `node --version` through the `Bash` tool and compare it against `NODE_FLOOR`. Missing,
-  or below the floor → stop and tell the user to install or upgrade it. **If `NODE_FLOOR` itself cannot be read, stop** — the
-  same as a missing interpreter; do not skip the comparison, guess a number, or treat the miss as a pass. This is a hard stop,
-  not a degradation: with no interpreter, or too old an interpreter, there is no reduced-guarantee mode to fall back to — the
-  guard cannot be trusted to run at all.
+- Node is on `PATH` and is at least v22 — the floor `hooks/lib/rules.mjs` enforces on itself as `NODE_FLOOR`. A floor, not a pin;
+  a newer major is fine. Check with `node --version` through the `Bash` tool. Missing, or below v22 → stop and tell the user to
+  install or upgrade it. This is a hard stop, not a degradation: with no interpreter, or too old an interpreter, there is no
+  reduced-guarantee mode to fall back to — the guard cannot be trusted to run at all.
 
   **The two failures are not the same shape.** A too-old-but-*present* Node does launch `guard.mjs`, which checks its own version
   first and denies loudly with exit 2 — that path is genuinely fail-closed on its own. A missing Node never launches the guard at
