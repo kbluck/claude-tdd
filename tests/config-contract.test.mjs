@@ -8,12 +8,13 @@
 // is not fixing the artifact".
 //
 // This file mostly does not touch hooks/lib/rules.mjs and is not expected to
-// be red-because-of-a-stub. Most of it pins a property the repository already
-// satisfies (like agents.test.mjs). The one deliberate exception is the
-// singleTerse drift check at the bottom, which is expected to be RED right
-// now and records a real, currently-unclosed gap (plan Task 8). The Node
-// floor drift check near the bottom DOES import hooks/lib/rules.mjs, but only
-// to read the already-implemented NODE_FLOOR constant (Task 3), not to
+// be red-because-of-a-stub. All of it pins a property the repository already
+// satisfies (like agents.test.mjs), including the singleTerse drift check at
+// the bottom: it was a deliberate RED recording a real gap (plan Task 8) when
+// written, and now passes -- commands.singleTerse landed in both the fixture
+// and the tdd-init.md Step 7 template, closing the gap it was recording. The
+// Node floor drift check near the bottom DOES import hooks/lib/rules.mjs, but
+// only to read the already-implemented NODE_FLOOR constant (Task 3), not to
 // exercise a stub.
 
 import test from 'node:test';
@@ -251,12 +252,12 @@ test('spec: the derived schema loop enumerated at least 19 keys', () => {
 // defect that test exists to catch."
 //
 // This closes that hole by deriving keys from the SPEC instead, and
-// asserting they also appear in the fixture and the template. It is
-// EXPECTED TO FAIL right now for commands.singleTerse, which is present in
-// the spec's block and absent from both the fixture and commands/tdd-init.md
-// — verified directly above (tests/fixtures/config.json has no
-// "singleTerse" key). That failure is the correct record of the gap; closing
-// it is plan Task 8's job, not this suite's.
+// asserting they also appear in the fixture and the template. This USED TO
+// FAIL for commands.singleTerse, which was present in the spec's block and
+// absent from both the fixture and commands/tdd-init.md -- that failure was
+// the correct record of the gap plan Task 8 closed. singleTerse now appears
+// in tests/fixtures/config.json and the tdd-init.md Step 7 template, so both
+// drift checks below pass.
 // ---------------------------------------------------------------------------
 
 // JSON.parse(specBlock) is deliberately kept OUT of module scope and computed

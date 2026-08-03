@@ -474,9 +474,11 @@ for (const [name, cmd] of METACHARS) {
 
 // Spec: "The delta check must also reject traversal (iteration 2)" — defence
 // in depth behind the orchestrator-side testId validation (plan Task 13,
-// I4). Not yet landed anywhere (that item is explicitly future work), so
-// this is expected to stay red past Task 3 until Task 13 closes it — still
-// the correct record of the gap in the meantime.
+// I4). This delta-level check (bashVerdict's own '..' rejection) landed in
+// Task 3 and is what this test pins. The orchestrator-side testId
+// validation it backs up landed later, in Task 13
+// (skills/run-tdd-cycle/SKILL.md) -- not exercised by this unit-test file,
+// only by the e2e/Task 12 workflow checks.
 test('bash: .. traversal in the delta is denied', () => {
   assertDeny(bashVerdict('pytest -q ../../etc/passwd', T_SINGLE));
 });
