@@ -1,0 +1,25 @@
+{
+  "spec": "e2e/spec.md",
+  "knownRed": ["tests/test_known_flaky.py::test_pretend_baseline_failure"],
+  "mutationRoundsRun": 0,
+  "items": [
+    {
+      "id": 1,
+      "behavior": "add(a, b) returns the sum of two numbers",
+      "status": "redundant",
+      "reason": "Red wrote a passing test that moved no coverage; add() is already covered by test_smoke."
+    },
+    {
+      "id": 2,
+      "behavior": "subtract(a, b) returns the difference",
+      "status": "red",
+      "testId": "tests/test_subtract.py::test_subtract_returns_difference"
+    },
+    {
+      "id": 3,
+      "behavior": "divide(a, b) raises ValueError when b is zero",
+      "status": "pending",
+      "testId": null
+    }
+  ]
+}
