@@ -44,14 +44,17 @@ One type and scope per commit; split when a change spans two. Every type except 
 ## Tests
 
 ```bash
-bash tests/run.sh          # whole suite, ~1.3s, exits non-zero on any failure
+node --test                # whole suite, run from the repo root, exits non-zero on any failure
 ```
 
-No single-test selector; `run.sh` globs `tests/*.test.sh` and the suite is fast enough not to need one.
+`node --test` (no args) discovers every `tests/**/*.test.mjs` file. Point it at one file (`node --test tests/rules.test.mjs`) or
+add `--test-name-pattern <regex>` to narrow further; the suite is fast enough that neither is usually necessary.
 
-Test files are **sourced, not executed**: no shebang, no `set -e`, no `exit`. They call `assert_eq` and `assert_contains` from
-`run.sh` and use `$REPO_ROOT`. Because they are sourced into `run.sh`'s own scope, a test file that assigns `BEFORE`, `FOUND` or
-`t` breaks the harness guard silently.
+The bash harness (`tests/run.sh` sourcing `tests/*.test.sh`) is retired — Task 3 deleted it along with `hooks/guard.sh` and
+`hooks/lib/rules.sh`, the files it existed to test. Four of its five test files (`agents`, `config-contract`, `guard`, `rules`)
+have a `.test.mjs` equivalent under `node:test`. The fifth, `tests/smoke.test.sh`, needed no successor: it tested only the bash
+harness's own `assert_eq`/`assert_contains` functions, not anything about this plugin — `node:test`'s assertions are Node's own
+and need no such self-test.
 
 ## Running the plugin against itself
 
