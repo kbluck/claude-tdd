@@ -406,6 +406,25 @@ test('guard: bash dispatch selects candidate command templates BY ROLE', () => {
   }
 });
 
+test('guard: Red may run commands.singleTerse for the handover report — permitted structurally, via the "single" prefix match, with no separate BASH_COMMAND_KEYS entry needed', () => {
+  const sandbox = makeSandbox();
+  try {
+    // Task 8: Red produces observedFailure from commands.singleTerse
+    // ("pytest -q --tb=line {testId}"), not commands.single. Nothing routes
+    // this through a distinct allowlist entry — bashVerdict only checks that
+    // the actual command STARTS WITH the static prefix of a candidate
+    // template (the text before its first "{"), so "pytest -q --tb=line ..."
+    // already satisfies commands.single's prefix ("pytest -q") on the first
+    // candidate key tried. If that stopped being true (a toolchain whose
+    // terse form does not share single's prefix), this dispatch would go
+    // structurally dead with no failing test anywhere else to notice.
+    const redTerse = bashGuard(sandbox, 'pytest -q --tb=line tests/test_a.py::test_x', 'tdd-red');
+    assert.equal(redTerse.status, 0, "red should be permitted to run commands.singleTerse's command for this fixture");
+  } finally {
+    removeSandbox(sandbox);
+  }
+});
+
 test("guard: every role may run the configured coverage command, but a role's own phase-scoped command stays scoped", () => {
   const sandbox = makeSandbox();
   try {
