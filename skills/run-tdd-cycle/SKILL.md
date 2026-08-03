@@ -179,12 +179,16 @@ net for an agent that failed to revert its own mutations. It detects the problem
 untracked files, and `reset --hard` alone can never remove them — only `clean` can.
 
 **Only the `clean` half takes a pathspec — and that pathspec is every path the triggering check actually found, not the role's
-write globs.** A guardrail violation is *by definition* a write to a path that does not match the role's globs — that is what
-makes it a violation rather than ordinary work. So in the scenario this backstop exists for, the rogue file sits outside the
-glob by construction, and a `clean` scoped to the glob can never reach it. Two cases, not one; do not collapse them:
+write globs.** For most of the checks below, a guardrail violation is *by definition* a write to a path that does not match the
+role's globs — that is what makes it a violation rather than ordinary work — so the rogue file sits outside the glob by
+construction, and a `clean` scoped to the glob can never reach it. (Red's content-scan hit, below, is the one exception: it is a
+violation found *inside* `globs.test`. The found-paths pathspec still reaches it — the same mechanism, applied uniformly, rather
+than a second scoping rule for a second kind of violation.) Two cases, not one; do not collapse them:
 
-- **A check found concrete paths responsible for the discard.** Red's audit and Green's each name the paths that failed the glob
-  match (see *Per item*). Refactor's incomplete-restore check and the mutation pass's tree-clean recovery each re-run `git status
+- **A check found concrete paths responsible for the discard.** Red's audit and Green's each name the paths that failed the
+  check — a glob mismatch, or, for Red, a content-scan hit (see *Per item*) — even though a content-scan hit sits *inside*
+  `globs.test` by construction, unlike every other violation in this bucket. Refactor's incomplete-restore check and the
+  mutation pass's tree-clean recovery each re-run `git status
   --porcelain` (and `git diff HEAD`) and find it non-empty when it was supposed to be clean — that finding **is** a list of
   concrete paths, the same way an audit's is. **Refactor's hard coverage gate belongs here too, for a reason specific to
   Refactor:** its own audit step (see *Per item*) is one clause with no defined violation branch, so unlike Green's coverage-gate
@@ -201,10 +205,11 @@ glob by construction, and a `clean` scoped to the glob can never reach it. Two c
 - **No check found anything — the discard follows a judgment made from an already-clean audit that gates conformance.** Red's
   `passing-flat` outcome, Green's unreproducible pass, Green's full-suite regression, and Green's coverage-gate overrun are
   decisions made *after* that dispatch's own audit already passed with nothing flagged — and, unlike Refactor's audit, Red's and
-  Green's each have a defined `Violation → revert` branch (see *Per item*), which is what makes "the audit already confirmed
-  everything is inside the glob" a fact rather than an assumption. There is no list of problem paths to name here, only that
-  earlier confirmation. Fall back to `globs.test` for Red, `globs.source` for Green. Refactor and Mutate have no site in this
-  bucket: every one of their discards is the found-paths case above.
+  Green's each have a defined `Violation → revert` branch (see *Per item*) — for Red, that branch now also covers a content-scan
+  hit — which is what makes "the audit already confirmed everything is inside the glob, and, for Red, clear of a content-scan
+  hit" a fact rather than an assumption. There is no list of problem paths to name here, only that earlier confirmation. Fall
+  back to `globs.test` for Red, `globs.source` for Green. Refactor and Mutate have no site in this bucket: every one of their
+  discards is the found-paths case above.
 
 Either way, an unscoped `git clean -fd` would delete legitimately untracked work elsewhere in the tree, so never run `clean`
 without one of these two pathspecs — the found paths, or the role's glob fallback. (`clean` without `-x` spares gitignored paths,
@@ -249,9 +254,26 @@ a re-dispatch, but your measurement is the one that decides.
 
 1. Dispatch `tdd-red` with: the spec path, the one item, the configured commands, and the current coverage baseline.
 2. On return, **audit**: `git diff --name-only` plus `git status --porcelain`. Every touched path must match `globs.test`.
-   Violation → **revert** (see *Reverting a dispatch*) scoped to every path this audit found touched, not only the ones that
-   broke the glob match — the whole dispatch is rejected, not just its out-of-glob half. Re-dispatch quoting the rule and the
-   specific paths that broke the match, up to `limits.violationRetries` times. Beyond that → stop, escalate.
+
+   **Also read every touched test file and scan it for a raw read of source text** — `open(`, `File.read`, or your toolchain's
+   equivalent raw-file-read call, whose target argument names a `globs.source` path. Red may not read source; a test that opens
+   a source path and then prints, returns, or asserts on the raw text it read has done exactly that, through the one channel
+   the guard cannot see: it runs as the test file itself, under Red's own configured test command, with no `PreToolUse` call to
+   deny.
+
+   `require(`/`include` naming a `globs.source` path is **not, on its own, a hit.** That is how a test loads the module under
+   test to exercise its behavior, and every Red test does exactly that — flagging it unconditionally would fire on the normal
+   case this rule exists to leave alone. It becomes a hit only combined with the pattern above: the loaded value then treated as
+   text and surfaced — printed, concatenated into an assertion message, returned as a string — rather than exercised as
+   behavior.
+
+   **This is a detector, not a control.** It is a substring-and-judgment heuristic against a file an LLM wrote, applied by you
+   reading the file rather than by a literal grep: it raises the cost of the bypass and catches the obvious spelling, and it does
+   not close the channel.
+
+   Violation (glob mismatch or content-scan hit) → **revert** (see *Reverting a dispatch*) scoped to every path this audit found
+   touched, not only the ones that failed the check — the whole dispatch is rejected, not just its offending half. Re-dispatch
+   quoting the rule and the specific paths that failed it, up to `limits.violationRetries` times. Beyond that → stop, escalate.
 
    **An empty diff is not a passing audit.** "Every touched path matched" is vacuously true when nothing was touched. If Red reports
    `failing`, `passing-covered`, or `passing-flat`, it claims to have written a test — so at least one path must have changed. Zero
