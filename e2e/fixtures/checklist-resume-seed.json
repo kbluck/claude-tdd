@@ -1,6 +1,6 @@
 {
   "spec": "e2e/spec.md",
-  "knownRed": ["tests/test_known_flaky.py::test_pretend_baseline_failure"],
+  "knownRed": ["e2e/tests/test_known_flaky.py::test_pretend_baseline_failure"],
   "mutationRoundsRun": 0,
   "items": [
     {
@@ -13,7 +13,7 @@
       "id": 2,
       "behavior": "subtract(a, b) returns the difference",
       "status": "red",
-      "testId": "tests/test_subtract.py::test_subtract_returns_difference"
+      "testId": "e2e/tests/test_subtract.py::test_subtract_returns_difference"
     },
     {
       "id": 3,
