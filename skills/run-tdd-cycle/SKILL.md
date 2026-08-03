@@ -141,24 +141,37 @@ up.
 
 Revert means both:
 
-    git checkout -- <the role's write globs>     # restore tracked edits
-    git clean -fd -- <the role's write globs>    # remove new files
+    git checkout -- <pathspec>     # restore tracked edits
+    git clean -fd -- <pathspec>    # remove new files
 
 **`git reset --hard HEAD` has the identical blind spot** and appears wherever a branch resets to the last commit rather than
 discarding working-tree edits — Refactor's coverage gate, Refactor's incomplete-restore check, and the mutation pass's tree-clean
 recovery. Verified: `reset --hard` leaves untracked files exactly as `checkout` does. Those sites mean:
 
     git reset --hard HEAD
-    git clean -fd -- <the role's write globs>
+    git clean -fd -- <pathspec>
 
 The mutation-pass case is the sharpest: that reset is the safety net for an agent that failed to revert its own mutations. It
 detects the problem with `git status --porcelain`, which *does* show untracked files, and then applies a command that cannot remove
 them.
 
-**Only the `clean` half takes a pathspec.** Scope it to the globs that role may write — `globs.test` for Red, `globs.source` for
-Green, Refactor and Mutate — because an unscoped `git clean -fd` would delete legitimately untracked work elsewhere in the tree.
-(`clean` without `-x` spares gitignored paths, so the venv, the checklist and the coverage report survive either way; do not add
-`-x`.)
+**Only the `clean` half takes a pathspec — and that pathspec is the offending paths the audit reported, not the role's write
+globs.** A guardrail violation is *by definition* a write to a path that does not match the role's globs — that is what makes it a
+violation rather than ordinary work. So in the one scenario this backstop exists for — the audit catches a write outside the
+role's glob — the rogue file sits outside the glob by construction, and a `clean` scoped to the glob can never reach it. Two
+cases, not one; do not collapse them:
+
+- **The discard follows a reported guardrail violation** (Red's audit or Green's, each below in *Per item*). Scope `clean` to the
+  offending path(s) the audit named — the paths it found that did not match the role's glob.
+- **The discard has no violation to report** — Red's `passing-flat` outcome, Green's unreproducible pass or full-suite regression,
+  either coverage gate's overrun, Refactor's incomplete-restore check, or the mutation pass's tree-clean recovery. In every one of
+  these the audit already ran clean before the discard was triggered, so every touched path already matches the role's glob by
+  construction, and the offending-paths case above does not apply. Fall back to `globs.test` for Red, `globs.source` for Green,
+  Refactor and Mutate.
+
+Either way, an unscoped `git clean -fd` would delete legitimately untracked work elsewhere in the tree, so never run `clean`
+without one of these two pathspecs. (`clean` without `-x` spares gitignored paths, so the venv, the checklist and the coverage
+report survive either way; do not add `-x`.)
 
 `git reset --hard` is tree-wide and **cannot** be scoped: `git reset --hard -- <path>` fails with `fatal: Cannot do hard reset with
 paths.` That is safe here only because preflight requires a clean tree and exactly one agent writes per dispatch, so the only
@@ -200,8 +213,8 @@ a re-dispatch, but your measurement is the one that decides.
 
 1. Dispatch `tdd-red` with: the spec path, the one item, the configured commands, and the current coverage baseline.
 2. On return, **audit**: `git diff --name-only` plus `git status --porcelain`. Every touched path must match `globs.test`.
-   Violation → **revert** (see *Reverting a dispatch*), re-dispatch quoting the rule and the offending path, up to
-   `limits.violationRetries` times. Beyond that → stop, escalate.
+   Violation → **revert** (see *Reverting a dispatch*) using the offending paths this audit found, re-dispatch quoting the rule
+   and those paths, up to `limits.violationRetries` times. Beyond that → stop, escalate.
 
    **An empty diff is not a passing audit.** "Every touched path matched" is vacuously true when nothing was touched. If Red reports
    `failing`, `passing-covered`, or `passing-flat`, it claims to have written a test — so at least one path must have changed. Zero
