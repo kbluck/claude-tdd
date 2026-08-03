@@ -26,16 +26,32 @@ guard hook on every subsequent tool call.
 
 ## 2. Detect the toolchain
 
-| Marker | Toolchain | test | single | coverage |
-|---|---|---|---|---|
-| `pytest.ini`, or `pyproject.toml` mentioning pytest | pytest | `pytest -q` | `pytest -q {testId}` | `pytest -q --cov --cov-report=json:.tdd/coverage.json` |
-| `package.json` with `jest` | jest | `npx jest` | `npx jest -t {testId}` | `npx jest --coverage --coverageReporters=json-summary` |
-| `package.json` with `vitest` | vitest | `npx vitest run` | `npx vitest run -t {testId}` | `npx vitest run --coverage` |
-| `Cargo.toml` | cargo | `cargo test` | `cargo test {testId}` | `cargo llvm-cov --json` |
-| `go.mod` | go | `go test ./...` | `go test ./... -run {testId}` | `go test -cover ./...` |
-| `*.csproj`, `*.sln` | dotnet | `dotnet test` | `dotnet test --filter {testId}` | `dotnet test --collect:"XPlat Code Coverage"` |
+| Marker | Toolchain | test | single | singleTerse | coverage |
+|---|---|---|---|---|---|
+| `pytest.ini`, or `pyproject.toml` mentioning pytest | pytest | `pytest -q` | `pytest -q {testId}` | `pytest -q --tb=line {testId}` | `pytest -q --cov --cov-report=json:.tdd/coverage.json` |
+| `package.json` with `jest` | jest | `npx jest` | `npx jest -t {testId}` | `null` | `npx jest --coverage --coverageReporters=json-summary` |
+| `package.json` with `vitest` | vitest | `npx vitest run` | `npx vitest run -t {testId}` | `null` | `npx vitest run --coverage` |
+| `Cargo.toml` | cargo | `cargo test` | `cargo test {testId}` | `cargo test {testId}` | `cargo llvm-cov --json` |
+| `go.mod` | go | `go test ./...` | `go test ./... -run {testId}` | `go test ./... -run {testId}` | `go test -cover ./...` |
+| `*.csproj`, `*.sln` | dotnet | `dotnet test` | `dotnet test --filter {testId}` | `null` | `dotnet test --collect:"XPlat Code Coverage"` |
 
 No marker matches, or several do → ask the user rather than guessing.
+
+**`singleTerse` notes — do not invent a flag you have not verified.** Each row above is one of three cases, and which case applies
+is a fact about the toolchain, not a preference:
+
+- **pytest**: `--tb=line` is a documented traceback style that prints one line per failure instead of reproducing the source of the
+  failing test function. This is the case the field exists for.
+- **cargo and go**: the *same* command as `single`, not a distinct flag. Their default failure output (a panic message with
+  `file:line`, or the `t.Errorf`/`t.Fatalf` message with `file:line`) never reproduces the test function's source the way pytest's
+  default traceback does, and Rust's backtrace is off unless `RUST_BACKTRACE=1` is set in the environment — so there is nothing
+  further to truncate. Setting `singleTerse` to `null` here would trigger the degradation warning below ("carries the full
+  traceback") for a toolchain where that claim is false. Reuse the command and say so when you present it to the user, so it does
+  not read as a copy-paste mistake.
+- **jest, vitest, dotnet**: `null`. Each has flags that reduce *some* output (`--noStackTrace` for jest, alternate reporters for
+  vitest, `--verbosity` for dotnet), but none is documented to suppress the source-code frame or the multi-frame stack trace
+  specifically — the part of the output this field exists to cut. Do not configure one of these speculatively; confirm the
+  degradation with the user instead (see 2c).
 
 ## 2c. Report every degradation explicitly
 
@@ -47,6 +63,7 @@ prompt discipline. Tell the user which guarantees they are actually getting:
 | `commands.coverage` | Red's three-way branch collapses to strict red; both coverage gates skipped; `crapMode` forced to `unavailable` |
 | `crapMode: "unavailable"` | CRAP trigger gone; refactor falls back to `maxFunctionLines` |
 | `commands.mutation` | hardening pass uses agent hand-mutation instead of a tool; slower, less systematic, still runs |
+| `commands.singleTerse` | `observedFailure` falls back to `commands.single` and carries the full traceback — for most tests that traceback reproduces the whole failing test function, which is handed to Green as required input despite Green being denied `Read` on the test file |
 
 Coverage is the one worth pressing on — losing it cascades into all three
 gates. Recommend installing it rather than proceeding without it.
@@ -170,7 +187,7 @@ Confirm each command is actually runnable as written.
     {
       "version": 1,
       "commands": {
-        "test": "...", "single": "...", "coverage": "...",
+        "test": "...", "single": "...", "singleTerse": "...", "coverage": "...",
         "complexity": "...", "mutation": null
       },
       "crapMode": "computed",
