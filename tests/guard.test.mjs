@@ -227,7 +227,7 @@ test('guard: NotebookEdit/NotebookRead are judged on notebook_path, not file_pat
     // notebook_path (source) must be judged on the field the tool actually
     // acts on — checking file_path here would validate something the tool
     // ignores and permit the write it should have caught.
-    const decoy = runGuard({
+    const editDecoy = runGuard({
       agentType: 'tdd-red',
       tool: 'NotebookEdit',
       input: {
@@ -236,7 +236,24 @@ test('guard: NotebookEdit/NotebookRead are judged on notebook_path, not file_pat
       },
       sandbox,
     });
-    assert.equal(decoy.status, 2, 'NotebookEdit must be judged on notebook_path, not a decoy file_path');
+    assert.equal(editDecoy.status, 2, 'NotebookEdit must be judged on notebook_path, not a decoy file_path');
+
+    // NotebookRead's own path key, independently of NotebookEdit's — a
+    // recorded mutation survivor (review Appendix, "NotebookRead path key ->
+    // file_path": survived, "NotebookRead is never tested"). The decoy
+    // file_path here is a path red MAY read (unclassified, not under
+    // src/**), and the notebook_path is under src/** and must be denied — a
+    // guard that consulted file_path instead would wrongly permit this call.
+    const readDecoy = runGuard({
+      agentType: 'tdd-red',
+      tool: 'NotebookRead',
+      input: {
+        file_path: path.join(sandbox, 'README.md'),
+        notebook_path: path.join(sandbox, 'src', 'nb.ipynb'),
+      },
+      sandbox,
+    });
+    assert.equal(readDecoy.status, 2, 'NotebookRead must be judged on notebook_path, not a decoy file_path');
   } finally {
     removeSandbox(sandbox);
   }
