@@ -28,13 +28,9 @@ Announce: "Using run-tdd-cycle to implement `<spec>`."
 4. **Spec file readable and non-empty.** Unreadable or empty → stop; there is nothing to decompose.
 5. **The glob partition is still exhaustive.** `git ls-files`; every path must match `test`, `source`, or `ignore`. Drift since
    init → stop and tell the user to re-run `/tdd-init`. This is what makes the guard's read denylist sound.
-6. **Node is on `PATH` and is at least the floor `${CLAUDE_PLUGIN_ROOT}/hooks/lib/rules.mjs` exports as `NODE_FLOOR`** — a floor,
-   not a pin; a newer major passes. `hooks/lib/rules.mjs` is inside the plugin's own directory, not the target project you are
-   running against, so read it by the `${CLAUDE_PLUGIN_ROOT}`-relative path — a bare `hooks/lib/rules.mjs` resolves against the
-   wrong cwd and will not exist there. Run `node --version` through the `Bash` tool and compare it against `NODE_FLOOR`. Missing,
-   or below the floor → stop and tell the user to install or upgrade Node. **If `NODE_FLOOR` itself cannot be read, stop** —
-   the same as a missing interpreter. Do not skip the comparison, guess a number, or treat the miss as a pass; an unevaluable
-   check must not reach `allow`.
+6. **Node is on `PATH` and is at least v22** — the floor `hooks/lib/rules.mjs` enforces on itself as `NODE_FLOOR`. A floor, not a
+   pin; a newer major passes. Run `node --version` through the `Bash` tool. Missing, or below v22 → stop and tell the user to
+   install or upgrade Node.
 
    **The two failures are not the same shape.** A too-old-but-*present* Node does launch `guard.mjs`, which checks its own
    version first, before anything else can throw, and denies loudly with exit 2 — that path is genuinely fail-closed on its own.
