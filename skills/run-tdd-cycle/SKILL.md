@@ -37,9 +37,21 @@ Announce: "Using run-tdd-cycle to implement `<spec>`."
      2. **Matches the `testId` recorded on the item currently at status `red`**, if any. Expected mid-cycle state — Red wrote
         this test, Green has not run yet — and must not be added to `knownRed`. This is an exact test-ID comparison against the
         field *Decompose* declares and *Per item / Red* writes, not a guess at which file a failure belongs to.
+
+        **A failure that carries no `::` names a file, not a test, and no exact comparison against a stored `path::name` can
+        ever match it.** Compare a `::`-less failure against the portion of the stored `testId` up to its `::`; a match there
+        is bucket 2. A collection error reports exactly that shape — `ERROR e2e/tests/test_subtract.py` — and it is the
+        *ordinary* mid-cycle state, not an edge case: Red writes a test importing a symbol Green has not created yet, so the
+        module cannot import and the file never collects. Without this, the one state bucket 2 exists to exempt lands in
+        bucket 3, and the ask below invites the user to baseline it. Found on the first live resume run.
      3. **Neither of the above.** A genuinely new red suite, not a resume artifact: treat it exactly like the first-run case
         above — list it, ask the user, and if they agree to proceed, append it to the existing recorded `knownRed` rather than
         overwriting the list.
+
+        **If any failure is a collection error, say so in the ask, and say what it costs.** A runner that stops on one —
+        pytest prints `Interrupted: N errors during collection` — executes no other test, so the suite reports nothing about
+        itself. Recording that file therefore does not mask one file: it masks every later suite comparison in the session,
+        each of which subtracts `knownRed` and would read an aborted collection as green.
 
    **`knownRed` is not a note to yourself; it must be threaded or it is a lie.** Every later suite comparison is against "the baseline
    you were given", never against zero failures — and `tdd-refactor` and `tdd-mutate` both stop on a suite that is not green, so they
