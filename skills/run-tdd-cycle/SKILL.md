@@ -17,8 +17,23 @@ Announce: "Using run-tdd-cycle to implement `<spec>`."
    runs. Dirty → stop, ask the user to commit or stash.
 2. **`.tdd/config.json` exists.** Missing → tell the user to run `/tdd-init`. Do not write one yourself.
 3. **The full suite passes.** Run the configured test command. Green's stop condition is "this test now passes" and Refactor's is
-   "all tests still pass" — both are meaningless against an already-red suite. If red, list the failing test IDs, ask the user whether
-   to proceed, and if so record them in `checklist.json` as `knownRed`.
+   "all tests still pass" — both are meaningless against an already-red suite.
+
+   **`knownRed` is captured once, at first-run preflight, and never re-derived.** It means "failing before this run began" — a
+   property of the starting tree, not of whatever this check happens to see. Before treating a red suite as a candidate baseline,
+   determine first run vs. resume the same way `## Decompose` does: does `.tdd/checklist.json` exist and have items?
+
+   - **First run** (checklist absent or empty). If red, list the failing test IDs, ask the user whether to proceed, and if so record
+     them in `checklist.json` as `knownRed`.
+   - **Resume** (checklist present with items). Read the checklist's existing `knownRed` — this step does not ask for it again and
+     does not overwrite it. If the suite is red, attribute every failure before deciding anything: the item currently at status
+     `red` has a committed `red: <behavior>` commit for it (`git log --grep`, exact match on that item's `behavior` text) — a
+     failure in a test file that commit touched is the expected mid-cycle state, Red's own test with Green not yet run, not a
+     baseline, and must not be added to `knownRed`. **A red suite is not automatically a baseline just because this is a resume.**
+     Any failure that is not in that commit's test files is a genuinely new red suite, not a resume artifact: treat it exactly like
+     the first-run case above — list it, ask the user, and if they agree to proceed, append it to the existing recorded `knownRed`
+     rather than overwriting the list. If no item is currently at status `red`, there is nothing to attribute to and every failure
+     falls into this branch.
 
    **`knownRed` is not a note to yourself; it must be threaded or it is a lie.** Every later suite comparison is against "the baseline
    you were given", never against zero failures — and `tdd-refactor` and `tdd-mutate` both stop on a suite that is not green, so they
