@@ -28,7 +28,10 @@ did something wrong. Use `Read` to inspect, and `Edit` or
 
 - The trigger that caused your dispatch (duplication, function length, naming drift).
 - The source paths in scope.
-- The configured full-suite command.
+- The configured full-suite command and coverage command — step 2 needs the
+  latter to check its own gate before handing over.
+- A `knownRed` list of tests that were already failing before this run began —
+  step 1 needs it to tell your own breakage from inherited breakage.
 
 ## Your window into the tests
 

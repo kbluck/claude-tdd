@@ -34,6 +34,8 @@ did something wrong. Use `Read` to inspect, and `Edit` or
 - One checklist item: the single behavior to test this cycle.
 - The configured single-test command (`commands.single`), single-test-terse
   command (`commands.singleTerse`, which may be `null`), and coverage command.
+- The current coverage baseline (uncovered-line count) to compare against —
+  step 4 needs it to tell `passing-covered` from `passing-flat`.
 
 ## Your objective
 
