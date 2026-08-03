@@ -99,6 +99,60 @@ test("hooks.json: the matcher's tool set is exactly guard.mjs's TOOL_DISPATCH ke
   );
 });
 
+/** hooks.json's PreToolUse matcher, as a Set of its tool tokens. */
+function matcherToolSet() {
+  const hooksJson = JSON.parse(fs.readFileSync(HOOKS_JSON_PATH, 'utf8'));
+  const preToolUse = hooksJson?.hooks?.PreToolUse ?? [];
+  const guardEntry = preToolUse.find((entry) =>
+    (entry.hooks ?? []).some((h) => h.type === 'command' && JSON.stringify(h).includes('guard')));
+  assert.notEqual(guardEntry, undefined, 'no PreToolUse entry references the guard');
+  return new Set(guardEntry.matcher.split('|'));
+}
+
+/**
+ * Every tool granted to every agents/*.md file, as a Set. Reads the
+ * frontmatter directly rather than importing anything from
+ * tests/agents.test.mjs — test files in this suite do not depend on each
+ * other's internals.
+ */
+function agentGrantedToolSet() {
+  const agentsDir = path.join(REPO_ROOT, 'agents');
+  const files = fs.readdirSync(agentsDir).filter((f) => f.endsWith('.md'));
+  assert.ok(files.length > 0, 'expected at least one agents/*.md file');
+  const tools = new Set();
+  for (const f of files) {
+    const text = fs.readFileSync(path.join(agentsDir, f), 'utf8');
+    const match = text.match(/^tools:[ \t]*(.+)$/m);
+    assert.notEqual(match, null, `${f} has no 'tools:' frontmatter field`);
+    for (const t of match[1].split(',').map((s) => s.trim()).filter(Boolean)) tools.add(t);
+  }
+  return tools;
+}
+
+test('hooks.json: every tool granted to an agent in its tools: frontmatter is covered by the matcher', () => {
+  // The two tests above only cross-check hooks.json against guard.mjs, and
+  // guard.mjs against itself -- both self-consistent, so an edit that
+  // narrows the matcher AND TOOL_DISPATCH together (e.g. dropping Bash from
+  // both in the same diff) would satisfy both without ever being compared
+  // against what agents/*.md actually grants. That is this finding's stated
+  // failure scenario in its literal form: an agent keeps a tool in its
+  // tools: frontmatter, the matcher no longer covers it, so a call using it
+  // never reaches the guard at all -- the entire allowlist for that tool
+  // goes dark with no denial and no failing test anywhere else. This
+  // compares the matcher against agents/*.md directly, independent of
+  // TOOL_DISPATCH, to close that gap. Subset, not equality: the matcher may
+  // legitimately cover tools no agent currently holds (MultiEdit,
+  // NotebookEdit, NotebookRead), it must never omit one an agent does.
+  const matcherTools = matcherToolSet();
+  const granted = agentGrantedToolSet();
+  const uncovered = [...granted].filter((t) => !matcherTools.has(t));
+  assert.deepEqual(
+    uncovered,
+    [],
+    `agents/*.md grant tool(s) the matcher does not cover, so a call using them would never reach the guard: ${uncovered.join(', ')}`,
+  );
+});
+
 // ---------------------------------------------------------------------------
 // Sandbox + payload helpers
 // ---------------------------------------------------------------------------
