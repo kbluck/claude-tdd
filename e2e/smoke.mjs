@@ -306,7 +306,7 @@ check('resume comparator: a legitimately advanced checklist (loaded, not rebuilt
   const advanced = structuredClone(RESUME_SEED);
   advanced.items = advanced.items.map((/** @type {any} */ item) => {
     if (item.id === 2) return { ...item, status: 'done' }; // Green landed and it was committed
-    if (item.id === 3) return { ...item, status: 'red', testId: 'tests/test_divide.py::test_divide_by_zero_raises_value_error' };
+    if (item.id === 3) return { ...item, status: 'red', testId: 'e2e/tests/test_divide.py::test_divide_by_zero_raises_value_error' };
     return item;
   });
   const verdict = checkResumePreserved(RESUME_SEED, advanced);
@@ -340,6 +340,65 @@ check('resume comparator bite-check: a non-terminal item sliding backward (red -
   const regressed = { spec: 's', knownRed: [], mutationRoundsRun: 0, items: [{ id: 1, behavior: 'b', status: 'pending', testId: 'tests/test_x.py::test_x' }] };
   const verdict = checkResumePreserved(seed, regressed);
   assert.equal(verdict.ok, false, 'comparator did not catch a non-terminal item regressing from "red" to "pending"');
+});
+
+// The seed's own `spec` is repo-root-relative ("e2e/spec.md"), and SKILL.md's
+// testId rule requires the path portion to match `globs.test` -- which is
+// root-anchored ("e2e/tests/**") because the guard resolves against the
+// worktree root. The seed recorded its testIds e2e-relative instead, so it
+// described a state a real Red handover could never have produced: SKILL.md's
+// own validation would have rejected that ID as a glob violation. Found by
+// the first live resume run; nothing here could catch it, because
+// checklist-invariants.mjs only requires a non-terminal testId to be truthy.
+check('resume seed fixture: every recorded path is repo-root-relative, the format a real handover would produce', () => {
+  /** @param {string} id */
+  const pathPortion = (id) => (id.includes('::') ? id.slice(0, id.indexOf('::')) : id);
+
+  assert.ok(RESUME_SEED.spec.startsWith('e2e/'), `fixture bug: seed spec is not root-relative: ${RESUME_SEED.spec}`);
+
+  const recorded = [
+    ...RESUME_SEED.items.filter((/** @type {any} */ i) => i.testId).map((/** @type {any} */ i) => `item ${i.id}: ${i.testId}`),
+    ...RESUME_SEED.knownRed.map((/** @type {string} */ k) => `knownRed: ${k}`),
+  ];
+  assert.ok(recorded.length >= 2, `fixture bug: expected at least one testId and one knownRed entry to check, got ${recorded.length}`);
+
+  for (const entry of recorded) {
+    const id = entry.slice(entry.indexOf(': ') + 2);
+    assert.ok(
+      pathPortion(id).startsWith('e2e/'),
+      `${entry} — path portion "${pathPortion(id)}" is not root-relative, so it can never match globs.test ("e2e/tests/**")`,
+    );
+  }
+});
+
+// The empirical premise SKILL.md's bucket-2 fix rests on. Pinned here rather
+// than asserted in prose so that a pytest release changing either half fails
+// loudly instead of quietly invalidating the rule.
+check('pytest collection error: reports a bare file with no ::, and interrupts the run so siblings never execute', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tdd-collect-'));
+  try {
+    fs.mkdirSync(path.join(dir, 'tests'));
+    // Exactly the ordinary interrupted state: Red wrote a test importing a
+    // symbol Green has not created yet.
+    fs.writeFileSync(path.join(dir, 'tests', 'test_collect_err.py'), 'from calc import subtract\n\ndef test_subtract_returns_difference():\n    assert subtract(3, 1) == 2\n');
+    fs.writeFileSync(path.join(dir, 'tests', 'test_plain_fail.py'), 'def test_ordinary_failure():\n    assert 1 == 2\n');
+
+    const res = spawnSync(PYTEST, ['-q', dir], { cwd: REPO_ROOT, encoding: 'utf8', env: { ...process.env, PYTHONDONTWRITEBYTECODE: '1' } });
+    assert.notEqual(res.status, null, `pytest never started: ${res.error?.message ?? 'unknown'}`);
+    const out = `${res.stdout}${res.stderr}`;
+
+    assert.ok(
+      /^ERROR \S*test_collect_err\.py$/m.test(out),
+      `expected a summary line naming the file with no "::" portion; got:\n${out}`,
+    );
+    assert.ok(
+      !/test_plain_fail\.py::test_ordinary_failure/.test(out),
+      `expected the sibling failure to be unreported (collection interrupted); got:\n${out}`,
+    );
+    assert.ok(/Interrupted/.test(out), `expected pytest to report an interrupted collection; got:\n${out}`);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 // ---------------------------------------------------------------------------
