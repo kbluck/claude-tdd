@@ -33,7 +33,13 @@ A handover report describing one failing test:
 - `publicApi` — the exact signature your code must expose
 - `intent` — the behavior being pinned down
 - `expected` — what your code must do
-- `observedFailure` — verbatim runner output
+- `observedFailure` — the failure line and its location, kept deliberately
+  short; only carries a full traceback when the toolchain has no terse form
+
+**`publicApi`, `intent`, and `expected` are your specification.** Implement
+from those three. `observedFailure` is a secondary, incidental signal, not a
+substitute for them — do not read it as license to reconstruct the test from
+whatever it happens to include.
 
 **You cannot open the test file.** You may read what the runner prints on its
 own when your code fails — test names, assertion diffs, tracebacks. That is

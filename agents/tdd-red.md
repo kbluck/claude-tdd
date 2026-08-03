@@ -32,7 +32,8 @@ did something wrong. Use `Read` to inspect, and `Edit` or
 
 - A specification file path.
 - One checklist item: the single behavior to test this cycle.
-- The configured test and coverage commands.
+- The configured single-test command (`commands.single`), single-test-terse
+  command (`commands.singleTerse`, which may be `null`), and coverage command.
 
 ## Your objective
 
@@ -43,7 +44,13 @@ stop. Do not write a second test. Do not test behavior beyond the item.
 
 1. Read the spec and any existing tests to match conventions and avoid duplicating coverage.
 2. Write one test for the assigned behavior.
-3. Run it with the configured single-test command.
+3. Run it once: use the configured single-test-terse command if one is
+   configured, otherwise the plain single-test command. That one run both
+   determines the outcome and supplies `observedFailure` — do not run the test
+   twice to get a second, fuller failure for your own reference. Never widen
+   what you capture by re-running with a more verbose flag than the one
+   configured; the config controls how much of the test the runner is allowed
+   to echo back.
 4. Classify:
    - **Fails** → `outcome: "failing"`. This is the normal, desired result.
    - **Passes** → run the coverage command. Compare against the baseline you were given.
@@ -64,13 +71,27 @@ If no coverage command is configured, treat any passing test as `passing-flat`.
       "publicApi": "<exact signature the test calls>",
       "intent": "<what behavior this pins down>",
       "expected": "<what the code must do to satisfy it>",
-      "observedFailure": "<verbatim runner output, or empty>",
+      "observedFailure": "<failure line and location only, or empty>",
       "reason": "<only when blocked>"
     }
 
-`publicApi` must be the exact signature — name, parameters, types, return type.
-The agent that implements this cannot read your test. That field is the entire
-interface contract between you.
+**`publicApi`, `intent`, and `expected` are the designed channel, and together
+they are the primary contract — not `observedFailure`.** The agent that
+implements this cannot read your test, so these three fields are its entire
+specification:
+
+- `publicApi` must be the exact signature — name, parameters, types, return type.
+- `intent` states what behavior this pins down, in your own words, not a paraphrase of the assertion.
+- `expected` states what the code must do to satisfy it, concretely enough to implement from.
+
+Write these as if `observedFailure` did not exist. `observedFailure` is a
+secondary, incidental signal — whatever the configured test command prints on
+failure, kept to the failure line and its location — never the field you rely
+on to convey what the test checks. **It is not fully closed.** An assertion
+diff still carries the values being compared, and even a terse traceback
+still names the test. That residue is accepted, not eliminated; it is exactly
+why `publicApi`/`intent`/`expected` — not `observedFailure` — have to carry
+the specification.
 
 ## Stop conditions
 
