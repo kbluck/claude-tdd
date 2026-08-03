@@ -26,14 +26,20 @@ Announce: "Using run-tdd-cycle to implement `<spec>`."
    - **First run** (checklist absent or empty). If red, list the failing test IDs, ask the user whether to proceed, and if so record
      them in `checklist.json` as `knownRed`.
    - **Resume** (checklist present with items). Read the checklist's existing `knownRed` — this step does not ask for it again and
-     does not overwrite it. If the suite is red, attribute every failure before deciding anything: the item currently at status
-     `red` has a committed `red: <behavior>` commit for it (`git log --grep`, exact match on that item's `behavior` text) — a
-     failure in a test file that commit touched is the expected mid-cycle state, Red's own test with Green not yet run, not a
-     baseline, and must not be added to `knownRed`. **A red suite is not automatically a baseline just because this is a resume.**
-     Any failure that is not in that commit's test files is a genuinely new red suite, not a resume artifact: treat it exactly like
-     the first-run case above — list it, ask the user, and if they agree to proceed, append it to the existing recorded `knownRed`
-     rather than overwriting the list. If no item is currently at status `red`, there is nothing to attribute to and every failure
-     falls into this branch.
+     does not overwrite it. If the suite is red, classify every failing test ID against three buckets, checked in this order —
+     **a red suite is not automatically a baseline just because this is a resume; only an exact match against one of the first two
+     buckets is exempt:**
+
+     1. **Already in the recorded `knownRed`.** Expected by definition — accepted before this run began. Do not re-ask, do not
+        re-record. Check this bucket first: on an ordinary resume with no item currently at status `red`, every failure lands
+        either here or in bucket 3, and starting with attribution instead of this check would route already-accepted failures
+        into the ask again — contradicting "does not ask for it again" two sentences up.
+     2. **Matches the `testId` recorded on the item currently at status `red`**, if any. Expected mid-cycle state — Red wrote
+        this test, Green has not run yet — and must not be added to `knownRed`. This is an exact test-ID comparison against the
+        field *Decompose* declares and *Per item / Red* writes, not a guess at which file a failure belongs to.
+     3. **Neither of the above.** A genuinely new red suite, not a resume artifact: treat it exactly like the first-run case
+        above — list it, ask the user, and if they agree to proceed, append it to the existing recorded `knownRed` rather than
+        overwriting the list.
 
    **`knownRed` is not a note to yourself; it must be threaded or it is a lie.** Every later suite comparison is against "the baseline
    you were given", never against zero failures — and `tdd-refactor` and `tdd-mutate` both stop on a suite that is not green, so they
@@ -85,8 +91,13 @@ exists and has items:
   here) — rather than reconstructing only the fields below. Do not write a new checklist: doing so is exactly what discarded every
   item's `status`, `knownRed`, `mutationRoundsRun`, and the baselines before this branch existed. Re-surface every item with status
   `blocked` and ask the user before continuing (see *Completion*), then resume the per-item loop from the first item whose status is
-  not terminal — `pending`, `red`, and `green` are not terminal; `done`, `redundant`, and `blocked` are. Skip the approval step below;
-  it is for a new decomposition, not a continued one.
+  not terminal — `pending`, `red`, and `green` are not terminal; `done`, `redundant`, and `blocked` are.
+
+  **Unless every item is still `pending`, skip the approval step below** — it is for a new decomposition, not a continued one. If
+  every item is still `pending`, nothing has been dispatched yet, so this state is indistinguishable from a first run interrupted
+  between writing the checklist and showing it for approval: `.tdd/checklist.json` is gitignored, so that write never dirties the
+  tree for Preflight's clean-tree check to catch. Show it for approval as if this were a first run — cheap, since no work exists yet
+  to lose by asking again.
 
 Read the spec once. Write `.tdd/checklist.json`:
 
@@ -95,13 +106,16 @@ Read the spec once. Write `.tdd/checklist.json`:
       "knownRed": ["<test ids excluded from comparisons>"],
       "mutationRoundsRun": 0,
       "items": [
-        { "id": 1, "behavior": "<one testable behavior>", "status": "pending" }
+        { "id": 1, "behavior": "<one testable behavior>", "status": "pending", "testId": null }
       ]
     }
 
-Write `mutationRoundsRun` at decompose time, initialised to `0`. Every other field the loop reads is declared here; leaving this one
-to be created later by the mutation pass is the shape `knownRed` had before it turned out nothing read it — a value that exists in
-prose but not in the schema is one nobody has to account for.
+Write `mutationRoundsRun` at decompose time, initialised to `0`, and `testId` on every item initialised to `null`. Every field the
+loop reads is declared here; leaving one to be created later by whichever step first needs it is the shape `knownRed` had before it
+turned out nothing read it — a value that exists in prose but not in the schema is one nobody has to account for. `testId` is set once
+Red's outcome is `failing` (see *Per item / Red*) and stays there as the exact identifier of that item's own test; Preflight step 3
+reads it back on a resume to tell the in-progress item's expected failure apart from a genuinely new one — the same argument that put
+`mutationRoundsRun` here applies to `testId`.
 
 Items may also carry `"overbuilt": true`, set by the Green coverage gate. It is a flag for review, not a status — the item still
 reaches `done`.
@@ -194,7 +208,7 @@ a re-dispatch, but your measurement is the one that decides.
    changed paths alongside any of those outcomes means the agent reported work it did not do: treat it as `blocked` and escalate
    rather than committing an empty commit and moving on. The same applies to Green's audit below.
 3. Branch on `outcome`:
-   - `failing` → commit `red: <behavior>`, status `red`, continue to Green.
+   - `failing` → record the handover's `testId` on the item, commit `red: <behavior>`, status `red`, continue to Green.
    - `passing-covered` → **re-measure coverage yourself before committing.** This branch writes a commit and skips Green entirely on
      the strength of a number the agent computed about its own work; it is the one place nothing else would catch a wrong answer.
      Delta confirmed → commit `test: <behavior>`, status `done`, next item. Delta not confirmed → treat as `passing-flat`.
