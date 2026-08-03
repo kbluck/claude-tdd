@@ -108,7 +108,7 @@ for (const key of REQUIRED_NON_NULL) {
 // explicitly"; absent means /tdd-init forgot to decide.
 // ---------------------------------------------------------------------------
 
-for (const key of ['coverage', 'complexity', 'mutation']) {
+for (const key of ['coverage', 'complexity', 'mutation', 'singleTerse']) {
   test(`config fixture declares commands.${key} (null is allowed, absent is not)`, () => {
     assert.ok(hasPath(fixture, `commands.${key}`), `commands.${key} must be a declared key, even if its value is null`);
   });
