@@ -7,23 +7,28 @@
 // comments inline, and AGENTS.md's "Fixing the document about the artifact
 // is not fixing the artifact".
 //
-// This file does not touch hooks/lib/rules.mjs and is not expected to be
-// red-because-of-a-stub. Most of it pins a property the repository already
+// This file mostly does not touch hooks/lib/rules.mjs and is not expected to
+// be red-because-of-a-stub. Most of it pins a property the repository already
 // satisfies (like agents.test.mjs). The one deliberate exception is the
 // singleTerse drift check at the bottom, which is expected to be RED right
-// now and records a real, currently-unclosed gap (plan Task 8).
+// now and records a real, currently-unclosed gap (plan Task 8). The Node
+// floor drift check near the bottom DOES import hooks/lib/rules.mjs, but only
+// to read the already-implemented NODE_FLOOR constant (Task 3), not to
+// exercise a stub.
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { NODE_FLOOR } from '../hooks/lib/rules.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.join(HERE, '..');
 
 const FIXTURE_PATH = path.join(REPO_ROOT, 'tests', 'fixtures', 'config.json');
 const INIT_PATH = path.join(REPO_ROOT, 'commands', 'tdd-init.md');
+const SKILL_PATH = path.join(REPO_ROOT, 'skills', 'run-tdd-cycle', 'SKILL.md');
 const SPEC_PATH = path.join(REPO_ROOT, 'docs', 'superpowers', 'specs', '2026-07-30-tdd-subagent-workflow-design.md');
 
 const fixture = JSON.parse(fs.readFileSync(FIXTURE_PATH, 'utf8'));
@@ -260,5 +265,59 @@ test('drift check: every key the spec declares also appears in the tdd-init.md S
     [],
     `key(s) declared in the spec's schema but absent from commands/tdd-init.md's Step 7 block: ${missingFromTemplate.join(', ')} — ` +
       'this is the exact drift a fixture-derived loop cannot see (plan Task 8)',
+  );
+});
+
+// ---------------------------------------------------------------------------
+// The Node floor: preflight (SKILL.md) and /tdd-init (tdd-init.md) both state
+// it as a plain literal ("v22"), rather than resolving hooks/lib/rules.mjs's
+// NODE_FLOOR at runtime — the orchestrator's Bash tool does not have
+// CLAUDE_PLUGIN_ROOT (or CLAUDE_PROJECT_DIR) set, only the spawned hook
+// process does, so a path built from it does not resolve for the
+// orchestrator (plan Task 4, review round 2). That makes the literal a THIRD
+// copy of NODE_FLOOR that can silently drift the next time someone bumps the
+// constant in hooks/lib/rules.mjs without touching either prompt. This closes
+// that gap the same way the schema drift checks above do: derive the
+// expected value from the source of truth and assert the prompts match it.
+// ---------------------------------------------------------------------------
+
+/**
+ * Extracts the Node floor claim ("...is at least vNN...") from the single
+ * line matching `lineStartRe`. Scoped to that one line deliberately: a
+ * whole-file match would also catch incidental version numbers elsewhere in
+ * the same prose (e.g. the measured "22.23.2" patch version in the
+ * fnm-vs-Bash-tool paragraph a few lines down), which is exactly the "whole
+ * haystack passes when the specific block is wrong" scoping bug this file
+ * already guards against for the Step 7 template above.
+ * @param {string} text
+ * @param {RegExp} lineStartRe
+ * @returns {number | null}
+ */
+function extractFloorClaim(text, lineStartRe) {
+  const line = text.split('\n').find((l) => lineStartRe.test(l));
+  if (line === undefined) return null;
+  const match = line.match(/\bis at least v(\d+)\b/);
+  return match ? Number(match[1]) : null;
+}
+
+const skillText = fs.readFileSync(SKILL_PATH, 'utf8');
+
+test("drift check: SKILL.md preflight item 6 states the node floor as hooks/lib/rules.mjs's NODE_FLOOR", () => {
+  const stated = extractFloorClaim(skillText, /^6\. \*\*Node is on `PATH`/);
+  assert.notEqual(stated, null, "could not locate preflight item 6's floor claim line — has its wording changed?");
+  assert.equal(
+    stated,
+    NODE_FLOOR,
+    `SKILL.md states the Node floor as v${stated}, but hooks/lib/rules.mjs's NODE_FLOOR is ${NODE_FLOOR} — the prompt has drifted from the source of truth`,
+  );
+});
+
+test("drift check: tdd-init.md prerequisites state the node floor as hooks/lib/rules.mjs's NODE_FLOOR", () => {
+  const stated = extractFloorClaim(initText, /^- Node is on `PATH`/);
+  assert.notEqual(stated, null, "could not locate tdd-init.md's floor claim line — has its wording changed?");
+  assert.equal(
+    stated,
+    NODE_FLOOR,
+    `tdd-init.md states the Node floor as v${stated}, but hooks/lib/rules.mjs's NODE_FLOOR is ${NODE_FLOOR} — the prompt has drifted from the source of truth`,
   );
 });
