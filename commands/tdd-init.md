@@ -234,6 +234,21 @@ Commit is mandatory, not optional. `/tdd`'s preflight refuses to start against
 a dirty tree, so leaving these files uncommitted makes the very next command
 fail on this command's side effects.
 
+**Verify the commit actually tracked the file — do not trust the commit's
+exit code alone.** `git add` on a path matched by an existing `.gitignore`
+rule is a silent no-op unless forced with `-f`: the `git commit` above still
+reports success, but `.tdd/config.json` stays untracked, and the very
+first-run path this step exists to protect breaks again on the next `/tdd`
+preflight. Confirm with:
+
+    git ls-files .tdd/config.json
+
+Empty output means the file did not get tracked. Do not silently `-f` past
+this — find out *why* it is ignored first (`git check-ignore -v
+.tdd/config.json`) and tell the user. A stray `.gitignore` rule inherited from
+a template or a prior project is a real possibility, and forcing the add
+without asking could commit something the user deliberately excluded.
+
 ## 9. Confirm
 
 Tell the user the config is written and committed, and that `/tdd <spec-path>`
