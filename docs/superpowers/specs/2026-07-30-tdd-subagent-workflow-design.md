@@ -297,11 +297,11 @@ Several branches discard an agent's work. **`git checkout -- .` does not do it**
 Revert means both:
 
 ```
-git checkout -- <pathspec>     # restore tracked edits
+git reset --hard HEAD          # restore every tracked file to HEAD — no pathspec, nothing to abort on
 git clean -fd -- <pathspec>    # remove new files
 ```
 
-Only `clean` takes a pathspec; `git reset --hard -- <path>` fails outright. Reset is therefore tree-wide, which is safe only because preflight requires a clean tree and exactly one agent writes per dispatch.
+**`checkout` is retired from this mechanism** *(iteration 2)*. `git checkout -- <path1> <path2>` validates every pathspec before touching anything, and if any one of them does not match a file git already tracks, the whole command aborts and restores *nothing* — not even the paths that would have matched. A pathspec built from what a check found routinely mixes a tracked-modified path with an untracked-new one (Red's tests are almost always new files), which is exactly the shape that triggers this. `reset --hard` has no such failure mode: it takes no pathspec at all — `git reset --hard -- <path>` fails outright with `fatal: Cannot do hard reset with paths` — so there is nothing for it to fail to match. Only `clean` takes a pathspec; reset is therefore tree-wide, which is safe only because preflight requires a clean tree and exactly one agent writes per dispatch.
 
 **The pathspec is every path the triggering check found, not the role's write globs** *(iteration 2)*. Scoping to the role's globs was wrong in the one scenario the revert exists for: a guardrail violation is *by definition* a write to a path that does not match the role's globs — that is what makes it a violation rather than ordinary work. In the backstop case the audit exists to catch, the rogue file sits outside the glob by construction, and a glob-scoped `clean` cannot touch it. Nor is the pathspec only the paths that broke the match: a violating dispatch usually also writes legitimate in-glob files alongside the rogue one, and scoping to the offending subset alone leaves those behind — reproducing this section's founding bug (a rejected file surviving to be swept into a later commit) for the half of the dispatch that happened to pass. Fall back to the role's globs only when the triggering check named nothing at all, which is the ordinary discard case (a rejected `passing-flat` test) rather than a violation.
 
