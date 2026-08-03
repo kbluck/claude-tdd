@@ -194,7 +194,7 @@ There is no phase marker. The hook learns the caller's role from the payload's `
 4. **Spec file is readable and non-empty.**
 
 5. **The glob partition is still exhaustive** — `git ls-files` produces no file matching neither `test`, `source`, nor `ignore`. Catches drift from edits made between runs. See *Writes are an allowlist; reads are a denylist* below for why this is load-bearing.
-6. **Node is on `PATH` and is at least the supported LTS** — `guard.mjs` runs under it. Check the version, not merely the presence: an interpreter too old to run the guard fails exactly like a missing one, and both fail open.
+6. **Node is on `PATH` and is at least the supported LTS** — `guard.mjs` runs under it. Check the version, not merely the presence: an interpreter too old to run the guard denies loudly on its own — `guard.mjs` checks `process.version` before anything else can throw and exits 2 below the floor. Only a *missing* interpreter fails open, because the hook process never starts at all.
 
    **This check proves less than it appears to, and item 7 is what closes the gap.** Preflight runs `node --version` through the orchestrator's `Bash` tool, which proves node is on the *Bash tool's* `PATH`. The hook is spawned by Claude Code directly, in exec form, with no shell — so it resolves `node` against a different environment. The two can disagree, and when they do this check passes while the guard cannot launch.
 
