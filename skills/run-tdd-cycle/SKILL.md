@@ -16,8 +16,7 @@ Announce: "Using run-tdd-cycle to implement `<spec>`."
 1. **Git repo, clean tree.** Reverting a dispatch destroys working-tree state — see *Reverting a dispatch* for what that actually
    runs. Dirty → stop, ask the user to commit or stash.
 2. **`.tdd/config.json` exists.** Missing → tell the user to run `/tdd-init`. Do not write one yourself.
-3. **`jq` on PATH.** Missing → stop. The guard fails closed without it and would deny every tool call.
-4. **The full suite passes.** Run the configured test command. Green's stop condition is "this test now passes" and Refactor's is
+3. **The full suite passes.** Run the configured test command. Green's stop condition is "this test now passes" and Refactor's is
    "all tests still pass" — both are meaningless against an already-red suite. If red, list the failing test IDs, ask the user whether
    to proceed, and if so record them in `checklist.json` as `knownRed`.
 
@@ -26,16 +25,33 @@ Announce: "Using run-tdd-cycle to implement `<spec>`."
    must receive the list or they will refuse to run for the rest of the session. Pass `knownRed` in every Refactor and Mutate dispatch.
    When you check a suite yourself, subtract it before judging. If you find yourself unable to thread it somewhere, stop and say so
    rather than proceeding with an allowlist that only exists in the file.
+4. **Spec file readable and non-empty.** Unreadable or empty → stop; there is nothing to decompose.
 5. **The glob partition is still exhaustive.** `git ls-files`; every path must match `test`, `source`, or `ignore`. Drift since
    init → stop and tell the user to re-run `/tdd-init`. This is what makes the guard's read denylist sound.
-6. **Spec file readable and non-empty.** Unreadable or empty → stop; there is nothing to decompose.
-7. **The guard actually sees `agent_type`.** Dispatch a throwaway subagent told to read one file under `globs.source` while claiming
-   no role, then confirm the guard evaluated it. Cheaper equivalent: dispatch `tdd-red` with the instruction "read `<a source file>`
-   and report the first line" and confirm it comes back **denied**.
+6. **Node is on `PATH` and is at least the floor `hooks/lib/rules.mjs` exports as `NODE_FLOOR`** — a floor, not a pin; a newer
+   major passes. Run `node --version` through the `Bash` tool. Missing, or below the floor → stop and tell the user to install or
+   upgrade Node.
 
-   If that read succeeds, the guard is not seeing `agent_type`, every subagent looks like the orchestrator, and **read isolation
-   is silently absent**. Stop. Do not run unenforced — reads leave no trace in a diff, so nothing downstream would ever notice.
-   `agent_type` is undocumented (found empirically on Claude Code 2.1.220) and this is the check that catches it disappearing.
+   **The two failures are not the same shape.** A too-old-but-*present* Node does launch `guard.mjs`, which checks its own
+   version first, before anything else can throw, and denies loudly with exit 2 — that path is genuinely fail-closed on its own.
+   A missing Node never launches the guard at all: `PreToolUse` sees a non-2 exit and silently *permits* the call, exactly like a
+   missing shell did. Preflight exists to catch both loudly, at setup, rather than let either reach a live dispatch.
+
+   **This proves less than it looks like it proves — item 7 is what closes the gap.** This check only shows that node is on the
+   *`Bash` tool's* `PATH`. The hook itself is spawned by Claude Code directly, in exec form, with no shell, so it resolves `node`
+   against a different environment — and under a per-shell version manager (`fnm`, `nvm`) the two routinely disagree. Measured on
+   the development machine: an IDE-hosted session resolved the hook's `node` to a bundled 24.13.0 while `fnm` gave the `Bash` tool
+   22.23.2, at the same moment on the same machine. Report both results to the user: a green version check here is necessary and
+   **never sufficient** — do not let it read as proof the guard can start. Only item 7's observed denial is that proof.
+7. **The guard actually sees `agent_type`.** This is also the only check that runs inside the interpreter Claude Code actually
+   hands the hook — item 6's version check cannot see that far. Dispatch a throwaway subagent told to read one file under
+   `globs.source` while claiming no role, then confirm the guard evaluated it. Cheaper equivalent: dispatch `tdd-red` with the
+   instruction "read `<a source file>` and report the first line" and confirm it comes back **denied**.
+
+   If that read succeeds, the guard is not seeing `agent_type` — or never launched at all, which looks identical from here — every
+   subagent looks like the orchestrator, and **read isolation is silently absent**. Stop. Do not run unenforced — reads leave no
+   trace in a diff, so nothing downstream would ever notice. `agent_type` is undocumented (found empirically on Claude Code
+   2.1.220) and this is the check that catches it disappearing.
 
    **Only an observed denial passes this check.** If the probe cannot be dispatched, errors, or returns something you cannot
    interpret, that is not a pass — it is the same unknown state as a missing denial, and it fails closed. The one outcome that
