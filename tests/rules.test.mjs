@@ -373,8 +373,25 @@ test('case-fold: a wrong-case WRITE is DENIED, not folded into an allow (allowli
   assertDeny(pathVerdict({ role: GREEN, mode: 'write', relPath: 'SRC/a.py', testGlobs: TEST_GLOBS, sourceGlobs: SOURCE_GLOBS }));
 });
 
-test('case-fold: a wrong-case WRITE of a test file is DENIED for red too', () => {
-  assertDeny(pathVerdict({ role: RED, mode: 'write', relPath: 'TESTS/test_a.py', testGlobs: TEST_GLOBS, sourceGlobs: SOURCE_GLOBS }));
+test('case-fold: a wrong-case WRITE of a test file is DENIED for red too, against a directory-anchored glob', () => {
+  // The shared TEST_GLOBS cannot demonstrate this property: its second entry,
+  // '**/test_*.py', is DIRECTORY-AGNOSTIC by construction — a leading '**/'
+  // consumes whatever segment precedes the basename, including 'TESTS',
+  // without regard to case, because there is no literal character in '**' to
+  // be case-sensitive about. 'TESTS/test_a.py' therefore matches
+  // '**/test_*.py' LITERALLY, with no folding involved at all, and the
+  // config genuinely authorises that write — asserting DENY against
+  // TEST_GLOBS would pin a false property, not a folding bug (ruled: the
+  // TEST_GLOBS-based version of this test was wrong, not the implementation;
+  // bash's tdd_glob_match has the identical directory-agnostic behaviour).
+  //
+  // A DIRECTORY-ANCHORED glob (tests/**-shaped, no leading **/) is what
+  // actually exercises "the allowlist matches the literal path only": the
+  // wrong-case 'TESTS' segment fails a literal 'tests/**' match, so the
+  // write must stay denied rather than being folded into an allow — the
+  // same asymmetry the 'SRC/a.py' sibling test above pins for green/source.
+  const DIRECTORY_ANCHORED_TEST_GLOBS = ['tests/**'];
+  assertDeny(pathVerdict({ role: RED, mode: 'write', relPath: 'TESTS/test_a.py', testGlobs: DIRECTORY_ANCHORED_TEST_GLOBS, sourceGlobs: SOURCE_GLOBS }));
 });
 
 test('case-fold: literal-case WRITE still allows (sanity baseline — folding is additive for reads only, not a break of the ordinary case)', () => {
