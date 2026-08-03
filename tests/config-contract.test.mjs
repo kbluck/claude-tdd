@@ -160,6 +160,46 @@ test('tdd-init.md: the derived template loop enumerated at least 19 keys (a brok
 });
 
 // ---------------------------------------------------------------------------
+// Step 8 (Commit) must verify its own commit landed, not just report success.
+// `git add` on a gitignored path is a silent no-op without `-f`: the commit
+// still exits 0, but .tdd/config.json stays untracked and the first-run path
+// this step exists to protect breaks again on the very next /tdd preflight.
+// Plan Task 10 ("config-committed contradiction and the missing-config
+// test"); spec line ~588 names the exact check: `git ls-files
+// .tdd/config.json` must be non-empty after the commit.
+//
+// Scoped to the Step 8 block, not the whole file — the same reasoning as the
+// Step 7 scoping above: "git" and "commit" both appear elsewhere in this
+// document's prose (step 1's git-repo prerequisite, the closing summary in
+// step 9), so a whole-file match would pass even if the verification command
+// were missing from the block a model actually acts on.
+// ---------------------------------------------------------------------------
+
+const step8Block = extractLineRange(initText, /^## 8\. Commit/, /^## 9\./);
+
+test('tdd-init.md: the Step 8 (Commit) block was located at all (start anchor holds)', () => {
+  assert.notEqual(step8Block, null, "'## 8. Commit' heading not found — every assertion below would fail in a heap for this one reason");
+  assert.ok(step8Block.includes('git commit'), 'the located block does not look like the commit step');
+});
+
+test('tdd-init.md: the extracted Step 8 block stops before step 9 (end anchor still matches)', () => {
+  // If the end anchor stopped matching, extractLineRange runs to EOF instead
+  // of the intended boundary, silently sweeping in step 9's prose (which also
+  // mentions "committed") and corrupting the assertion below into a
+  // whole-file-equivalent check.
+  assert.ok(!step8Block.includes('/tdd <spec-path>'), 'the extracted block reached step 9\'s closing summary — the end anchor is no longer matching');
+});
+
+test('tdd-init.md: Step 8 verifies its own commit landed via `git ls-files .tdd/config.json`', () => {
+  assert.ok(
+    (step8Block ?? '').includes('git ls-files .tdd/config.json'),
+    'Step 8 must run `git ls-files .tdd/config.json` after committing and confirm it is non-empty — ' +
+      'a silent `git add` no-op on a gitignored path would otherwise leave .tdd/config.json untracked ' +
+      'with no error, breaking the first-run path this step exists to protect',
+  );
+});
+
+// ---------------------------------------------------------------------------
 // The spec holds a THIRD copy of this schema. Drift there misleads whoever
 // reads the design next — which is how the template drifted in the first
 // place (see the singleTerse check at the bottom of this file).
