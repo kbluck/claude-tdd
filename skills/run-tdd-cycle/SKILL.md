@@ -139,21 +139,44 @@ files but leaves untracked ones in place, and Red's tests are almost always new 
 `git checkout -- .`, a rejected `passing-flat` test was still sitting in the tree, where the next item's commit would have swept it
 up.
 
+**Scoping `checkout` to a pathspec does not fix that, and is worse.** `git checkout -- <path1> <path2>` validates every pathspec
+before touching anything: if *any* one of them does not match a file git already tracks, the whole command aborts and restores
+*nothing* — not even the paths that would have matched. Verified: `git checkout -- tracked.py untracked.py`, where `tracked.py`
+was a legitimately modified tracked file and `untracked.py` was new, exited 1 and left `tracked.py` unrestored. `tracked.py`
+alone (no untracked sibling in the pathspec) exited 0 and succeeded. The exit code does distinguish the two cases reliably, but
+the tree state is what actually matters — an orchestrator that ran this inside a larger command (piped through a filter, or
+guarded by `|| true` the way a defensive probe script might) could still lose the signal and read the error line without
+noticing nothing was restored. This is the ordinary shape of a violating dispatch, not an edge case — Red's tests are almost
+always new files, so a pathspec built from what a check found routinely mixes a tracked-modified path with an untracked-new
+one. The consequence is the worst available shape: `checkout` silently restores nothing, `clean` (which does not share this
+failure — see below) still removes the untracked files, and the tree looks reverted while the tracked modification survives
+into the next commit. A fourth instance of the class this section opens with — not created by scoping the pathspec to fix the
+third, but *exposed* by it: this failure was already latent in `checkout`'s literal-pathspec handling, and the pre-Task-7 glob
+pathspec happened to mask it, since a glob resolves against tracked files only and never fails to match the way a literal
+untracked path does.
+
 Revert means both:
 
-    git checkout -- <pathspec>     # restore tracked edits
-    git clean -fd -- <pathspec>    # remove new files
+    git reset --hard HEAD          # restore every tracked file to HEAD — no pathspec, so nothing to abort on
+    git clean -fd -- <pathspec>    # remove the untracked paths this dispatch's check found
 
-**`git reset --hard HEAD` has the identical blind spot** and appears wherever a branch resets to the last commit rather than
-discarding working-tree edits — Refactor's coverage gate, Refactor's incomplete-restore check, and the mutation pass's tree-clean
-recovery. Verified: `reset --hard` leaves untracked files exactly as `checkout` does. Those sites mean:
+`git reset --hard` replaces `checkout` here, everywhere in this file — not only at the sites that already used it before this
+fix (Refactor's coverage gate, Refactor's incomplete-restore check, the mutation pass's tree-clean recovery). `reset --hard` is
+tree-wide and **cannot** be scoped: `git reset --hard -- <path>` fails with `fatal: Cannot do hard reset with paths.` That is
+exactly what makes it immune to the failure above — with no pathspec to validate, it cannot abort partway through one. It is safe
+to run unscoped only because preflight requires a clean tree and exactly one agent writes per dispatch, so the only tracked
+changes to discard are ever that dispatch's own; that argument already justified the three sites using it before this fix, and
+it holds identically at the rest, so nothing is lost by extending it to all of them.
 
-    git reset --hard HEAD
-    git clean -fd -- <pathspec>
+**`clean` does not share `checkout`'s atomicity failure.** `git clean -fd -- <path1> <path2>` evaluates each pathspec entry on
+its own: an entry that is not an untracked path is silently skipped, not treated as an error that aborts the rest. Verified:
+`git clean -fd -- tracked.py untracked.py` removed only `untracked.py` and exited 0. This is why the pathspec below can safely
+be *every* path a check found, tracked or not, without splitting it first — `reset --hard` handles the tracked half
+unconditionally, and `clean` correctly no-ops on whichever entries in its own list turn out to already be tracked.
 
-The mutation-pass case is the sharpest: that reset is the safety net for an agent that failed to revert its own mutations. It
-detects the problem with `git status --porcelain`, which *does* show untracked files, and then applies a command that cannot remove
-them.
+The mutation-pass case is the sharpest illustration of why `clean` must be paired with something at all: that reset is the safety
+net for an agent that failed to revert its own mutations. It detects the problem with `git status --porcelain`, which *does* show
+untracked files, and `reset --hard` alone can never remove them — only `clean` can.
 
 **Only the `clean` half takes a pathspec — and that pathspec is every path the triggering check actually found, not the role's
 write globs.** A guardrail violation is *by definition* a write to a path that does not match the role's globs — that is what
@@ -184,17 +207,14 @@ glob by construction, and a `clean` scoped to the glob can never reach it. Two c
   bucket: every one of their discards is the found-paths case above.
 
 Either way, an unscoped `git clean -fd` would delete legitimately untracked work elsewhere in the tree, so never run `clean`
-without one of these two pathspecs. (`clean` without `-x` spares gitignored paths, so the venv, the checklist and the coverage
-report survive either way; do not add `-x`.) When the pathspec names a path this dispatch only ever created new, `git checkout`
-has nothing tracked to restore and errors with `fatal: pathspec '<path>' did not match any file(s) known to git` — expected, and
-harmless: `clean` is the half that actually removes a new file, and it still runs.
+without one of these two pathspecs — the found paths, or the role's glob fallback. (`clean` without `-x` spares gitignored paths,
+so the venv, the checklist and the coverage report survive either way; do not add `-x`.)
 
-`git reset --hard` is tree-wide and **cannot** be scoped: `git reset --hard -- <path>` fails with `fatal: Cannot do hard reset with
-paths.` That is safe here only because preflight requires a clean tree and exactly one agent writes per dispatch, so the only
-tracked changes to discard are that dispatch's own.
-
-Branches below say **revert** or **reset and clean** and point here. They do not name the bare git command, deliberately: an
-orchestrator reading `git checkout -- .` at the point of use will run exactly that, which is the defect this section exists to fix.
+Branches below say **revert** or **reset and clean** and point here — both now name the identical mechanism, `reset --hard HEAD`
+plus a scoped `clean`. They do not spell out the bare git commands at the point of use, deliberately: an orchestrator reading
+`git checkout -- .`, or a scoped `git checkout -- <pathspec>`, at the point of use would run exactly that — which is the defect
+this section exists to fix, twice over now. Keeping the mechanism defined in exactly one place is also what let this fix land as
+an edit to this section alone, rather than nine separate edits at every call site.
 
 ## Coverage baselines
 
