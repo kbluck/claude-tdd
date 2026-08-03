@@ -61,6 +61,18 @@ There is no phase marker to clear — the guard identifies callers from the payl
 
 ## Decompose
 
+**Decompose runs only when the checklist is absent.** Before doing anything else, check whether `.tdd/checklist.json`
+exists and has items:
+
+- **Absent, or present with no items** → this is a first run. Continue below.
+- **Present with items** → this is a resume, not a first run. Load the file exactly as written — every field, including any this
+  section does not itself populate (`baselines`, for instance, is written by the coverage-gate machinery elsewhere in this file, not
+  here) — rather than reconstructing only the fields below. Do not write a new checklist: doing so is exactly what discarded every
+  item's `status`, `knownRed`, `mutationRoundsRun`, and the baselines before this branch existed. Re-surface every item with status
+  `blocked` and ask the user before continuing (see *Completion*), then resume the per-item loop from the first item whose status is
+  not terminal — `pending`, `red`, and `green` are not terminal; `done`, `redundant`, and `blocked` are. Skip the approval step below;
+  it is for a new decomposition, not a continued one.
+
 Read the spec once. Write `.tdd/checklist.json`:
 
     {
@@ -89,7 +101,7 @@ empty list satisfies immediately — so a spec you could not decompose would rep
 item, state the count when you present it, and if the spec yields none, say so and stop rather than proceeding.
 
 `status`: `pending` → `red` → `green` → `done`, or terminating at `redundant` or `blocked`. Write the file after every transition.
-An interrupted run resumes from this file, not from your context.
+An interrupted run resumes from this file, not from your context — the branch at the top of this section is exactly how.
 
 ## Reverting a dispatch
 
@@ -315,13 +327,16 @@ rule is that a restore is not complete until the cache is too.
          "mutant": { "file": ..., "line": ...,
                      "mutations": [ ...every mutant that revealed this gap... ] } }
 
-7. Survivors found → report the count and **resume the per-item loop**. The new items run as ordinary Red→Green cycles.
-8. No survivors, or `mutationRoundsRun` (read from `checklist.json`) has reached `limits.mutationRounds` → done. Read the count from
-   the file, not from memory of this session — on a resumed run your context has no record of passes already spent.
-
-9. Increment `mutationRoundsRun` in `checklist.json` and write the file.
-
-That increment is a numbered step rather than trailing advice because it is the one piece of loop state nothing else reconstructs.
+7. **Increment `mutationRoundsRun` in `checklist.json` and write the file — before the branch below, not after it.** This is the one
+   piece of loop state nothing else reconstructs, and the survivor branch hands control back to the per-item loop without ever
+   reaching a step written later, so it must be written first.
+8. Branch on survivors and the count just written:
+   - No survivors → done.
+   - Survivors found, and `mutationRoundsRun` (read back from `checklist.json`, not from memory — on a resumed run your context has
+     no record of passes already spent) has not yet reached `limits.mutationRounds` → report the survivor count and **resume the
+     per-item loop**. The new items run as ordinary Red→Green cycles.
+   - Survivors found, but `mutationRoundsRun` has reached `limits.mutationRounds` → done. Report the survivors found but not
+     pursued, so the cap's cost is visible rather than silently swallowed.
 
 If the pass skipped mutants because of `mutantsPerPass`, say how many. A capped pass that reports "no survivors" without mentioning
 the cap reads as a clean bill of health it did not earn.
