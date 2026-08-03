@@ -53,6 +53,52 @@ test('sanity: hooks/guard.mjs exists (Task 3 has landed) — the tests below exe
   assert.equal(fs.existsSync(GUARD_MJS_PATH), true, 'hooks/guard.mjs is missing — Task 3 is expected to have created it');
 });
 
+/**
+ * Read guard.mjs's TOOL_DISPATCH table keys straight from its source text,
+ * rather than importing the module — guard.mjs calls main() unconditionally
+ * at import time (it reads stdin synchronously), so importing it here would
+ * hang the test runner. This mirrors the text-extraction approach
+ * frontmatterName() above already uses against agent files.
+ */
+function toolDispatchKeys() {
+  const source = fs.readFileSync(GUARD_MJS_PATH, 'utf8');
+  const block = source.match(/const TOOL_DISPATCH = \{([\s\S]*?)\n\};/);
+  assert.notEqual(block, null, 'could not locate the TOOL_DISPATCH table in guard.mjs — has it been renamed?');
+  const keys = [...block[1].matchAll(/^\s*(\w+):/gm)].map((m) => m[1]);
+  assert.ok(keys.length > 0, 'TOOL_DISPATCH table appears to declare no keys');
+  return keys;
+}
+
+test("hooks.json: the matcher's tool set is exactly guard.mjs's TOOL_DISPATCH keys — not a second hand-typed copy", () => {
+  // hooks.json's matcher gates which tool calls ever reach guard.mjs at all;
+  // a tool missing from the matcher never invokes the guard regardless of
+  // what TOOL_DISPATCH says about it (dead code), and a tool present in the
+  // matcher but absent from TOOL_DISPATCH falls through to guard.mjs's
+  // "unrecognized tool" deny (harmless, but a sign the two have drifted).
+  // Derived from guard.mjs's own table rather than hardcoded here a second
+  // time — AGENTS.md already records two hand-maintained copies of one value
+  // as a defect class this project has paid for.
+  const hooksJson = JSON.parse(fs.readFileSync(HOOKS_JSON_PATH, 'utf8'));
+  const preToolUse = hooksJson?.hooks?.PreToolUse ?? [];
+  const guardEntry = preToolUse.find((entry) =>
+    (entry.hooks ?? []).some((h) => h.type === 'command' && JSON.stringify(h).includes('guard')));
+  assert.notEqual(guardEntry, undefined, 'no PreToolUse entry references the guard');
+  assert.equal(typeof guardEntry.matcher, 'string', 'the guard\'s PreToolUse entry has no string matcher');
+
+  const matcherTools = guardEntry.matcher.split('|');
+  const dispatchTools = toolDispatchKeys();
+
+  // Compared as sorted sets, not raw string/order equality: a regex
+  // alternation matches identically regardless of the order its branches are
+  // written in, so reordering either list has no security effect and must
+  // not fail this test -- only an actual add or remove should.
+  assert.deepEqual(
+    [...matcherTools].sort(),
+    [...dispatchTools].sort(),
+    `hooks.json matcher tools (${matcherTools.join(', ')}) must be exactly guard.mjs's TOOL_DISPATCH keys (${dispatchTools.join(', ')})`,
+  );
+});
+
 // ---------------------------------------------------------------------------
 // Sandbox + payload helpers
 // ---------------------------------------------------------------------------
