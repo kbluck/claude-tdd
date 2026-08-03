@@ -37,6 +37,7 @@ import {
   assertDeny,
   assertVerdictShape,
   assertDistinctReasons,
+  assertSameVerdict,
 } from './helpers/verdict-assertions.mjs';
 
 const [RED, GREEN, REFACTOR, MUTATE] = ROLES;
@@ -266,6 +267,26 @@ test('fail-closed: unknown mode denies', () => {
 
 test('fail-closed: null relPath denies', () => {
   assertDeny(pathVerdict({ role: RED, mode: 'write', relPath: null, testGlobs: TEST_GLOBS, sourceGlobs: SOURCE_GLOBS }));
+});
+
+// A null relPath denies on READ too, not merely on write — a deliberate
+// departure from the retired bash guard, which left an out-of-root path
+// absolute, matched no glob, and (reads being a denylist) PERMITTED it. An
+// unresolvable/unplaceable path cannot be classified against the
+// test/source/ignore partition the whole read-isolation argument depends on
+// being exhaustive; that is the "check cannot be evaluated" case, and this
+// design's governing rule is that such a case must not reach allow. See the
+// spec's canonicalisation section for the write-up. Compared with
+// assertSameVerdict rather than two separate assertDeny calls so this reads
+// as ONE property (denies identically regardless of mode), not two
+// coincidentally-identical ones — and so the reason is asserted to actually
+// NAME the rule, not merely that the call denied.
+test('fail-closed: null relPath denies for read too, with the identical reason as write (one property, not two)', () => {
+  const writeVerdict = pathVerdict({ role: RED, mode: 'write', relPath: null, testGlobs: TEST_GLOBS, sourceGlobs: SOURCE_GLOBS });
+  const readVerdict = pathVerdict({ role: RED, mode: 'read', relPath: null, testGlobs: TEST_GLOBS, sourceGlobs: SOURCE_GLOBS });
+  assertDeny(writeVerdict, 'null relPath denies a write');
+  assertDeny(readVerdict, 'null relPath denies a read');
+  assertSameVerdict(writeVerdict, readVerdict, 'a null relPath must be denied identically regardless of mode — the path cannot be classified at all, before mode-specific rules ever run');
 });
 
 test('fail-closed: testGlobs that is not an array (string) denies a red write', () => {

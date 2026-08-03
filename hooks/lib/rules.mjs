@@ -208,6 +208,16 @@ export function toRepoRelative(targetPath, rootPath) {
  * Every field is validated. A missing role, an unknown mode, a null relPath, or
  * a glob list that is not an array of strings must deny.
  *
+ * A null relPath (from toRepoRelative: unresolvable, or resolved OUTSIDE the
+ * root) denies on READ as well as write. This is a deliberate departure from
+ * the retired bash guard, which left an out-of-root path absolute, matched no
+ * configured glob, and — reads being a denylist — permitted it. An unplaceable
+ * path cannot be classified against the test/source/ignore partition the
+ * whole read-isolation argument depends on being exhaustive; that is the
+ * "check cannot be evaluated" case, and this design's governing rule is that
+ * such a case must not reach allow, on either side of the mode split. See the
+ * spec's canonicalisation section.
+ *
  * @param {object} input
  * @param {string} input.role bare role name, namespace already stripped
  * @param {'read'|'write'} input.mode

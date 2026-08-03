@@ -89,6 +89,25 @@ test('toRepoRelative: a real path OUTSIDE the root returns null (not "relative t
   assert.equal(rel, null, 'a path that is an ancestor of the root, not inside it, must not be treated as in-root');
 });
 
+// Chains the property above into pathVerdict, at the SEAM, rather than
+// asserting it twice in isolation. rules.test.mjs pins "pathVerdict(relPath:
+// null) denies on read" as a unit property with a hand-passed null; this
+// pins that toRepoRelative's REAL null output — for a real out-of-root path,
+// resolved through the actual function guard.mjs calls in production —
+// reaches pathVerdict and denies there too. Deliberately a departure from
+// the retired bash guard, which left an out-of-root path absolute, matched
+// no configured glob, and (reads being a denylist) PERMITTED it: an
+// unplaceable path cannot be classified against the test/source/ignore
+// partition the read-isolation argument depends on being exhaustive, so
+// "cannot be evaluated" must not reach allow, on either side of the API.
+test('toRepoRelative + pathVerdict: a path resolving outside the root denies on read at the seam, not just as a hand-passed null', () => {
+  const outside = fs.realpathSync.native(os.tmpdir());
+  const rel = toRepoRelative(outside, ROOT);
+  assert.equal(rel, null, 'sanity: still resolves to null through the real function');
+  const verdict = pathVerdict({ role: RED, mode: 'read', relPath: rel, testGlobs: TEST_GLOBS, sourceGlobs: SOURCE_GLOBS });
+  assertDeny(verdict, 'a read of a real path outside the root must deny, not fall through to "no match against the denylist => allow"');
+});
+
 test('toRepoRelative: a root that does not resolve at all returns null', () => {
   const bogusRoot = path.join(ROOT, 'this-directory-was-never-created');
   const target = path.join(bogusRoot, 'src', 'a.py');
