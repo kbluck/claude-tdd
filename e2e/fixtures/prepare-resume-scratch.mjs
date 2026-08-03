@@ -49,26 +49,13 @@ export function prepareResumeScratch(targetDir) {
   // the worktree starts with neither, matching a fresh clone.
   git(['worktree', 'add', '--detach', '--quiet', dir, 'HEAD'], REPO_ROOT);
 
-  const calcPath = path.join(dir, 'e2e', 'src', 'calc', '__init__.py');
-  fs.writeFileSync(calcPath, 'def add(a, b):\n    return a + b\n');
-
-  const dividePath = path.join(dir, 'e2e', 'tests', 'test_divide.py');
-  fs.rmSync(dividePath, { force: true });
-
-  git(['add', '-A'], dir);
-  git(
-    [
-      'commit',
-      '-q',
-      '-m',
-      'scratch: roll back e2e/ to the interrupted state checklist-resume-seed.json describes (local resume test only)',
-    ],
-    dir,
-  );
-
-  fs.mkdirSync(path.join(dir, '.tdd'), { recursive: true });
-  fs.copyFileSync(SEED_PATH, path.join(dir, '.tdd', 'checklist.json'));
-
+  // From this point on, the worktree is registered in the REAL repository's
+  // .git/worktrees/ -- an entry that does not show up in `git status
+  // --short`, only in `git worktree list`, so it accumulates silently if
+  // left behind. Everything below can throw (a full disk, a permissions
+  // error, a `git commit` with nothing to commit if the fixture ever drifts),
+  // so `cleanup` is built now, immediately after the thing it tears down
+  // exists, and any throw from here on routes through it before propagating.
   const cleanup = () => {
     try {
       git(['worktree', 'remove', '--force', dir], REPO_ROOT);
@@ -82,6 +69,34 @@ export function prepareResumeScratch(targetDir) {
       fs.rmSync(dir, { recursive: true, force: true });
     }
   };
+
+  try {
+    const calcPath = path.join(dir, 'e2e', 'src', 'calc', '__init__.py');
+    fs.writeFileSync(calcPath, 'def add(a, b):\n    return a + b\n');
+
+    const dividePath = path.join(dir, 'e2e', 'tests', 'test_divide.py');
+    fs.rmSync(dividePath, { force: true });
+
+    // Explicit paths, not `-A`: the file set touched above is fully known
+    // and fixed, so naming it costs nothing, and this repository has a
+    // recorded incident of a broad `git add` sweeping up pytest bytecode.
+    git(['add', 'e2e/src/calc/__init__.py', 'e2e/tests/test_divide.py'], dir);
+    git(
+      [
+        'commit',
+        '-q',
+        '-m',
+        'scratch: roll back e2e/ to the interrupted state checklist-resume-seed.json describes (local resume test only)',
+      ],
+      dir,
+    );
+
+    fs.mkdirSync(path.join(dir, '.tdd'), { recursive: true });
+    fs.copyFileSync(SEED_PATH, path.join(dir, '.tdd', 'checklist.json'));
+  } catch (err) {
+    cleanup();
+    throw err;
+  }
 
   return { scratchDir: dir, cleanup };
 }

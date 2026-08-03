@@ -93,6 +93,28 @@ function runFixturePytest(cwd = REPO_ROOT) {
   });
 }
 
+/**
+ * Assert a spawnSync result represents a process that actually RAN and
+ * exited with a non-zero status -- not a process that never started.
+ * `spawnSync` returns `status: null` when the executable could not be
+ * spawned at all (bad path, missing interpreter) or was killed by a signal,
+ * and `null !== 0` is true -- so a bare `assert.notEqual(result.status, 0,
+ * ...)` reports "ok" identically for a real failure and for a spawn that
+ * never happened. Every check in this file that means "the command failed"
+ * must go through this, not a raw `assert.notEqual`.
+ * @param {import('node:child_process').SpawnSyncReturns<string>} result
+ * @param {string} message
+ */
+function assertRanAndFailed(result, message) {
+  assert.equal(result.error, undefined, `process failed to spawn (${message}): ${result.error}`);
+  assert.equal(
+    typeof result.status,
+    'number',
+    `process did not report a numeric exit status (${message}); status=${JSON.stringify(result.status)} signal=${JSON.stringify(result.signal)}`,
+  );
+  assert.notEqual(result.status, 0, message);
+}
+
 check('e2e fixture: the pytest venv is present (provision e2e/.venv before running this)', () => {
   assert.ok(fs.existsSync(PYTEST), `expected a pytest executable at ${PYTEST}`);
 });
@@ -140,7 +162,7 @@ check('seeded regression: breaking subtract() fails the configured test command,
   try {
     fs.writeFileSync(CALC_SRC, mutated);
     const redResult = runFixturePytest();
-    assert.notEqual(redResult.status, 0, 'seeded regression did not fail the suite — the seeded mutation is not being exercised');
+    assertRanAndFailed(redResult, 'seeded regression did not fail the suite — the seeded mutation is not being exercised');
     assert.match(
       redResult.stdout,
       /test_subtract_returns_difference/,
@@ -342,7 +364,7 @@ check('resume scratch prep: prepare-resume-scratch.mjs produces a clean, genuine
     assert.equal(status.trim(), '', `scratch worktree is not clean (Preflight #1 requires this):\n${status}`);
 
     const result = runFixturePytest(scratchDir);
-    assert.notEqual(result.status, 0, 'expected the scratch suite to be red (subtract test exists, subtract() is unimplemented)');
+    assertRanAndFailed(result, 'expected the scratch suite to be red (subtract test exists, subtract() is unimplemented)');
     assert.match(result.stdout, /test_subtract/, `expected a subtract-related failure, got:\n${result.stdout}`);
   } finally {
     cleanup();
