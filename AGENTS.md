@@ -69,7 +69,15 @@ run, seeds a real regression and confirms the configured test command catches it
 versus scaffolded for a live session, and `.superpowers/sdd/2026-08-01-architecture-review-remediation/task-12-report.md` for the
 full breakdown.
 
-**A subagent cannot dispatch `tdd-*` subagents, so the resume case needs a human (or a main-thread session) to actually run it:**
+**A subagent cannot dispatch `tdd-*` subagents, so the resume case needs a human (or a main-thread session) to actually run it.**
+
+**Run once, 2026-08-03, and it paid for itself on the first try.** Preflight classified the interrupted state's *own* red test
+into bucket 3 and offered to baseline it — because a pytest collection error names a bare file (`ERROR e2e/tests/test_subtract.py`,
+no `::`), and bucket 2 was an exact `path::name` comparison that could never match one. That is the ordinary mid-cycle shape, not
+an edge case: Red writes a test importing a symbol Green has not created yet. Fixed. Two instruments had passed over it —
+`checklist-invariants.mjs` and four smoke checks — because none of them could fail on it. **The run was stopped at preflight item
+3 by the operator, so nothing past preflight has ever been exercised: no Red, Green, Refactor or Mutate dispatch on a resume.**
+Steps 3 onward below remain unproven.
 
 1. `node e2e/fixtures/prepare-resume-scratch.mjs` — builds a detached scratch git worktree whose `e2e/` matches the interrupted
    state `e2e/fixtures/checklist-resume-seed.json` describes (add() done, subtract()'s test written but unimplemented, divide()
@@ -79,8 +87,11 @@ full breakdown.
 3. In a live Claude Code session with that worktree as the project, run `/tdd e2e/spec.md`. Confirm it resumes — no fresh
    decomposition, no re-approval prompt for the two items that already have state — rather than overwriting the checklist.
 4. After it advances at least one item, run
-   `node e2e/lib/checklist-invariants.mjs e2e/fixtures/checklist-resume-seed.json <worktree>/.tdd/checklist.json` to confirm every
-   field a resume must preserve actually survived.
+   `node e2e/lib/checklist-invariants.mjs e2e/fixtures/checklist-resume-seed.json <worktree>/.tdd/checklist.json`. It confirms
+   terminal items and their `testId`s are unchanged, that `knownRed` and `mutationRoundsRun` never regress, and that a
+   non-terminal item's `testId` is never cleared. **It does not validate the *format* of anything** — for a non-terminal item it
+   requires only that a `testId` be truthy, which is exactly why it passed over the seed's own invalid, `e2e`-relative IDs for
+   the whole of iteration 2. A green run here is not evidence the checklist is well-formed.
 5. `git worktree remove --force <worktree>` to clean up.
 
 ---
