@@ -1,0 +1,316 @@
+# Review package: 1701615..2cfb799
+
+## Commits
+2cfb799 test(hook): add commands.singleTerse to the config fixtures
+a4ef236 fix(command): detect and propose commands.singleTerse per toolchain
+6fafe0a fix(agent): stop observedFailure from leaking the whole test to green
+
+## Files changed
+ agents/tdd-green.md                 |  8 +++++++-
+ agents/tdd-red.md                   | 33 +++++++++++++++++++++++++++------
+ commands/tdd-init.md                | 35 ++++++++++++++++++++++++++---------
+ tests/fixtures/config-mutation.json |  1 +
+ tests/fixtures/config.json          |  1 +
+ tests/guard.test.mjs                | 19 +++++++++++++++++++
+ 6 files changed, 81 insertions(+), 16 deletions(-)
+
+## Diff
+diff --git a/agents/tdd-green.md b/agents/tdd-green.md
+index 0b59f85..97cc1a8 100644
+--- a/agents/tdd-green.md
++++ b/agents/tdd-green.md
+@@ -26,21 +26,27 @@ did something wrong. Use `Read` to inspect, and `Edit` or
+ `Write` to change files within your permitted paths.
+ 
+ ## Your input
+ 
+ A handover report describing one failing test:
+ 
+ - `testId` — how to run it
+ - `publicApi` — the exact signature your code must expose
+ - `intent` — the behavior being pinned down
+ - `expected` — what your code must do
+-- `observedFailure` — verbatim runner output
++- `observedFailure` — the failure line and its location, kept deliberately
++  short; only carries a full traceback when the toolchain has no terse form
++
++**`publicApi`, `intent`, and `expected` are your specification.** Implement
++from those three. `observedFailure` is a secondary, incidental signal, not a
++substitute for them — do not read it as license to reconstruct the test from
++whatever it happens to include.
+ 
+ **You cannot open the test file.** You may read what the runner prints on its
+ own when your code fails — test names, assertion diffs, tracebacks. That is
+ your only window into the test, and it is enough. It is not license to write
+ code that makes the runner print more than that.
+ 
+ ## Your objective
+ 
+ Write the **minimum** code that turns that one test green. Stop when it passes.
+ 
+diff --git a/agents/tdd-red.md b/agents/tdd-red.md
+index 0b27127..ebb23d1 100644
+--- a/agents/tdd-red.md
++++ b/agents/tdd-red.md
+@@ -25,54 +25,75 @@ already has you consult. If that is still not enough, report
+ 
+ **Your `Bash` access is limited to the commands configured for your role.**
+ Anything else — `git`, `rm`, `mv`, `sed` — is denied by design, not because you
+ did something wrong. Use `Read` to inspect, and `Edit` or
+ `Write` to change files within your permitted paths.
+ 
+ ## Your input
+ 
+ - A specification file path.
+ - One checklist item: the single behavior to test this cycle.
+-- The configured test and coverage commands.
++- The configured single-test command (`commands.single`), single-test-terse
++  command (`commands.singleTerse`, which may be `null`), and coverage command.
+ 
+ ## Your objective
+ 
+ Author **exactly one** test for that one behavior, determine its outcome, and
+ stop. Do not write a second test. Do not test behavior beyond the item.
+ 
+ ## Procedure
+ 
+ 1. Read the spec and any existing tests to match conventions and avoid duplicating coverage.
+ 2. Write one test for the assigned behavior.
+-3. Run it with the configured single-test command.
++3. Run it once: use the configured single-test-terse command if one is
++   configured, otherwise the plain single-test command. That one run both
++   determines the outcome and supplies `observedFailure` — do not run the test
++   twice to get a second, fuller failure for your own reference. Never widen
++   what you capture by re-running with a more verbose flag than the one
++   configured; the config controls how much of the test the runner is allowed
++   to echo back.
+ 4. Classify:
+    - **Fails** → `outcome: "failing"`. This is the normal, desired result.
+    - **Passes** → run the coverage command. Compare against the baseline you were given.
+      - Coverage increased → `outcome: "passing-covered"`. The behavior already worked; your test now pins it down. Keep it.
+      - Coverage unchanged → `outcome: "passing-flat"`. The test adds nothing. **Report it; do not try to delete the file.** You cannot run `rm`, and you do not need to — the orchestrator discards your working-tree changes on this outcome.
+    - **Cannot write a test at all** (the behavior is untestable as specified, or you cannot express it) → `outcome: "blocked"` with the reason. Do not guess.
+ 5. Report and stop.
+ 
+ If no coverage command is configured, treat any passing test as `passing-flat`.
+ 
+ ## Report exactly this JSON
+ 
+     {
+       "item": <int>,
+       "outcome": "failing" | "passing-covered" | "passing-flat" | "blocked",
+       "testId": "<runner-addressable id>",
+       "testFile": "<path>",
+       "publicApi": "<exact signature the test calls>",
+       "intent": "<what behavior this pins down>",
+       "expected": "<what the code must do to satisfy it>",
+-      "observedFailure": "<verbatim runner output, or empty>",
++      "observedFailure": "<failure line and location only, or empty>",
+       "reason": "<only when blocked>"
+     }
+ 
+-`publicApi` must be the exact signature — name, parameters, types, return type.
+-The agent that implements this cannot read your test. That field is the entire
+-interface contract between you.
++**`publicApi`, `intent`, and `expected` are the designed channel, and together
++they are the primary contract — not `observedFailure`.** The agent that
++implements this cannot read your test, so these three fields are its entire
++specification:
++
++- `publicApi` must be the exact signature — name, parameters, types, return type.
++- `intent` states what behavior this pins down, in your own words, not a paraphrase of the assertion.
++- `expected` states what the code must do to satisfy it, concretely enough to implement from.
++
++Write these as if `observedFailure` did not exist. `observedFailure` is a
++secondary, incidental signal — whatever the configured test command prints on
++failure, kept to the failure line and its location — never the field you rely
++on to convey what the test checks. **It is not fully closed.** An assertion
++diff still carries the values being compared, and even a terse traceback
++still names the test. That residue is accepted, not eliminated; it is exactly
++why `publicApi`/`intent`/`expected` — not `observedFailure` — have to carry
++the specification.
+ 
+ ## Stop conditions
+ 
+ Stop the moment you have classified one test. Do not implement source to make
+ it pass. Do not refactor. Do not start the next item.
+diff --git a/commands/tdd-init.md b/commands/tdd-init.md
+index f34dc3b..db6f2db 100644
+--- a/commands/tdd-init.md
++++ b/commands/tdd-init.md
+@@ -19,41 +19,58 @@ guard hook on every subsequent tool call.
+   shell did. Catching both here, at setup, is what turns the open failure into a loud one.
+ 
+   This only proves node is on the `Bash` tool's `PATH`, not on the `PATH` Claude Code spawns the hook with — the two can disagree
+   under a per-shell version manager (`fnm`, `nvm`). This step cannot resolve that gap by itself; only `/tdd`'s preflight item 7,
+   which dispatches a probe subagent and observes a denial, proves the guard can actually start. Tell the user this check is
+   necessary but not sufficient, and that the first `/tdd` run is what confirms the rest.
+ - The project is a git repository with at least one commit.
+ 
+ ## 2. Detect the toolchain
+ 
+-| Marker | Toolchain | test | single | coverage |
+-|---|---|---|---|---|
+-| `pytest.ini`, or `pyproject.toml` mentioning pytest | pytest | `pytest -q` | `pytest -q {testId}` | `pytest -q --cov --cov-report=json:.tdd/coverage.json` |
+-| `package.json` with `jest` | jest | `npx jest` | `npx jest -t {testId}` | `npx jest --coverage --coverageReporters=json-summary` |
+-| `package.json` with `vitest` | vitest | `npx vitest run` | `npx vitest run -t {testId}` | `npx vitest run --coverage` |
+-| `Cargo.toml` | cargo | `cargo test` | `cargo test {testId}` | `cargo llvm-cov --json` |
+-| `go.mod` | go | `go test ./...` | `go test ./... -run {testId}` | `go test -cover ./...` |
+-| `*.csproj`, `*.sln` | dotnet | `dotnet test` | `dotnet test --filter {testId}` | `dotnet test --collect:"XPlat Code Coverage"` |
++| Marker | Toolchain | test | single | singleTerse | coverage |
++|---|---|---|---|---|---|
++| `pytest.ini`, or `pyproject.toml` mentioning pytest | pytest | `pytest -q` | `pytest -q {testId}` | `pytest -q --tb=line {testId}` | `pytest -q --cov --cov-report=json:.tdd/coverage.json` |
++| `package.json` with `jest` | jest | `npx jest` | `npx jest -t {testId}` | `null` | `npx jest --coverage --coverageReporters=json-summary` |
++| `package.json` with `vitest` | vitest | `npx vitest run` | `npx vitest run -t {testId}` | `null` | `npx vitest run --coverage` |
++| `Cargo.toml` | cargo | `cargo test` | `cargo test {testId}` | `cargo test {testId}` | `cargo llvm-cov --json` |
++| `go.mod` | go | `go test ./...` | `go test ./... -run {testId}` | `go test ./... -run {testId}` | `go test -cover ./...` |
++| `*.csproj`, `*.sln` | dotnet | `dotnet test` | `dotnet test --filter {testId}` | `null` | `dotnet test --collect:"XPlat Code Coverage"` |
+ 
+ No marker matches, or several do → ask the user rather than guessing.
+ 
++**`singleTerse` notes — do not invent a flag you have not verified.** Each row above is one of three cases, and which case applies
++is a fact about the toolchain, not a preference:
++
++- **pytest**: `--tb=line` is a documented traceback style that prints one line per failure instead of reproducing the source of the
++  failing test function. This is the case the field exists for.
++- **cargo and go**: the *same* command as `single`, not a distinct flag. Their default failure output (a panic message with
++  `file:line`, or the `t.Errorf`/`t.Fatalf` message with `file:line`) never reproduces the test function's source the way pytest's
++  default traceback does, and Rust's backtrace is off unless `RUST_BACKTRACE=1` is set in the environment — so there is nothing
++  further to truncate. Setting `singleTerse` to `null` here would trigger the degradation warning below ("carries the full
++  traceback") for a toolchain where that claim is false. Reuse the command and say so when you present it to the user, so it does
++  not read as a copy-paste mistake.
++- **jest, vitest, dotnet**: `null`. Each has flags that reduce *some* output (`--noStackTrace` for jest, alternate reporters for
++  vitest, `--verbosity` for dotnet), but none is documented to suppress the source-code frame or the multi-frame stack trace
++  specifically — the part of the output this field exists to cut. Do not configure one of these speculatively; confirm the
++  degradation with the user instead (see 2c).
++
+ ## 2c. Report every degradation explicitly
+ 
+ Each missing tool removes a mechanical check and silently replaces it with
+ prompt discipline. Tell the user which guarantees they are actually getting:
+ 
+ | Missing | Lost |
+ |---|---|
+ | `commands.coverage` | Red's three-way branch collapses to strict red; both coverage gates skipped; `crapMode` forced to `unavailable` |
+ | `crapMode: "unavailable"` | CRAP trigger gone; refactor falls back to `maxFunctionLines` |
+ | `commands.mutation` | hardening pass uses agent hand-mutation instead of a tool; slower, less systematic, still runs |
++| `commands.singleTerse` | `observedFailure` falls back to `commands.single` and carries the full traceback — for most tests that traceback reproduces the whole failing test function, which is handed to Green as required input despite Green being denied `Read` on the test file |
+ 
+ Coverage is the one worth pressing on — losing it cascades into all three
+ gates. Recommend installing it rather than proceeding without it.
+ 
+ The command must report **uncovered line counts**, not just a percentage —
+ `--cov-report=json`, `--coverageReporters=json-summary`, and equivalents. The
+ gates count uncovered lines because percentage moves with the denominator and
+ cannot distinguish a large tested addition from a small untested one.
+ 
+ ## 2b. Detect complexity and mutation tooling
+@@ -163,21 +180,21 @@ For each configured command, the static prefix is everything before the first
+ 
+ Confirm each command is actually runnable as written.
+ 
+ ## 7. Write the files
+ 
+ `.tdd/config.json`:
+ 
+     {
+       "version": 1,
+       "commands": {
+-        "test": "...", "single": "...", "coverage": "...",
++        "test": "...", "single": "...", "singleTerse": "...", "coverage": "...",
+         "complexity": "...", "mutation": null
+       },
+       "crapMode": "computed",
+       "globs": { "test": [...], "source": [...], "ignore": [...] },
+       "refactorTriggers": { "maxCrap": 30, "duplicateThreshold": 3, "maxFunctionLines": 40 },
+       "limits": {
+         "greenAttempts": 3, "violationRetries": 1,
+         "mutationRounds": 2, "mutantsPerPass": 20
+       },
+       "coverageGates": { "greenMaxNewUncovered": 2, "refactorMaxNewUncovered": 0 }
+diff --git a/tests/fixtures/config-mutation.json b/tests/fixtures/config-mutation.json
+index 83a6f36..4d9717a 100644
+--- a/tests/fixtures/config-mutation.json
++++ b/tests/fixtures/config-mutation.json
+@@ -1,15 +1,16 @@
+ {
+   "version": 1,
+   "commands": {
+     "test": "pytest -q",
+     "single": "pytest -q {testId}",
++    "singleTerse": "pytest -q --tb=line {testId}",
+     "coverage": "pytest -q --cov --cov-report=json:.tdd/coverage.json",
+     "complexity": "radon cc -j -s src",
+     "mutation": "mutmut run"
+   },
+   "globs": {
+     "test": ["tests/**", "**/test_*.py"],
+     "source": ["src/**"],
+     "ignore": ["docs/**", "*.md"]
+   },
+   "crapMode": "computed",
+diff --git a/tests/fixtures/config.json b/tests/fixtures/config.json
+index ddeee51..734227a 100644
+--- a/tests/fixtures/config.json
++++ b/tests/fixtures/config.json
+@@ -1,15 +1,16 @@
+ {
+   "version": 1,
+   "commands": {
+     "test": "pytest -q",
+     "single": "pytest -q {testId}",
++    "singleTerse": "pytest -q --tb=line {testId}",
+     "coverage": "pytest -q --cov --cov-report=json:.tdd/coverage.json",
+     "complexity": "radon cc -j -s src",
+     "mutation": null
+   },
+   "globs": {
+     "test": ["tests/**", "**/test_*.py"],
+     "source": ["src/**"],
+     "ignore": ["docs/**", "*.md"]
+   },
+   "crapMode": "computed",
+diff --git a/tests/guard.test.mjs b/tests/guard.test.mjs
+index b4c673c..08ad7d7 100644
+--- a/tests/guard.test.mjs
++++ b/tests/guard.test.mjs
+@@ -399,20 +399,39 @@ test('guard: bash dispatch selects candidate command templates BY ROLE', () => {
+     const refactorComplexity = bashGuard(sandbox, 'radon cc -j -s src', 'tdd-refactor');
+     assert.equal(refactorComplexity.status, 0, "refactor should be permitted the configured 'complexity' command");
+ 
+     const mutateFull = bashGuard(sandbox, 'pytest -q', 'tdd-mutate');
+     assert.equal(mutateFull.status, 0, "mutate should be permitted the configured full-suite 'test' command");
+   } finally {
+     removeSandbox(sandbox);
+   }
+ });
+ 
++test('guard: Red may run commands.singleTerse for the handover report — permitted structurally, via the "single" prefix match, with no separate BASH_COMMAND_KEYS entry needed', () => {
++  const sandbox = makeSandbox();
++  try {
++    // Task 8: Red produces observedFailure from commands.singleTerse
++    // ("pytest -q --tb=line {testId}"), not commands.single. Nothing routes
++    // this through a distinct allowlist entry — bashVerdict only checks that
++    // the actual command STARTS WITH the static prefix of a candidate
++    // template (the text before its first "{"), so "pytest -q --tb=line ..."
++    // already satisfies commands.single's prefix ("pytest -q") on the first
++    // candidate key tried. If that stopped being true (a toolchain whose
++    // terse form does not share single's prefix), this dispatch would go
++    // structurally dead with no failing test anywhere else to notice.
++    const redTerse = bashGuard(sandbox, 'pytest -q --tb=line tests/test_a.py::test_x', 'tdd-red');
++    assert.equal(redTerse.status, 0, "red should be permitted to run commands.singleTerse's command for this fixture");
++  } finally {
++    removeSandbox(sandbox);
++  }
++});
++
+ test("guard: every role may run the configured coverage command, but a role's own phase-scoped command stays scoped", () => {
+   const sandbox = makeSandbox();
+   try {
+     const coverage = 'pytest -q --cov --cov-report=json:.tdd/coverage.json';
+     for (const role of ['tdd-red', 'tdd-green', 'tdd-refactor']) {
+       const result = bashGuard(sandbox, coverage, role);
+       assert.equal(result.status, 0, `${role} should be permitted to run the coverage command`);
+     }
+ 
+     const greenComplexity = bashGuard(sandbox, 'radon cc -j -s src', 'tdd-green');

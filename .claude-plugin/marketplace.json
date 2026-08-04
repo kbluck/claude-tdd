@@ -6,7 +6,6 @@
     {
       "name": "claude-tdd",
       "description": "Red-Green-Refactor TDD via role-constrained subagents",
-      "version": "0.1.0",
       "source": "./"
     }
   ]

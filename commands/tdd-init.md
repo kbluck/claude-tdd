@@ -8,21 +8,54 @@ guard hook on every subsequent tool call.
 
 ## 1. Check prerequisites
 
-- `jq` on PATH (`command -v jq`). Missing → stop and tell the user to install it. The guard parses its input with `jq` and fails closed without it, which would deny every tool call mid-cycle.
+- Node is on `PATH` and is at least v22 — the floor `hooks/lib/rules.mjs` enforces on itself as `NODE_FLOOR`. A floor, not a pin;
+  a newer major is fine. Check with `node --version` through the `Bash` tool. Missing, or below v22 → stop and tell the user to
+  install or upgrade it. This is a hard stop, not a degradation: with no interpreter, or too old an interpreter, there is no
+  reduced-guarantee mode to fall back to — the guard cannot be trusted to run at all.
+
+  **The two failures are not the same shape.** A too-old-but-*present* Node does launch `guard.mjs`, which checks its own version
+  first and denies loudly with exit 2 — that path is genuinely fail-closed on its own. A missing Node never launches the guard at
+  all: `PreToolUse` sees a non-2 exit and silently *permits* the call — a missing interpreter fails open, exactly like a missing
+  shell did. Catching both here, at setup, is what turns the open failure into a loud one.
+
+  This only proves node is on the `Bash` tool's `PATH`, not on the `PATH` Claude Code spawns the hook with — the two can disagree
+  under a per-shell version manager (`fnm`, `nvm`). This step cannot resolve that gap by itself; only `/tdd`'s preflight item 7,
+  which dispatches a probe subagent and observes a denial, proves the guard can actually start. Tell the user this check is
+  necessary but not sufficient, and that the first `/tdd` run is what confirms the rest.
 - The project is a git repository with at least one commit.
 
 ## 2. Detect the toolchain
 
-| Marker | Toolchain | test | single | coverage |
-|---|---|---|---|---|
-| `pytest.ini`, or `pyproject.toml` mentioning pytest | pytest | `pytest -q` | `pytest -q {testId}` | `pytest -q --cov --cov-report=json:.tdd/coverage.json` |
-| `package.json` with `jest` | jest | `npx jest` | `npx jest -t {testId}` | `npx jest --coverage --coverageReporters=json-summary` |
-| `package.json` with `vitest` | vitest | `npx vitest run` | `npx vitest run -t {testId}` | `npx vitest run --coverage` |
-| `Cargo.toml` | cargo | `cargo test` | `cargo test {testId}` | `cargo llvm-cov --json` |
-| `go.mod` | go | `go test ./...` | `go test ./... -run {testId}` | `go test -cover ./...` |
-| `*.csproj`, `*.sln` | dotnet | `dotnet test` | `dotnet test --filter {testId}` | `dotnet test --collect:"XPlat Code Coverage"` |
+| Marker | Toolchain | test | single | singleTerse | coverage |
+|---|---|---|---|---|---|
+| `pytest.ini`, or `pyproject.toml` mentioning pytest | pytest | `pytest -q` | `pytest -q {testId}` | `pytest -q --tb=line {testId}` | `pytest -q --cov --cov-report=json:.tdd/coverage.json` |
+| `package.json` with `jest` | jest | `npx jest` | `npx jest -t {testId}` | `null` | `npx jest --coverage --coverageReporters=json-summary` |
+| `package.json` with `vitest` | vitest | `npx vitest run` | `npx vitest run -t {testId}` | `null` | `npx vitest run --coverage` |
+| `Cargo.toml` | cargo | `cargo test` | `cargo test {testId}` | `cargo test {testId}` | `cargo llvm-cov --json` |
+| `go.mod` | go | `go test ./...` | `go test ./... -run {testId}` | `go test ./... -run {testId}` | `go test -cover ./...` |
+| `*.csproj`, `*.sln` | dotnet | `dotnet test` | `dotnet test --filter {testId}` | `null` | `dotnet test --collect:"XPlat Code Coverage"` |
 
 No marker matches, or several do → ask the user rather than guessing.
+
+**`singleTerse` notes — do not invent a flag you have not verified.** Each row above is one of three cases. Say which kind of
+evidence backs the row when you present it — a documented flag and an inferred default are not the same confidence, and the user
+should not read them as identical just because both landed in the same column:
+
+- **pytest — doc-verified.** `--tb=line` is a documented traceback style that prints one line per failure instead of reproducing
+  the source of the failing test function. This is the case the field exists for.
+- **cargo and go — inferred, not doc-verified; say so.** These reuse the *same* command as `single`, not a distinct flag, on the
+  reasoning that Rust's default test-failure output (a panic message plus `file:line`, backtrace off unless `RUST_BACKTRACE=1`) and
+  Go's default non-`-v` failure output (the `t.Errorf`/`t.Fatalf` message plus `file:line`) do not reproduce the test function's
+  source the way pytest's default traceback does. That is general knowledge of how the two toolchains behave, not a flag pinned to
+  a doc page the way `--tb=line` is. Tell the user this explicitly: "cargo/go's default failure output is already terse — reusing
+  `single` is deliberate, not a copy-paste mistake — but this wasn't verified against your specific test setup the way the pytest
+  flag was; watch the first `observedFailure` this produces and flag it if it's carrying more than a failure line and location."
+  Setting `singleTerse` to `null` here would trigger the degradation warning below ("carries the full traceback") for a toolchain
+  where that claim is probably false, which is worse than a hedged inference.
+- **jest, vitest, dotnet — verified absence.** `null`. Each has flags that reduce *some* output (`--noStackTrace` for jest,
+  alternate reporters for vitest, `--verbosity` for dotnet), but none is documented to suppress the source-code frame or the
+  multi-frame stack trace specifically — the part of the output this field exists to cut. Do not configure one of these
+  speculatively; confirm the degradation with the user instead (see 2c).
 
 ## 2c. Report every degradation explicitly
 
@@ -34,6 +67,7 @@ prompt discipline. Tell the user which guarantees they are actually getting:
 | `commands.coverage` | Red's three-way branch collapses to strict red; both coverage gates skipped; `crapMode` forced to `unavailable` |
 | `crapMode: "unavailable"` | CRAP trigger gone; refactor falls back to `maxFunctionLines` |
 | `commands.mutation` | hardening pass uses agent hand-mutation instead of a tool; slower, less systematic, still runs |
+| `commands.singleTerse` | `observedFailure` falls back to `commands.single` and carries the full traceback — for most tests that traceback reproduces the whole failing test function, which is handed to Green as required input despite Green being denied `Read` on the test file |
 
 Coverage is the one worth pressing on — losing it cascades into all three
 gates. Recommend installing it rather than proceeding without it.
@@ -126,6 +160,15 @@ mistake in the globs.
 
 Present every field. Let them correct anything. Do not write until they agree.
 
+**If `commands.singleTerse` equals `commands.single`, say so explicitly.** The
+committed JSON cannot carry a comment explaining why two fields hold the same
+string, and a later reader who does not know the reasoning will read it as a
+copy-paste mistake and "clean it up" to `null` — which is not equivalent: it
+changes the meaning from "this toolchain's default output is already terse"
+to "no terse form exists" and turns on the full-traceback degradation
+warning. State the one-sentence reason now, while the user is looking at the
+proposal, not only in this command's own prose.
+
 ## 6. Verify each command parses under the guard's Bash rule
 
 For each configured command, the static prefix is everything before the first
@@ -157,7 +200,7 @@ Confirm each command is actually runnable as written.
     {
       "version": 1,
       "commands": {
-        "test": "...", "single": "...", "coverage": "...",
+        "test": "...", "single": "...", "singleTerse": "...", "coverage": "...",
         "complexity": "...", "mutation": null
       },
       "crapMode": "computed",
@@ -190,6 +233,21 @@ Append to `.gitignore` if not already present:
 Commit is mandatory, not optional. `/tdd`'s preflight refuses to start against
 a dirty tree, so leaving these files uncommitted makes the very next command
 fail on this command's side effects.
+
+**Verify the commit actually tracked the file — do not trust the commit's
+exit code alone.** `git add` on a path matched by an existing `.gitignore`
+rule is a silent no-op unless forced with `-f`: the `git commit` above still
+reports success, but `.tdd/config.json` stays untracked, and the very
+first-run path this step exists to protect breaks again on the next `/tdd`
+preflight. Confirm with:
+
+    git ls-files .tdd/config.json
+
+Empty output means the file did not get tracked. Do not silently `-f` past
+this — find out *why* it is ignored first (`git check-ignore -v
+.tdd/config.json`) and tell the user. A stray `.gitignore` rule inherited from
+a template or a prior project is a real possibility, and forcing the add
+without asking could commit something the user deliberately excluded.
 
 ## 9. Confirm
 

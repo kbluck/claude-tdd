@@ -1,0 +1,200 @@
+# Review package: 0d33cad..aa261e7
+
+## Commits
+aa261e7 test(hook): pin the node floor prompts state against NODE_FLOOR
+247139d fix(command): state the node floor as a literal, not a runtime path
+2a7fd79 fix(skill): state the node floor as a literal, not a runtime path
+
+## Files changed
+ commands/tdd-init.md           | 12 +++-----
+ skills/run-tdd-cycle/SKILL.md  | 10 ++-----
+ tests/config-contract.test.mjs | 65 ++++++++++++++++++++++++++++++++++++++++--
+ 3 files changed, 69 insertions(+), 18 deletions(-)
+
+## Diff
+diff --git a/commands/tdd-init.md b/commands/tdd-init.md
+index 548b11a..f34dc3b 100644
+--- a/commands/tdd-init.md
++++ b/commands/tdd-init.md
+@@ -1,28 +1,24 @@
+ ---
+ description: Detect the project's toolchain and write .tdd/config.json for the TDD cycle
+ ---
+ 
+ Set up `.tdd/config.json` for this project. Work through these steps in order
+ and do not skip the verification — a config that passes here is trusted by the
+ guard hook on every subsequent tool call.
+ 
+ ## 1. Check prerequisites
+ 
+-- Node is on `PATH` and is at least the floor `${CLAUDE_PLUGIN_ROOT}/hooks/lib/rules.mjs` exports as `NODE_FLOOR` — a floor, not
+-  a pin; a newer major is fine. `hooks/lib/rules.mjs` lives inside the plugin's own directory, not the project you are
+-  initializing, so read it by the `${CLAUDE_PLUGIN_ROOT}`-relative path — a bare `hooks/lib/rules.mjs` resolves against the wrong
+-  cwd and will not exist there. Check with `node --version` through the `Bash` tool and compare it against `NODE_FLOOR`. Missing,
+-  or below the floor → stop and tell the user to install or upgrade it. **If `NODE_FLOOR` itself cannot be read, stop** — the
+-  same as a missing interpreter; do not skip the comparison, guess a number, or treat the miss as a pass. This is a hard stop,
+-  not a degradation: with no interpreter, or too old an interpreter, there is no reduced-guarantee mode to fall back to — the
+-  guard cannot be trusted to run at all.
++- Node is on `PATH` and is at least v22 — the floor `hooks/lib/rules.mjs` enforces on itself as `NODE_FLOOR`. A floor, not a pin;
++  a newer major is fine. Check with `node --version` through the `Bash` tool. Missing, or below v22 → stop and tell the user to
++  install or upgrade it. This is a hard stop, not a degradation: with no interpreter, or too old an interpreter, there is no
++  reduced-guarantee mode to fall back to — the guard cannot be trusted to run at all.
+ 
+   **The two failures are not the same shape.** A too-old-but-*present* Node does launch `guard.mjs`, which checks its own version
+   first and denies loudly with exit 2 — that path is genuinely fail-closed on its own. A missing Node never launches the guard at
+   all: `PreToolUse` sees a non-2 exit and silently *permits* the call — a missing interpreter fails open, exactly like a missing
+   shell did. Catching both here, at setup, is what turns the open failure into a loud one.
+ 
+   This only proves node is on the `Bash` tool's `PATH`, not on the `PATH` Claude Code spawns the hook with — the two can disagree
+   under a per-shell version manager (`fnm`, `nvm`). This step cannot resolve that gap by itself; only `/tdd`'s preflight item 7,
+   which dispatches a probe subagent and observes a denial, proves the guard can actually start. Tell the user this check is
+   necessary but not sufficient, and that the first `/tdd` run is what confirms the rest.
+diff --git a/skills/run-tdd-cycle/SKILL.md b/skills/run-tdd-cycle/SKILL.md
+index 2c60656..a5d27e6 100644
+--- a/skills/run-tdd-cycle/SKILL.md
++++ b/skills/run-tdd-cycle/SKILL.md
+@@ -21,27 +21,23 @@ Announce: "Using run-tdd-cycle to implement `<spec>`."
+    to proceed, and if so record them in `checklist.json` as `knownRed`.
+ 
+    **`knownRed` is not a note to yourself; it must be threaded or it is a lie.** Every later suite comparison is against "the baseline
+    you were given", never against zero failures — and `tdd-refactor` and `tdd-mutate` both stop on a suite that is not green, so they
+    must receive the list or they will refuse to run for the rest of the session. Pass `knownRed` in every Refactor and Mutate dispatch.
+    When you check a suite yourself, subtract it before judging. If you find yourself unable to thread it somewhere, stop and say so
+    rather than proceeding with an allowlist that only exists in the file.
+ 4. **Spec file readable and non-empty.** Unreadable or empty → stop; there is nothing to decompose.
+ 5. **The glob partition is still exhaustive.** `git ls-files`; every path must match `test`, `source`, or `ignore`. Drift since
+    init → stop and tell the user to re-run `/tdd-init`. This is what makes the guard's read denylist sound.
+-6. **Node is on `PATH` and is at least the floor `${CLAUDE_PLUGIN_ROOT}/hooks/lib/rules.mjs` exports as `NODE_FLOOR`** — a floor,
+-   not a pin; a newer major passes. `hooks/lib/rules.mjs` is inside the plugin's own directory, not the target project you are
+-   running against, so read it by the `${CLAUDE_PLUGIN_ROOT}`-relative path — a bare `hooks/lib/rules.mjs` resolves against the
+-   wrong cwd and will not exist there. Run `node --version` through the `Bash` tool and compare it against `NODE_FLOOR`. Missing,
+-   or below the floor → stop and tell the user to install or upgrade Node. **If `NODE_FLOOR` itself cannot be read, stop** —
+-   the same as a missing interpreter. Do not skip the comparison, guess a number, or treat the miss as a pass; an unevaluable
+-   check must not reach `allow`.
++6. **Node is on `PATH` and is at least v22** — the floor `hooks/lib/rules.mjs` enforces on itself as `NODE_FLOOR`. A floor, not a
++   pin; a newer major passes. Run `node --version` through the `Bash` tool. Missing, or below v22 → stop and tell the user to
++   install or upgrade Node.
+ 
+    **The two failures are not the same shape.** A too-old-but-*present* Node does launch `guard.mjs`, which checks its own
+    version first, before anything else can throw, and denies loudly with exit 2 — that path is genuinely fail-closed on its own.
+    A missing Node never launches the guard at all: `PreToolUse` sees a non-2 exit and silently *permits* the call, exactly like a
+    missing shell did. Preflight exists to catch both loudly, at setup, rather than let either reach a live dispatch.
+ 
+    **This proves less than it looks like it proves — item 7 is what closes the gap.** This check only shows that node is on the
+    *`Bash` tool's* `PATH`. The hook itself is spawned by Claude Code directly, in exec form, with no shell, so it resolves `node`
+    against a different environment — and under a per-shell version manager (`fnm`, `nvm`) the two routinely disagree. Measured on
+    the development machine: an IDE-hosted session resolved the hook's `node` to a bundled 24.13.0 while `fnm` gave the `Bash` tool
+diff --git a/tests/config-contract.test.mjs b/tests/config-contract.test.mjs
+index f4246dd..574ee2c 100644
+--- a/tests/config-contract.test.mjs
++++ b/tests/config-contract.test.mjs
+@@ -1,36 +1,41 @@
+ // node:test port of tests/config-contract.test.sh.
+ //
+ // Pins the .tdd/config.json schema that /tdd-init must produce and that the
+ // guard and orchestrator consume. Three independent copies of this schema
+ // exist (the fixture, commands/tdd-init.md's Step 7 template, and the spec's
+ // own example block) and they have drifted from each other before — see the
+ // comments inline, and AGENTS.md's "Fixing the document about the artifact
+ // is not fixing the artifact".
+ //
+-// This file does not touch hooks/lib/rules.mjs and is not expected to be
+-// red-because-of-a-stub. Most of it pins a property the repository already
++// This file mostly does not touch hooks/lib/rules.mjs and is not expected to
++// be red-because-of-a-stub. Most of it pins a property the repository already
+ // satisfies (like agents.test.mjs). The one deliberate exception is the
+ // singleTerse drift check at the bottom, which is expected to be RED right
+-// now and records a real, currently-unclosed gap (plan Task 8).
++// now and records a real, currently-unclosed gap (plan Task 8). The Node
++// floor drift check near the bottom DOES import hooks/lib/rules.mjs, but only
++// to read the already-implemented NODE_FLOOR constant (Task 3), not to
++// exercise a stub.
+ 
+ import test from 'node:test';
+ import assert from 'node:assert/strict';
+ import fs from 'node:fs';
+ import path from 'node:path';
+ import { fileURLToPath } from 'node:url';
++import { NODE_FLOOR } from '../hooks/lib/rules.mjs';
+ 
+ const HERE = path.dirname(fileURLToPath(import.meta.url));
+ const REPO_ROOT = path.join(HERE, '..');
+ 
+ const FIXTURE_PATH = path.join(REPO_ROOT, 'tests', 'fixtures', 'config.json');
+ const INIT_PATH = path.join(REPO_ROOT, 'commands', 'tdd-init.md');
++const SKILL_PATH = path.join(REPO_ROOT, 'skills', 'run-tdd-cycle', 'SKILL.md');
+ const SPEC_PATH = path.join(REPO_ROOT, 'docs', 'superpowers', 'specs', '2026-07-30-tdd-subagent-workflow-design.md');
+ 
+ const fixture = JSON.parse(fs.readFileSync(FIXTURE_PATH, 'utf8'));
+ 
+ /** Dotted-path lookup: getPath(obj, 'refactorTriggers.maxCrap'). */
+ function getPath(obj, dotted) {
+   return dotted.split('.').reduce((acc, key) => (acc && typeof acc === 'object' ? acc[key] : undefined), obj);
+ }
+ 
+ /** Whether `obj` has own property `key` at the given dotted parent path (present even if the value is null). */
+@@ -255,10 +260,64 @@ test('drift check: every key the spec declares also appears in tests/fixtures/co
+ test('drift check: every key the spec declares also appears in the tdd-init.md Step 7 template', () => {
+   const specKeyCounts = deriveSpecKeyCounts();
+   const missingFromTemplate = [...specKeyCounts.keys()].filter((k) => countKeyDeclarations(initBlock ?? '', k) === 0);
+   assert.deepEqual(
+     missingFromTemplate,
+     [],
+     `key(s) declared in the spec's schema but absent from commands/tdd-init.md's Step 7 block: ${missingFromTemplate.join(', ')} — ` +
+       'this is the exact drift a fixture-derived loop cannot see (plan Task 8)',
+   );
+ });
++
++// ---------------------------------------------------------------------------
++// The Node floor: preflight (SKILL.md) and /tdd-init (tdd-init.md) both state
++// it as a plain literal ("v22"), rather than resolving hooks/lib/rules.mjs's
++// NODE_FLOOR at runtime — the orchestrator's Bash tool does not have
++// CLAUDE_PLUGIN_ROOT (or CLAUDE_PROJECT_DIR) set, only the spawned hook
++// process does, so a path built from it does not resolve for the
++// orchestrator (plan Task 4, review round 2). That makes the literal a THIRD
++// copy of NODE_FLOOR that can silently drift the next time someone bumps the
++// constant in hooks/lib/rules.mjs without touching either prompt. This closes
++// that gap the same way the schema drift checks above do: derive the
++// expected value from the source of truth and assert the prompts match it.
++// ---------------------------------------------------------------------------
++
++/**
++ * Extracts the Node floor claim ("...is at least vNN...") from the single
++ * line matching `lineStartRe`. Scoped to that one line deliberately: a
++ * whole-file match would also catch incidental version numbers elsewhere in
++ * the same prose (e.g. the measured "22.23.2" patch version in the
++ * fnm-vs-Bash-tool paragraph a few lines down), which is exactly the "whole
++ * haystack passes when the specific block is wrong" scoping bug this file
++ * already guards against for the Step 7 template above.
++ * @param {string} text
++ * @param {RegExp} lineStartRe
++ * @returns {number | null}
++ */
++function extractFloorClaim(text, lineStartRe) {
++  const line = text.split('\n').find((l) => lineStartRe.test(l));
++  if (line === undefined) return null;
++  const match = line.match(/\bis at least v(\d+)\b/);
++  return match ? Number(match[1]) : null;
++}
++
++const skillText = fs.readFileSync(SKILL_PATH, 'utf8');
++
++test("drift check: SKILL.md preflight item 6 states the node floor as hooks/lib/rules.mjs's NODE_FLOOR", () => {
++  const stated = extractFloorClaim(skillText, /^6\. \*\*Node is on `PATH`/);
++  assert.notEqual(stated, null, "could not locate preflight item 6's floor claim line — has its wording changed?");
++  assert.equal(
++    stated,
++    NODE_FLOOR,
++    `SKILL.md states the Node floor as v${stated}, but hooks/lib/rules.mjs's NODE_FLOOR is ${NODE_FLOOR} — the prompt has drifted from the source of truth`,
++  );
++});
++
++test("drift check: tdd-init.md prerequisites state the node floor as hooks/lib/rules.mjs's NODE_FLOOR", () => {
++  const stated = extractFloorClaim(initText, /^- Node is on `PATH`/);
++  assert.notEqual(stated, null, "could not locate tdd-init.md's floor claim line — has its wording changed?");
++  assert.equal(
++    stated,
++    NODE_FLOOR,
++    `tdd-init.md states the Node floor as v${stated}, but hooks/lib/rules.mjs's NODE_FLOOR is ${NODE_FLOOR} — the prompt has drifted from the source of truth`,
++  );
++});

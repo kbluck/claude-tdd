@@ -16,26 +16,75 @@ Announce: "Using run-tdd-cycle to implement `<spec>`."
 1. **Git repo, clean tree.** Reverting a dispatch destroys working-tree state — see *Reverting a dispatch* for what that actually
    runs. Dirty → stop, ask the user to commit or stash.
 2. **`.tdd/config.json` exists.** Missing → tell the user to run `/tdd-init`. Do not write one yourself.
-3. **`jq` on PATH.** Missing → stop. The guard fails closed without it and would deny every tool call.
-4. **The full suite passes.** Run the configured test command. Green's stop condition is "this test now passes" and Refactor's is
-   "all tests still pass" — both are meaningless against an already-red suite. If red, list the failing test IDs, ask the user whether
-   to proceed, and if so record them in `checklist.json` as `knownRed`.
+3. **The full suite passes.** Run the configured test command. Green's stop condition is "this test now passes" and Refactor's is
+   "all tests still pass" — both are meaningless against an already-red suite.
+
+   **`knownRed` is captured once, at first-run preflight, and never re-derived.** It means "failing before this run began" — a
+   property of the starting tree, not of whatever this check happens to see. Before treating a red suite as a candidate baseline,
+   determine first run vs. resume the same way `## Decompose` does: does `.tdd/checklist.json` exist and have items?
+
+   - **First run** (checklist absent or empty). If red, list the failing test IDs, ask the user whether to proceed, and if so record
+     them in `checklist.json` as `knownRed`.
+   - **Resume** (checklist present with items). Read the checklist's existing `knownRed` — this step does not ask for it again and
+     does not overwrite it. If the suite is red, classify every failing test ID against three buckets, checked in this order —
+     **a red suite is not automatically a baseline just because this is a resume; only an exact match against one of the first two
+     buckets is exempt:**
+
+     1. **Already in the recorded `knownRed`.** Expected by definition — accepted before this run began. Do not re-ask, do not
+        re-record. Check this bucket first: on an ordinary resume with no item currently at status `red`, every failure lands
+        either here or in bucket 3, and starting with attribution instead of this check would route already-accepted failures
+        into the ask again — contradicting "does not ask for it again" two sentences up.
+     2. **Matches the `testId` recorded on the item currently at status `red`**, if any. Expected mid-cycle state — Red wrote
+        this test, Green has not run yet — and must not be added to `knownRed`. This is an exact test-ID comparison against the
+        field *Decompose* declares and *Per item / Red* writes, not a guess at which file a failure belongs to.
+
+        **A failure that carries no `::` names a file, not a test, and no exact comparison against a stored `path::name` can
+        ever match it.** Compare a `::`-less failure against the portion of the stored `testId` up to its `::`; a match there
+        is bucket 2. A collection error reports exactly that shape — `ERROR e2e/tests/test_subtract.py` — and it is the
+        *ordinary* mid-cycle state, not an edge case: Red writes a test importing a symbol Green has not created yet, so the
+        module cannot import and the file never collects. Without this, the one state bucket 2 exists to exempt lands in
+        bucket 3, and the ask below invites the user to baseline it. Found on the first live resume run.
+     3. **Neither of the above.** A genuinely new red suite, not a resume artifact: treat it exactly like the first-run case
+        above — list it, ask the user, and if they agree to proceed, append it to the existing recorded `knownRed` rather than
+        overwriting the list.
+
+        **If any failure is a collection error, say so in the ask, and say what it costs.** A runner that stops on one —
+        pytest prints `Interrupted: N errors during collection` — executes no other test, so the suite reports nothing about
+        itself. Recording that file therefore does not mask one file: it masks every later suite comparison in the session,
+        each of which subtracts `knownRed` and would read an aborted collection as green.
 
    **`knownRed` is not a note to yourself; it must be threaded or it is a lie.** Every later suite comparison is against "the baseline
    you were given", never against zero failures — and `tdd-refactor` and `tdd-mutate` both stop on a suite that is not green, so they
    must receive the list or they will refuse to run for the rest of the session. Pass `knownRed` in every Refactor and Mutate dispatch.
    When you check a suite yourself, subtract it before judging. If you find yourself unable to thread it somewhere, stop and say so
    rather than proceeding with an allowlist that only exists in the file.
+4. **Spec file readable and non-empty.** Unreadable or empty → stop; there is nothing to decompose.
 5. **The glob partition is still exhaustive.** `git ls-files`; every path must match `test`, `source`, or `ignore`. Drift since
    init → stop and tell the user to re-run `/tdd-init`. This is what makes the guard's read denylist sound.
-6. **Spec file readable and non-empty.** Unreadable or empty → stop; there is nothing to decompose.
-7. **The guard actually sees `agent_type`.** Dispatch a throwaway subagent told to read one file under `globs.source` while claiming
-   no role, then confirm the guard evaluated it. Cheaper equivalent: dispatch `tdd-red` with the instruction "read `<a source file>`
-   and report the first line" and confirm it comes back **denied**.
+6. **Node is on `PATH` and is at least v22** — the floor `hooks/lib/rules.mjs` enforces on itself as `NODE_FLOOR`. A floor, not a
+   pin; a newer major passes. Run `node --version` through the `Bash` tool. Missing, or below v22 → stop and tell the user to
+   install or upgrade Node.
 
-   If that read succeeds, the guard is not seeing `agent_type`, every subagent looks like the orchestrator, and **read isolation
-   is silently absent**. Stop. Do not run unenforced — reads leave no trace in a diff, so nothing downstream would ever notice.
-   `agent_type` is undocumented (found empirically on Claude Code 2.1.220) and this is the check that catches it disappearing.
+   **The two failures are not the same shape.** A too-old-but-*present* Node does launch `guard.mjs`, which checks its own
+   version first, before anything else can throw, and denies loudly with exit 2 — that path is genuinely fail-closed on its own.
+   A missing Node never launches the guard at all: `PreToolUse` sees a non-2 exit and silently *permits* the call, exactly like a
+   missing shell did. Preflight exists to catch both loudly, at setup, rather than let either reach a live dispatch.
+
+   **This proves less than it looks like it proves — item 7 is what closes the gap.** This check only shows that node is on the
+   *`Bash` tool's* `PATH`. The hook itself is spawned by Claude Code directly, in exec form, with no shell, so it resolves `node`
+   against a different environment — and under a per-shell version manager (`fnm`, `nvm`) the two routinely disagree. Measured on
+   the development machine: an IDE-hosted session resolved the hook's `node` to a bundled 24.13.0 while `fnm` gave the `Bash` tool
+   22.23.2, at the same moment on the same machine. Report both results to the user: a green version check here is necessary and
+   **never sufficient** — do not let it read as proof the guard can start. Only item 7's observed denial is that proof.
+7. **The guard actually sees `agent_type`.** This is also the only check that runs inside the interpreter Claude Code actually
+   hands the hook — item 6's version check cannot see that far. Dispatch a throwaway subagent told to read one file under
+   `globs.source` while claiming no role, then confirm the guard evaluated it. Cheaper equivalent: dispatch `tdd-red` with the
+   instruction "read `<a source file>` and report the first line" and confirm it comes back **denied**.
+
+   If that read succeeds, the guard is not seeing `agent_type` — or never launched at all, which looks identical from here — every
+   subagent looks like the orchestrator, and **read isolation is silently absent**. Stop. Do not run unenforced — reads leave no
+   trace in a diff, so nothing downstream would ever notice. `agent_type` is undocumented (found empirically on Claude Code
+   2.1.220) and this is the check that catches it disappearing.
 
    **Only an observed denial passes this check.** If the probe cannot be dispatched, errors, or returns something you cannot
    interpret, that is not a pass — it is the same unknown state as a missing denial, and it fails closed. The one outcome that
@@ -45,6 +94,23 @@ There is no phase marker to clear — the guard identifies callers from the payl
 
 ## Decompose
 
+**Decompose runs only when the checklist is absent.** Before doing anything else, check whether `.tdd/checklist.json`
+exists and has items:
+
+- **Absent, or present with no items** → this is a first run. Continue below.
+- **Present with items** → this is a resume, not a first run. Load the file exactly as written — every field, including any this
+  section does not itself populate (`baselines`, for instance, is written by the coverage-gate machinery elsewhere in this file, not
+  here) — rather than reconstructing only the fields below. Do not write a new checklist: doing so is exactly what discarded every
+  item's `status`, `knownRed`, `mutationRoundsRun`, and the baselines before this branch existed. Re-surface every item with status
+  `blocked` and ask the user before continuing (see *Completion*), then resume the per-item loop from the first item whose status is
+  not terminal — `pending`, `red`, and `green` are not terminal; `done`, `redundant`, and `blocked` are.
+
+  **Unless every item is still `pending`, skip the approval step below** — it is for a new decomposition, not a continued one. If
+  every item is still `pending`, nothing has been dispatched yet, so this state is indistinguishable from a first run interrupted
+  between writing the checklist and showing it for approval: `.tdd/checklist.json` is gitignored, so that write never dirties the
+  tree for Preflight's clean-tree check to catch. Show it for approval as if this were a first run — cheap, since no work exists yet
+  to lose by asking again.
+
 Read the spec once. Write `.tdd/checklist.json`:
 
     {
@@ -52,13 +118,16 @@ Read the spec once. Write `.tdd/checklist.json`:
       "knownRed": ["<test ids excluded from comparisons>"],
       "mutationRoundsRun": 0,
       "items": [
-        { "id": 1, "behavior": "<one testable behavior>", "status": "pending" }
+        { "id": 1, "behavior": "<one testable behavior>", "status": "pending", "testId": null }
       ]
     }
 
-Write `mutationRoundsRun` at decompose time, initialised to `0`. Every other field the loop reads is declared here; leaving this one
-to be created later by the mutation pass is the shape `knownRed` had before it turned out nothing read it — a value that exists in
-prose but not in the schema is one nobody has to account for.
+Write `mutationRoundsRun` at decompose time, initialised to `0`, and `testId` on every item initialised to `null`. Every field the
+loop reads is declared here; leaving one to be created later by whichever step first needs it is the shape `knownRed` had before it
+turned out nothing read it — a value that exists in prose but not in the schema is one nobody has to account for. `testId` is set once
+Red's outcome is `failing` (see *Per item / Red*) and stays there as the exact identifier of that item's own test; Preflight step 3
+reads it back on a resume to tell the in-progress item's expected failure apart from a genuinely new one — the same argument that put
+`mutationRoundsRun` here applies to `testId`.
 
 Items may also carry `"overbuilt": true`, set by the Green coverage gate. It is a flag for review, not a status — the item still
 reaches `done`.
@@ -73,7 +142,7 @@ empty list satisfies immediately — so a spec you could not decompose would rep
 item, state the count when you present it, and if the spec yields none, say so and stop rather than proceeding.
 
 `status`: `pending` → `red` → `green` → `done`, or terminating at `redundant` or `blocked`. Write the file after every transition.
-An interrupted run resumes from this file, not from your context.
+An interrupted run resumes from this file, not from your context — the branch at the top of this section is exactly how.
 
 ## Reverting a dispatch
 
@@ -82,33 +151,90 @@ files but leaves untracked ones in place, and Red's tests are almost always new 
 `git checkout -- .`, a rejected `passing-flat` test was still sitting in the tree, where the next item's commit would have swept it
 up.
 
+**Scoping `checkout` to a pathspec does not fix that, and is worse.** `git checkout -- <path1> <path2>` validates every pathspec
+before touching anything: if *any* one of them does not match a file git already tracks, the whole command aborts and restores
+*nothing* — not even the paths that would have matched. Verified: `git checkout -- tracked.py untracked.py`, where `tracked.py`
+was a legitimately modified tracked file and `untracked.py` was new, exited 1 and left `tracked.py` unrestored. `tracked.py`
+alone (no untracked sibling in the pathspec) exited 0 and succeeded. The exit code does distinguish the two cases reliably, but
+the tree state is what actually matters — an orchestrator that ran this inside a larger command (piped through a filter, or
+guarded by `|| true` the way a defensive probe script might) could still lose the signal and read the error line without
+noticing nothing was restored. This is the ordinary shape of a violating dispatch, not an edge case — Red's tests are almost
+always new files, so a pathspec built from what a check found routinely mixes a tracked-modified path with an untracked-new
+one. The consequence is the worst available shape: `checkout` silently restores nothing, `clean` (which does not share this
+failure — see below) still removes the untracked files, and the tree looks reverted while the tracked modification survives
+into the next commit. A fourth instance of the class this section opens with — not created by scoping the pathspec to fix the
+third, but *exposed* by it: this failure was already latent in `checkout`'s literal-pathspec handling, and the pre-Task-7 glob
+pathspec happened to mask it, since a glob resolves against tracked files only and never fails to match the way a literal
+untracked path does.
+
 Revert means both:
 
-    git checkout -- <the role's write globs>     # restore tracked edits
-    git clean -fd -- <the role's write globs>    # remove new files
+    git reset --hard HEAD          # restore every tracked file to HEAD — no pathspec, so nothing to abort on
+    git clean -fd -- <pathspec>    # remove the untracked paths this dispatch's check found
 
-**`git reset --hard HEAD` has the identical blind spot** and appears wherever a branch resets to the last commit rather than
-discarding working-tree edits — Refactor's coverage gate, Refactor's incomplete-restore check, and the mutation pass's tree-clean
-recovery. Verified: `reset --hard` leaves untracked files exactly as `checkout` does. Those sites mean:
+`git reset --hard` replaces `checkout` here, everywhere in this file — not only at the sites that already used it before this
+fix (Refactor's coverage gate, Refactor's incomplete-restore check, the mutation pass's tree-clean recovery). `reset --hard` is
+tree-wide and **cannot** be scoped: `git reset --hard -- <path>` fails with `fatal: Cannot do hard reset with paths.` That is
+exactly what makes it immune to the failure above — with no pathspec to validate, it cannot abort partway through one. It is safe
+to run unscoped only because preflight requires a clean tree and exactly one agent writes per dispatch, so the only tracked
+changes to discard are ever that dispatch's own; that argument already justified the three sites using it before this fix, and
+it holds identically at the rest, so nothing is lost by extending it to all of them.
 
-    git reset --hard HEAD
-    git clean -fd -- <the role's write globs>
+**`clean` does not share `checkout`'s atomicity failure.** `git clean -fd -- <path1> <path2>` evaluates each pathspec entry on
+its own: an entry that is not an untracked path is silently skipped, not treated as an error that aborts the rest. Verified:
+`git clean -fd -- tracked.py untracked.py` removed only `untracked.py` and exited 0. This is why the pathspec below can safely
+be *every* path a check found, tracked or not, without splitting it first — `reset --hard` handles the tracked half
+unconditionally, and `clean` correctly no-ops on whichever entries in its own list turn out to already be tracked.
 
-The mutation-pass case is the sharpest: that reset is the safety net for an agent that failed to revert its own mutations. It
-detects the problem with `git status --porcelain`, which *does* show untracked files, and then applies a command that cannot remove
-them.
+The mutation-pass case is the sharpest illustration of why `clean` must be paired with something at all: that reset is the safety
+net for an agent that failed to revert its own mutations. It detects the problem with `git status --porcelain`, which *does* show
+untracked files, and `reset --hard` alone can never remove them — only `clean` can.
 
-**Only the `clean` half takes a pathspec.** Scope it to the globs that role may write — `globs.test` for Red, `globs.source` for
-Green, Refactor and Mutate — because an unscoped `git clean -fd` would delete legitimately untracked work elsewhere in the tree.
-(`clean` without `-x` spares gitignored paths, so the venv, the checklist and the coverage report survive either way; do not add
-`-x`.)
+**Only the `clean` half takes a pathspec — and that pathspec is every path the triggering check actually found, not the role's
+write globs.** For most of the checks below, a guardrail violation is *by definition* a write to a path that does not match the
+role's globs — that is what makes it a violation rather than ordinary work — so the rogue file sits outside the glob by
+construction, and a `clean` scoped to the glob can never reach it. (Red's content-scan hit, below, is the one exception: it is a
+violation found *inside* `globs.test`. The found-paths pathspec still reaches it — the same mechanism, applied uniformly, rather
+than a second scoping rule for a second kind of violation.) Two cases, not one; do not collapse them:
 
-`git reset --hard` is tree-wide and **cannot** be scoped: `git reset --hard -- <path>` fails with `fatal: Cannot do hard reset with
-paths.` That is safe here only because preflight requires a clean tree and exactly one agent writes per dispatch, so the only
-tracked changes to discard are that dispatch's own.
+- **A check found concrete paths responsible for the discard.** Red's audit and Green's each name the paths that failed the
+  check — a glob mismatch, or, for Red, a content-scan hit (see *Per item*) — even though a content-scan hit sits *inside*
+  `globs.test` by construction, unlike every other violation in this bucket. **Refactor's own audit now names them too, the same
+  way** — a glob mismatch against `globs.source`, with the identical `Violation → revert` branch Red's and Green's have; it was
+  missing one before, not exempt from needing one. Refactor's incomplete-restore check and the mutation pass's tree-clean
+  recovery each re-run `git status --porcelain` (and `git diff HEAD`) and find it non-empty when it was supposed to be clean —
+  that finding **is** a list of concrete paths, the same way an audit's is. **Refactor's hard coverage gate belongs here too,
+  even though its own audit gates conformance now:** the gate re-derives `git diff --name-only` / `git status --porcelain`
+  fresh, at the point it fires, rather than falling back to `globs.source` the way Green's coverage-gate overrun below does — a
+  re-derived list is strictly more inclusive than a pattern, and this is the backstop site for anything that reached the tree by
+  a route the audit did not account for, so narrowing it to the glob would only lose paths for a rationale (the audit already
+  passed) that is exactly the assumption the backstop exists to not need. In every one of these six sites, scope `clean` to
+  **every path the check found**, not only the subset that broke the glob match where one exists. A dispatch that violated the
+  glob usually also wrote legitimate in-glob files alongside the rogue one — leaving those behind after `clean` reproduces the
+  exact bug this section opens with (a rejected file surviving to be swept into a later commit), just for the half of the
+  dispatch that happened to pass the glob check. And a dirty path found at any of these sites is not automatically confined to
+  `globs.source`: the guard that normally keeps Refactor and Mutate inside it is the same fallible mechanism Preflight item 7
+  exists to probe, so a dirty path outside the glob here is the backstop scenario, not a hypothetical one.
+- **No check found anything — the discard follows a judgment made from an already-clean audit that gates conformance.** Red's
+  `passing-flat` outcome, Green's unreproducible pass, Green's full-suite regression, and Green's coverage-gate overrun are
+  decisions made *after* that dispatch's own audit already passed with nothing flagged, and Red's and Green's each have a
+  defined `Violation → revert` branch (see *Per item*) — for Red, that branch now also covers a content-scan hit and a
+  fabricated `testId` — which is what makes "the audit already confirmed everything is inside the glob, and, for Red, clear of a
+  content-scan hit" a fact rather than an assumption. There is no list of problem paths to name here, only that earlier
+  confirmation. Fall back to `globs.test` for Red, `globs.source` for Green. Refactor and Mutate have no site in this bucket:
+  Refactor's own audit now has a `Violation → revert` branch too, but its one downstream check gated by that audit — the hard
+  coverage gate — deliberately stays in the found-paths bucket above rather than joining Green's coverage-gate overrun here, for
+  the inclusiveness reason just given. Every one of Refactor's and Mutate's discards is the found-paths case above.
 
-Branches below say **revert** or **reset and clean** and point here. They do not name the bare git command, deliberately: an
-orchestrator reading `git checkout -- .` at the point of use will run exactly that, which is the defect this section exists to fix.
+Either way, an unscoped `git clean -fd` would delete legitimately untracked work elsewhere in the tree, so never run `clean`
+without one of these two pathspecs — the found paths, or the role's glob fallback. (`clean` without `-x` spares gitignored paths,
+so the venv, the checklist and the coverage report survive either way; do not add `-x`.)
+
+Branches below say **revert** or **reset and clean** and point here — both now name the identical mechanism, `reset --hard HEAD`
+plus a scoped `clean`. They do not spell out the bare git commands at the point of use, deliberately: an orchestrator reading
+`git checkout -- .`, or a scoped `git checkout -- <pathspec>`, at the point of use would run exactly that — which is the defect
+this section exists to fix, twice over now. Keeping the mechanism defined in exactly one place is also what let this fix land as
+an edit to this section alone, rather than ten separate edits at every call site.
 
 ## Coverage baselines
 
@@ -121,11 +247,20 @@ passes, Refactor's hard-zero check passes, and CRAP finds no triggers. Nothing e
 be parsed, say so, skip the gate explicitly, and record it in the run summary as unenforced — do not let a parse failure read as a
 clean result.
 
-Run the coverage command and record the uncovered-line count:
+Run the coverage command and record the uncovered-line count, **then write it to `checklist.json`'s `baselines` field before doing
+anything else with it** — `{ "uncoveredLines": <int>, "capturedAt": "<phase and item this was measured before>" }`:
 
 - **at preflight**, as the run's starting baseline
 - **immediately before each Green dispatch** (after Red's commit)
 - **immediately before each Refactor dispatch**
+
+**A baseline held only in your own context is not durable.** It was previously kept only in conversation, so a compaction between
+capturing it and comparing against it left the gate comparing against nothing, or against a wrong figure — silently, because
+nothing else in the design would notice a baseline that quietly became `0` or vanished. Writing it the moment you capture it means
+a compaction mid-dispatch loses your context, not the number. When you compare after a dispatch returns, read `baselines` back
+from `checklist.json` rather than trusting whatever your own context still remembers — and if `capturedAt` no longer names the
+phase and item you are about to gate, the baseline is stale: re-measure before comparing rather than gating against a figure
+captured for a different point in the run.
 
 Compare after each dispatch. If a baseline reports zero total lines — an empty project, a first implementation — skip that cycle's
 gate; there is nothing meaningful to compare against.
@@ -143,15 +278,43 @@ a re-dispatch, but your measurement is the one that decides.
 
 1. Dispatch `tdd-red` with: the spec path, the one item, the configured commands, and the current coverage baseline.
 2. On return, **audit**: `git diff --name-only` plus `git status --porcelain`. Every touched path must match `globs.test`.
-   Violation → **revert** (see *Reverting a dispatch*), re-dispatch quoting the rule and the offending path, up to
-   `limits.violationRetries` times. Beyond that → stop, escalate.
+
+   **Also read every touched test file and scan it for a raw read of source text** — `open(`, `File.read`, or your toolchain's
+   equivalent raw-file-read call, whose target argument names a `globs.source` path. Red may not read source; a test that opens
+   a source path and then prints, returns, or asserts on the raw text it read has done exactly that, through the one channel
+   the guard cannot see: it runs as the test file itself, under Red's own configured test command, with no `PreToolUse` call to
+   deny.
+
+   `require(`/`include` naming a `globs.source` path is **not, on its own, a hit.** That is how a test loads the module under
+   test to exercise its behavior, and every Red test does exactly that — flagging it unconditionally would fire on the normal
+   case this rule exists to leave alone. It becomes a hit only combined with the pattern above: the loaded value then treated as
+   text and surfaced — printed, concatenated into an assertion message, returned as a string — rather than exercised as
+   behavior.
+
+   **This is a detector, not a control.** It is a substring-and-judgment heuristic against a file an LLM wrote, applied by you
+   reading the file rather than by a literal grep: it raises the cost of the bypass and catches the obvious spelling, and it does
+   not close the channel.
+
+   **On a `failing` outcome, also validate `testId` before you or Green ever run it — a `blocked` or discarded report has no test
+   to validate, so this does not apply there.** Where `{testId}` is a filesystem path — pytest node IDs are,
+   `path/to/test_file.py::test_name` — a fabricated one invokes the configured runner against a path outside the test tree the
+   moment it is run. If `testId` contains a `/`, the portion up to a trailing `::` (or the whole string, if there is none) names a
+   path; confirm it matches `globs.test`, the same partition just checked above. A `testId` with no `/` — a bare test name, which
+   is what jest, go and dotnet report — cannot name a path outside the tree, and there is nothing to validate. This is the primary
+   defence: validate before dispatching it, rather than executing whatever Red reported. Rejecting `..` in the Bash guard's delta
+   (`bashVerdict`) is defence in depth behind it, not a substitute for it.
+
+   Violation (glob mismatch, a content-scan hit, or — on a `failing` outcome — a `testId` that fails the check above) →
+   **revert** (see *Reverting a dispatch*) scoped to every path this audit found touched, not only the ones that failed the check
+   — the whole dispatch is rejected, not just its offending half. Re-dispatch quoting the rule and the specific paths that failed
+   it, up to `limits.violationRetries` times. Beyond that → stop, escalate.
 
    **An empty diff is not a passing audit.** "Every touched path matched" is vacuously true when nothing was touched. If Red reports
    `failing`, `passing-covered`, or `passing-flat`, it claims to have written a test — so at least one path must have changed. Zero
    changed paths alongside any of those outcomes means the agent reported work it did not do: treat it as `blocked` and escalate
    rather than committing an empty commit and moving on. The same applies to Green's audit below.
 3. Branch on `outcome`:
-   - `failing` → commit `red: <behavior>`, status `red`, continue to Green.
+   - `failing` → record the handover's `testId` on the item, commit `red: <behavior>`, status `red`, continue to Green.
    - `passing-covered` → **re-measure coverage yourself before committing.** This branch writes a commit and skips Green entirely on
      the strength of a number the agent computed about its own work; it is the one place nothing else would catch a wrong answer.
      Delta confirmed → commit `test: <behavior>`, status `done`, next item. Delta not confirmed → treat as `passing-flat`.
@@ -181,7 +344,9 @@ a re-dispatch, but your measurement is the one that decides.
 
 ### Green
 
-1. Dispatch `tdd-green` with **only** Red's handover report. Do not paste test source — that is the whole point of the separation.
+1. Dispatch `tdd-green` with Red's handover report and `limits.greenAttempts` — **only** those, and no test source. `tdd-green.md`
+   step 3 expects the attempt limit directly from you; withholding it is not the separation this rule protects, just a missing
+   input.
 2. On return, audit as above against `globs.source`.
 3. `outcome: stuck` → record the reason on the item, write the checklist, then stop and escalate with the agent's attempts.
 4. Independently verify: run the configured single-test command against `testId` yourself. Do not take the agent's word for it.
@@ -228,12 +393,22 @@ for every method in a file you know is partly untested, the mapping is broken �
 
 No hit → status `done`, next item. This avoids paying for a subagent to conclude "nothing to do", a common case in early cycles.
 
-On dispatch: pass the trigger, the source paths in scope, and `knownRed`. Audit against `globs.source`.
+On dispatch: pass the trigger, the source paths in scope, and `knownRed`. Audit against `globs.source`: `git diff --name-only`
+plus `git status --porcelain`, every touched path must match.
+
+**Violation (glob mismatch) → revert** (see *Reverting a dispatch*) scoped to every path this audit found touched. Re-dispatch
+quoting the rule and the specific paths that failed it, up to `limits.violationRetries` times. Beyond that → stop, escalate. Same
+branch Red's and Green's audits have; Refactor was missing it, not exempt from it.
 
 Then apply the **hard coverage gate**: run coverage yourself and compare against the pre-dispatch baseline. Any increase in
-uncovered lines beyond `coverageGates.refactorMaxNewUncovered` (default 0) → **reset and clean** (see *Reverting a dispatch*) and
-record `reverted`, regardless of what the agent reported. New uncovered lines mean new behavior, and Refactor adding behavior is a
-boundary violation, not a quality issue. There is no re-dispatch — reverting is the correct outcome.
+uncovered lines beyond `coverageGates.refactorMaxNewUncovered` (default 0) → **reset and clean** (see *Reverting a dispatch*),
+scoped to `git diff --name-only` plus `git status --porcelain` run fresh at this point, rather than falling back to
+`globs.source` the way Green's coverage-gate overrun does — the audit immediately above now gates conformance too, so a fresh
+scan finds nothing the audit did not already accept, but it stays fresh, not glob-scoped, because a re-derived path list is
+strictly more inclusive than a pattern and this is the backstop site for anything that reached the tree by a route the audit
+did not account for — and record `reverted`, regardless of what the agent reported. New uncovered lines mean new behavior, and
+Refactor adding behavior is a boundary violation, not a quality issue. There is no re-dispatch — reverting is the correct
+outcome.
 
 Branch on all four outcomes:
 
@@ -248,7 +423,8 @@ Branch on all four outcomes:
 **On `reverted`, verify the tree rather than trusting the report.** Refactor restores by rewriting recorded text with
 `Edit`/`Write`, not `git checkout`, so an imperfect restore is possible and the coverage gate would not catch one whose
 uncovered-line count happened to match. Require `git status --porcelain` and `git diff HEAD` to both be empty; if either is not,
-**reset and clean** (see *Reverting a dispatch*) yourself and record that the agent's restore was incomplete.
+**reset and clean** (see *Reverting a dispatch*) yourself, scoped to whatever those two commands just reported, and record that
+the agent's restore was incomplete.
 
 Then status `done`, next item.
 
@@ -271,6 +447,11 @@ that execute without asserting.
 3. Dispatch **`tdd-mutate`** with the ranked target list, `limits.mutantsPerPass`, `knownRed`, and the mutation command if one is
    configured.
 
+   **`outcome: "blocked"` → stop and escalate.** `tdd-mutate` reports `blocked` when a suite failure outside `knownRed` left it
+   unable to tell a killed mutant from breakage it inherited — the same broken-precondition case Refactor's `blocked` is, not a
+   judgement call, and there is no Mutate exemption from the Escalation section below either. Do not fall through to the
+   tree-clean check or the suite re-run below on a `blocked` return; there is nothing there to verify.
+
 **Restoring source is not enough — invalidate the language's compiled cache too.** `git status` will call the tree clean, because
 caches are gitignored, while the interpreter still holds bytecode compiled from the *mutated* source. Observed on the first live
 pass: after a kill verification the suite reported a failure whose traceback showed source that could not produce it, and clearing
@@ -282,8 +463,8 @@ For Python, prefix the configured commands with `PYTHONDONTWRITEBYTECODE=1` so n
 rule is that a restore is not complete until the cache is too.
 
 4. On return, **verify the tree is clean**: `git status --porcelain` must be empty and `git diff HEAD` must be empty. Not clean →
-   **reset and clean** (see *Reverting a dispatch*), record it, and do not trust the report — an agent that failed to revert may also
-   have failed to run the suite honestly between mutants.
+   **reset and clean** (see *Reverting a dispatch*) scoped to whatever those two commands just reported, record it, and do not
+   trust the report — an agent that failed to revert may also have failed to run the suite honestly between mutants.
 5. Re-run the full suite, **subtracting `knownRed`**. Every test outside that list must pass. This is the last orchestrator-side
    suite check that did not subtract it, and leaving it flat would dead-end every mutation pass on any run where preflight recorded a
    non-empty `knownRed` — reproducing the exact failure the threading rule above was added to prevent.
@@ -295,17 +476,20 @@ rule is that a restore is not complete until the cache is too.
    For each distinct behavior, append:
 
        { "id": <next>, "behavior": "<the survivor's missingBehavior>",
-         "status": "pending", "origin": "mutation",
+         "status": "pending", "testId": null, "origin": "mutation",
          "mutant": { "file": ..., "line": ...,
                      "mutations": [ ...every mutant that revealed this gap... ] } }
 
-7. Survivors found → report the count and **resume the per-item loop**. The new items run as ordinary Red→Green cycles.
-8. No survivors, or `mutationRoundsRun` (read from `checklist.json`) has reached `limits.mutationRounds` → done. Read the count from
-   the file, not from memory of this session — on a resumed run your context has no record of passes already spent.
-
-9. Increment `mutationRoundsRun` in `checklist.json` and write the file.
-
-That increment is a numbered step rather than trailing advice because it is the one piece of loop state nothing else reconstructs.
+7. **Increment `mutationRoundsRun` in `checklist.json` and write the file — before the branch below, not after it.** This is the one
+   piece of loop state nothing else reconstructs, and the survivor branch hands control back to the per-item loop without ever
+   reaching a step written later, so it must be written first.
+8. Branch on survivors and the count just written:
+   - No survivors → done.
+   - Survivors found, and `mutationRoundsRun` (read back from `checklist.json`, not from memory — on a resumed run your context has
+     no record of passes already spent) has not yet reached `limits.mutationRounds` → report the survivor count and **resume the
+     per-item loop**. The new items run as ordinary Red→Green cycles.
+   - Survivors found, but `mutationRoundsRun` has reached `limits.mutationRounds` → done. Report the survivors found but not
+     pursued, so the cap's cost is visible rather than silently swallowed.
 
 If the pass skipped mutants because of `mutantsPerPass`, say how many. A capped pass that reports "no survivors" without mentioning
 the cap reads as a clean bill of health it did not earn.

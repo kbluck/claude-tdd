@@ -1,0 +1,157 @@
+# Review package: be4df01..79b7f7a
+
+## Commits
+79b7f7a docs(plugin): record four iteration-2 process lessons in AGENTS.md
+
+## Files changed
+ AGENTS.md | 67 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++----
+ 1 file changed, 63 insertions(+), 4 deletions(-)
+
+## Diff
+diff --git a/AGENTS.md b/AGENTS.md
+index 450ce5e..98afe57 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -89,20 +89,29 @@ full breakdown.
+ 
+ Every item below was paid for. Iteration 1 recorded twenty defects across its own build — twelve found by review, eight only by
+ running — plus six more from an independent architecture review that document review had passed over roughly forty times.
+ Iteration 2 (the Node port and the remediation it carried) did not close the book: Task 7 alone took six review rounds and
+ surfaced four distinct defects from a change that was one paragraph on paper. The instruments changed — bash gave way to
+ `node:test`, `jq` is gone, the guard is a module instead of a sourced script — but the shape of what gets missed did not: found
+ late, found by running or by an independent reviewer, rarely by a first read.
+ 
+ ## A green suite is not evidence
+ 
++**The principle underlying this section (M2), stated once so it does not have to be rediscovered:** "green" from a harness that
++cannot distinguish "no assertion failed" from "no assertion ran" is not evidence. History, from the retired bash harness: a
++one-character `jq` filter typo once deleted 46 assertions from a run, and the suite reported "122 passed, 0 failed" —
++healthy-looking. The root cause — a harness with no notion of what the count *should* be — was identified early in iteration 1's
++build and then carried as a deferred minor for five tasks while that class of defect recurred six more times before a structural
++fix landed. `node --test` is a different harness with its own version of the same trap; see the empty-match paragraph below —
++several of the other items in this section are the same family, one layer removed: a count that cannot move even though the
++tests behind it changed completely.
++
+ `node --test` is more robust than the retired bash harness in one respect worth naming: a file that throws before registering any
+ tests does **not** take the rest of the suite down with it. Verified — a three-file run where the middle file threw at collection
+ time still ran the other two and reported `pass 2 / fail 1`, exit 1. The old harness's `set -uo pipefail` failure mode, where one
+ unbound reference silently killed every file after it, does not have a `node:test` equivalent as far as this project has measured.
+ Do not assume further than that; nobody has fuzzed the runner's other edges.
+ 
+ What `node --test` does **not** guard against: an empty match. `node --test` given a glob or path that resolves to zero files
+ prints `tests 0 / pass 0 / fail 0` and **exits 0** — verified directly. That is the exact "empty glob reports success" failure the
+ retired harness used to catch on purpose; `node:test` itself does not, so a typo'd `--test-name-pattern` or a moved file that
+ silently drops out of the discovered set reads as a clean run. Always run the whole suite (`node --test`, no args, from the repo
+@@ -147,58 +156,108 @@ found them when told which direction the asymmetry ran. The Node port kept the d
+ out-of-root path now denies on *read* as well as write (`toRepoRelative` returning `null`), a deliberate narrowing from the retired
+ bash guard's behaviour — the governing rule applied in the direction it had never been tested before.
+ 
+ ## Fixing the document about the artifact is not fixing the artifact
+ 
+ Three occurrences in iteration 1. The third landed on a security boundary: commit `b97c69f`, labelled `fix(plan): normalise a
+ trailing /.`, touched the plan and the spec and never `hooks/lib/rules.sh`. The ledger recorded it FIXED; the bypass stayed live.
+ 
+ **A fix is not done until `git show --stat` names a file outside `docs/`.**
+ 
++## A change that makes a document false, or a latent defect reachable, owns it
++
++A scope-boundary ruling, used twice in iteration 2, both times to pull a fix *into* the task under review rather than deferring
++it as pre-existing:
++
++- **Task 6 (resume branch).** Before this task, `## Decompose` was unconditional, so a re-invocation clobbered the checklist and
++  there was no resume path for preflight's `knownRed` capture to interact with. The implementer flagged a `knownRed`-poisoning
++  failure on resume as pre-existing and out of scope — a fair reading of the text, but wrong on reachability. **The resume branch
++  is what makes the interaction live. A latent defect a change turns reachable belongs to that change.**
++- **Task 7 (retiring `git checkout`).** The fix that closed the fourth "revert does not revert" instance (below) made the spec
++  false: it still described `git checkout -- <pathspec>` as the current mechanism. **A change that makes a document false owns
++  that falseness** — the same reachability rule, applied to prose instead of code. The risk of leaving it was concrete, not
++  cosmetic: the spec would have kept documenting a mechanism just proven to silently restore nothing on a mixed pathspec,
++  inviting someone to restore it from the document later — this repository's signature defect, running in reverse.
++
++Both times "not what this task's brief asked for, defer it" was defensible on a narrow reading and wrong in practice. Ask
++reachability, not authorship: does *this* change make a defect exploitable, or a document false, that was not before? If yes, it
++owns the fix regardless of which task's brief mentioned it first.
++
+ ## The spec is not a safe substitute for the files
+ 
+-A different failure mode from the one above, on the other side of the same boundary: not a fix that stopped at the document, but
+-a **brief** — written to guide an implementer — asserting something false about the system because it was written from the spec's
+-account of the code rather than from the code. Three separate instances landed in iteration 2's task briefs, each caught before it
+-did damage, none by the person who wrote it first:
++A different failure mode from *Fixing the document about the artifact is not fixing the artifact* above, on the other side of the
++same boundary: not a fix that stopped at the document, but a **brief** — written to guide an implementer — asserting something
++false about the system because it was written from the spec's account of the code rather than from the code. Three separate
++instances landed in iteration 2's task briefs, each caught before it did damage, none by the person who wrote it first:
+ 
+ - A brief asserted a missing interpreter "fails closed" — the implementer checked `hooks/guard.mjs` before committing and found
+   the opposite, self-corrected.
+ - A brief asserted Red "already receives `publicApi` in its input" — false; `publicApi` is a field Red *emits*, not one it is
+   given. The implementer checked `agents/tdd-red.md` rather than transcribing the claim.
+ - The spec itself stated the revert pathspec is "the offending paths the audit reported" — narrower than the actual rule, every
+   path the triggering check found. This one was authored by the same person who then repeated it in a brief.
+ 
+ The common cause: writing a claim about what an agent receives, does, or enforces from memory of the design rather than from
+ `agents/*.md`, `hooks/lib/rules.mjs`, or `SKILL.md` directly — **including when you are the one who wrote the spec.** The spec is
+ one abstraction layer up from the artifact, and layers drift. Verify role-level and mechanism-level claims against the file that
+ actually governs them before writing them down anywhere, brief or otherwise.
+ 
++## A trace must quote the sentence that causes it
++
++An implementer's Task 6 trace concluded a test "is already accounted for and not re-flagged" — a correct-sounding conclusion, but
++no sentence in the text it was tracing performed that check; the trace inferred a rule the source never stated. A trace that
++reaches the right conclusion from text that does not support it is exactly the failure traces exist to catch, and it is not
++visible from the conclusion alone — only from checking each step against its source.
++
++**Standard applied since:** every step of a trace must name the sentence that *causes* it, not one merely adjacent to it. The
++re-trace that followed was checked against this standard directly — including confirming a three-way bucketing was mutually
++exclusive by definition (the third bucket was defined as "neither of the above," so nothing could satisfy the first two and still
++fall through it) rather than by inspection — and it held. When reviewing a trace, do not accept a step you cannot point to a
++specific quoted sentence for.
++
+ ## Verification instruments lie
+ 
+ Every one of these produced a confident wrong answer:
+ 
+ - **A whole-file `grep` passes when the key is missing from the specific block a model copies from.** Scope the haystack, and check
+   both anchors — a broken end anchor lets a range match run to EOF and silently re-widens it. `tests/config-contract.test.mjs`
+   exists in its current, heavily-scoped form because of this; read its header comments before assuming a simpler check suffices.
+ - **The interpreter the hook runs under is not the one your shell gives you, and it can change with no project file changing and
+   no restart.** Nothing in this project selects `node` for the spawned hook — Claude Code does, in exec form, with no shell —
+   while `.node-version` and `fnm` only govern the orchestrator's own `Bash` tool. Measured disagreement on the development
+   machine: the `Bash` tool resolved `fnm`'s 22.23.2 while the spawned hook resolved an IDE-bundled 24.13.0, at the same moment.
+   Measured drift on the same machine without any restart: `fnm`'s per-session directory is keyed to a shell PID and is
+   garbage-collectable once that shell exits — reaping it would move the hook from 22 to a stable-alias 26 with nothing in the
+   repository changing. **The guard's version check is a floor, not a pin** — 26 passing is correct, not a bug — and it is the
+   *only* thing that actually enforces the floor; `.node-version` only makes the *test suite* run on it. A green preflight version
+   check (Preflight item 6) proves node is on the **`Bash` tool's** `PATH` only — it says nothing about the interpreter the hook
+   itself gets. Preflight item 7 (dispatch a probe, confirm an observed denial) is the only check that exercises the real spawn
+   path; do not let a green item 6 read as proof the guard can start.
+ 
++## The scope of a measured fact is part of the fact
++
++A different failure from the ones above: not a wrong measurement, but a correct one generalised past what it covered. The Tier 0
++spike proved `CLAUDE_PLUGIN_ROOT` is set **for the hook process** Claude Code spawns — that is what was actually measured. Task
++4's brief read that as "set for the plugin's code" and ordered preflight to read the Node-version floor from
++`${CLAUDE_PLUGIN_ROOT}/hooks/lib/rules.mjs`. It is unset in the orchestrator's own shell — `/tdd-init` and `/tdd` run with cwd in
++the *user's* project, verified directly — so the fix reproduced the exact "unreadable floor → stop" failure it was meant to
++close, the same one a bare relative path had already been rejected for.
++
++Caught by a reviewer's refusal to assume the resolution worked, not by a fresh measurement: the round-1 re-review flagged, as an
++explicitly non-blocking, out-of-scope observation, that it had not verified orchestrator-side `${CLAUDE_PLUGIN_ROOT}` resolution —
++which turned out to be the most valuable line in that report. The fix that followed removed the dependency rather than trying to
++resolve it: state the floor as a literal in both prompts, with a test asserting the literal matches `NODE_FLOOR` so drift fails at
++test time instead of mid-preflight in a user's project.
++
++When a measurement licenses a rule, restate exactly what was measured — which process, which environment, one file, one run —
++before writing the rule down. "It's set" is not a fact; "it's set for the hook process, unconfirmed anywhere else" is.
++
+ ## Revert does not revert
+ 
+ - `git checkout -- .` restores **tracked** files only. Red's tests are almost always new files, so a rejected test stays in the
+   tree where the next commit sweeps it up. Found on the first live run.
+ - `git reset --hard` has the same blind spot when used bare, at three more sites.
+ - `git reset --hard -- <path>` is **fatal**: *Cannot do hard reset with paths*. Prose describing an impossible command is how the
+   first two of these arose.
+ - **Scoping `checkout` to a pathspec does not fix the class — it adds a fourth instance, sharper than the first three.**
+   `git checkout -- <path1> <path2>` validates every pathspec entry before touching anything: if even one does not match a
+   tracked file, the whole command aborts and restores **nothing**, not even the entries that would have matched. Verified:

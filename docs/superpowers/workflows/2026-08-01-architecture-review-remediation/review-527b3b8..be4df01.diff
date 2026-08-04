@@ -1,0 +1,843 @@
+# Review package: 527b3b8..be4df01
+
+## Commits
+be4df01 docs(plugin): rewrite the traps section for the Node port
+19d93d5 test(skill): pin Task 13's SKILL.md, agent and spec consistency fixes
+0bcd3f3 fix(skill): close six remaining consistency gaps in the TDD cycle
+a8c2c1f fix(spec): stop naming require(/include as unconditional content-scan hits
+8379fd7 fix(agent): declare the inputs tdd-red and tdd-refactor actually use
+43555db chore: drop the vestigial .tdd/phase gitignore entry
+
+## Files changed
+ .gitignore                                         |   1 -
+ AGENTS.md                                          | 151 ++++++++++-----
+ agents/tdd-red.md                                  |   2 +
+ agents/tdd-refactor.md                             |   5 +-
+ .../2026-07-30-tdd-subagent-workflow-design.md     |   2 +-
+ skills/run-tdd-cycle/SKILL.md                      | 104 ++++++----
+ tests/skill-consistency.test.mjs                   | 209 +++++++++++++++++++++
+ 7 files changed, 390 insertions(+), 84 deletions(-)
+
+## Diff
+diff --git a/.gitignore b/.gitignore
+index b858f77..dadfe15 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -12,21 +12,20 @@
+ # https://github.com/github/gitignore                                          #
+ #                                                                              #
+ # Full documentation about gitignore: https://git-scm.com/docs/gitignore       #
+ ################################################################################
+ 
+ ################################################################################
+ ###                                 Project                                  ###
+ ################################################################################
+ 
+ .superpowers/
+-.tdd/phase
+ .tdd/checklist.json
+ 
+ ################################################################################
+ ###                                JetBrains                                 ###
+ ################################################################################
+ 
+ # Covers JetBrains IDEs: Android Studio, AppCode, CLion, DataGrip, GoLand,
+ # IntelliJ, PhpStorm, PyCharm, Rider, RubyMine, and WebStorm.
+ # https://intellij-support.jetbrains.com/hc/en-us/articles/206544839
+ 
+diff --git a/AGENTS.md b/AGENTS.md
+index 708280d..450ce5e 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -6,21 +6,21 @@ documents cannot tell you: how to work in this repository, and the traps this pr
+ Read before changing anything substantial:
+ 
+ - `docs/**/specs/*.md` — the design contract.
+ - `docs/**/plans/*.md` — task-by-task detail. The current iteration is `2026-08-01-architecture-review-remediation.md`.
+ - `docs/**/reviews/*.md` — independent review findings.
+ - `.superpowers/**/progress.md` — the ledger: every defect found, how, and what it cost.
+ - `.claude/.remember/*.md` — memories from prior sessions.
+ 
+ ## Repository state you will trip over
+ 
+-`.tdd/config.json` **exists on disk and is gitignored** (`.gitignore:174`). It describes the `e2e/` fixture, not the plugin. So a
++`.tdd/config.json` **exists on disk and is gitignored** (`.gitignore:173`). It describes the `e2e/` fixture, not the plugin. So a
+ `tdd-*` dispatch here is guarded normally against the fixture's globs — `tdd-red` writing `e2e/tests/test_new.py` is **permitted**;
+ reading `e2e/src/**` is denied. It does **not** deny everything with "run /tdd-init"; that only happens if the file is absent.
+ 
+ The suite does not depend on any of this: it copies `tests/fixtures/config.json` into a sandbox and points the guard there with
+ `TDD_PROJECT_DIR`.
+ 
+ ## Commits
+ 
+ Conventional Commits — use the `conventional-commits` skill.
+ 
+@@ -80,101 +80,158 @@ full breakdown.
+    decomposition, no re-approval prompt for the two items that already have state — rather than overwriting the checklist.
+ 4. After it advances at least one item, run
+    `node e2e/lib/checklist-invariants.mjs e2e/fixtures/checklist-resume-seed.json <worktree>/.tdd/checklist.json` to confirm every
+    field a resume must preserve actually survived.
+ 5. `git worktree remove --force <worktree>` to clean up.
+ 
+ ---
+ 
+ # Traps
+ 
+-Every item below was paid for. Twenty defects were recorded across the first iteration — twelve found by review, eight only by
++Every item below was paid for. Iteration 1 recorded twenty defects across its own build — twelve found by review, eight only by
+ running — plus six more from an independent architecture review that document review had passed over roughly forty times.
++Iteration 2 (the Node port and the remediation it carried) did not close the book: Task 7 alone took six review rounds and
++surfaced four distinct defects from a change that was one paragraph on paper. The instruments changed — bash gave way to
++`node:test`, `jq` is gone, the guard is a module instead of a sourced script — but the shape of what gets missed did not: found
++late, found by running or by an independent reviewer, rarely by a first read.
+ 
+ ## A green suite is not evidence
+ 
+-`run.sh` fails a file that contributes **zero** assertions, and fails an empty glob. It does **not** catch a file that dies
+-**partway**: assertions recorded before the failure count as movement, and everything after it is invisible.
+-
+-An unset variable is worse. Test files are sourced under `set -uo pipefail`, so one unbound reference **kills the whole harness** —
+-no summary line is printed at all, every later file never runs, and the exit status is 1. Reproduced. **Read the exit status, not
+-the pass count**; a human skimming for "N passed" is the only reader this fools.
+-
+-The reason this matters: a one-character typo in a `jq` filter once dropped 46 assertions, and the run reported *122 passed, 0
+-failed*. The root cause — a harness with no notion of what the count should be — was known for five tasks while the class recurred
+-six times.
+-
+-- After editing a test file, **confirm the passed-count actually moved**.
+-- **Bite-check**: break the thing on purpose and confirm the exact assertions you expect fail. Removing the two normalisation lines
+-  should fail exactly four.
++`node --test` is more robust than the retired bash harness in one respect worth naming: a file that throws before registering any
++tests does **not** take the rest of the suite down with it. Verified — a three-file run where the middle file threw at collection
++time still ran the other two and reported `pass 2 / fail 1`, exit 1. The old harness's `set -uo pipefail` failure mode, where one
++unbound reference silently killed every file after it, does not have a `node:test` equivalent as far as this project has measured.
++Do not assume further than that; nobody has fuzzed the runner's other edges.
++
++What `node --test` does **not** guard against: an empty match. `node --test` given a glob or path that resolves to zero files
++prints `tests 0 / pass 0 / fail 0` and **exits 0** — verified directly. That is the exact "empty glob reports success" failure the
++retired harness used to catch on purpose; `node:test` itself does not, so a typo'd `--test-name-pattern` or a moved file that
++silently drops out of the discovered set reads as a clean run. Always run the whole suite (`node --test`, no args, from the repo
++root) as the check that actually matters, and treat a filtered run as a convenience, never as the verification.
++
++**`node --test tests/` (a bare directory) is not the same as `node --test`.** It does not discover the suite — it throws
++`Cannot find module` and exits 1. Loud, not silent, but still a wrong command that looks plausible; use no args from the repo
++root, or an explicit glob.
++
++**Compare failing identities, not failing counts.** Verified on this project: making `globMatch` unconditionally permissive left
++the failure count unchanged at 29 before and after — but every failing test was a *different* test, five negatives newly failing
++and five positives newly passing. A count-only check would have read that as "no effect" and missed the mutation entirely, in
++either direction it could have been wrong. The same shape recurred at the report level, not just the test level: a fix-round
++report claimed a bite-check produced "8 pass / 2 fail"; reproducing it independently got 3 failures, not 2 — the mechanism was
++*more* robust than claimed, caught only because the number was checked rather than trusted.
++
++- After editing a test file, **confirm the passed-count actually moved**, then confirm the *identities* that moved are the ones
++  you expected.
++- **Bite-check**: break the thing on purpose and confirm the exact assertions you expect fail — by name, not by count.
+ - Beware the **vacuous pass**: an assertion satisfiable by a permissive catch-all (`**/test_*.py` matches almost any test name)
+   proves nothing. Name fixtures so they cannot be satisfied coincidentally — `helpers.py`, not `test_helpers.py`.
+-- A derived loop that enumerates nothing contributes zero assertions and looks identical to one that passes.
++- Its mirror image bit this project too: an assertion built on a glob so permissive it **cannot fail either**. A directory-agnostic
++  `**/test_*.py` cannot demonstrate a case-folding asymmetry no matter how the code behaves, because it matches the wrong-case path
++  regardless. Same root cause as the catch-all above — a `**/`-prefixed glob used where a directory-anchored one was needed — same
++  tell: check what a negative assertion would need to be true to fail, not just whether it currently passes.
++- A derived loop that enumerates nothing contributes zero assertions and looks identical to one that passes — still true under
++  Node. `SKILL.md`'s mutation pass names this directly: "Do not dispatch with an empty target list; that guarantees
++  `mutantsAttempted: 0`," and "`mutantsAttempted: 0` is a failed pass, not a clean one."
+ 
+ ## Reads fail open; writes fail closed
+ 
+ This is the single most productive question to ask of any branch in this codebase:
+ 
+ > **What reaches `allow` when the check cannot be evaluated?**
+ 
+ Writes are an allowlist: a failure to match denies, loudly. Reads are a denylist: a failure to match **permits, silently, and
+ leaves no trace in any diff**. So every defect on the read path is invisible, and every one of them has been found late.
+ 
+ Seven fail-opens were found in the first iteration. They cluster **at the seams between components** — where one function's output
+ becomes another's input and neither owns the empty case. Generic review prompts approved every one of those diffs; reviewers only
+-found them when told which direction the asymmetry ran.
++found them when told which direction the asymmetry ran. The Node port kept the discipline live rather than retiring it: an
++out-of-root path now denies on *read* as well as write (`toRepoRelative` returning `null`), a deliberate narrowing from the retired
++bash guard's behaviour — the governing rule applied in the direction it had never been tested before.
+ 
+ ## Fixing the document about the artifact is not fixing the artifact
+ 
+-Three occurrences. The third landed on a security boundary: commit `b97c69f`, labelled `fix(plan): normalise a trailing /.`,
+-touched the plan and the spec and never `hooks/lib/rules.sh`. The ledger recorded it FIXED; the bypass is still live.
++Three occurrences in iteration 1. The third landed on a security boundary: commit `b97c69f`, labelled `fix(plan): normalise a
++trailing /.`, touched the plan and the spec and never `hooks/lib/rules.sh`. The ledger recorded it FIXED; the bypass stayed live.
+ 
+ **A fix is not done until `git show --stat` names a file outside `docs/`.**
+ 
++## The spec is not a safe substitute for the files
++
++A different failure mode from the one above, on the other side of the same boundary: not a fix that stopped at the document, but
++a **brief** — written to guide an implementer — asserting something false about the system because it was written from the spec's
++account of the code rather than from the code. Three separate instances landed in iteration 2's task briefs, each caught before it
++did damage, none by the person who wrote it first:
++
++- A brief asserted a missing interpreter "fails closed" — the implementer checked `hooks/guard.mjs` before committing and found
++  the opposite, self-corrected.
++- A brief asserted Red "already receives `publicApi` in its input" — false; `publicApi` is a field Red *emits*, not one it is
++  given. The implementer checked `agents/tdd-red.md` rather than transcribing the claim.
++- The spec itself stated the revert pathspec is "the offending paths the audit reported" — narrower than the actual rule, every
++  path the triggering check found. This one was authored by the same person who then repeated it in a brief.
++
++The common cause: writing a claim about what an agent receives, does, or enforces from memory of the design rather than from
++`agents/*.md`, `hooks/lib/rules.mjs`, or `SKILL.md` directly — **including when you are the one who wrote the spec.** The spec is
++one abstraction layer up from the artifact, and layers drift. Verify role-level and mechanism-level claims against the file that
++actually governs them before writing them down anywhere, brief or otherwise.
++
+ ## Verification instruments lie
+ 
+ Every one of these produced a confident wrong answer:
+ 
+-- **`hooks/lib/rules.sh` is bash. Sourcing it into zsh gives wrong verdicts** — `[[ == ]]` glob semantics differ between the
+-  shells, and zsh word-splits differently. This produced false VIOLATIONs once and a false S3 reading during the iteration-2
+-  review. Verify with `/bin/bash -c '...'` explicitly, never in the ambient shell.
+-- **zsh ties `path` to `PATH`.** A loop variable named `path` destroys the search path mid-script, and every subsequent command
+-  fails with `command not found`. Hit during this project twice.
+ - **A whole-file `grep` passes when the key is missing from the specific block a model copies from.** Scope the haystack, and check
+-  both anchors — a broken end anchor lets `sed` run to EOF and silently re-widens it.
+-- **The replacement half of a bash substitution is not a pattern.** `${p//\/\//\/}` emits a literal backslash. This trap bit twice:
+-  the `**` normalisation bug, then the first path normaliser, which silently produced `e2e\/src/a.py`. Caught only by printing the
+-  output. Use `tr -s`.
+-- **An empty `dirname` or an empty glob** makes a loop iterate zero times, which asserts nothing and reports success.
++  both anchors — a broken end anchor lets a range match run to EOF and silently re-widens it. `tests/config-contract.test.mjs`
++  exists in its current, heavily-scoped form because of this; read its header comments before assuming a simpler check suffices.
++- **The interpreter the hook runs under is not the one your shell gives you, and it can change with no project file changing and
++  no restart.** Nothing in this project selects `node` for the spawned hook — Claude Code does, in exec form, with no shell —
++  while `.node-version` and `fnm` only govern the orchestrator's own `Bash` tool. Measured disagreement on the development
++  machine: the `Bash` tool resolved `fnm`'s 22.23.2 while the spawned hook resolved an IDE-bundled 24.13.0, at the same moment.
++  Measured drift on the same machine without any restart: `fnm`'s per-session directory is keyed to a shell PID and is
++  garbage-collectable once that shell exits — reaping it would move the hook from 22 to a stable-alias 26 with nothing in the
++  repository changing. **The guard's version check is a floor, not a pin** — 26 passing is correct, not a bug — and it is the
++  *only* thing that actually enforces the floor; `.node-version` only makes the *test suite* run on it. A green preflight version
++  check (Preflight item 6) proves node is on the **`Bash` tool's** `PATH` only — it says nothing about the interpreter the hook
++  itself gets. Preflight item 7 (dispatch a probe, confirm an observed denial) is the only check that exercises the real spawn
++  path; do not let a green item 6 read as proof the guard can start.
+ 
+ ## Revert does not revert
+ 
+ - `git checkout -- .` restores **tracked** files only. Red's tests are almost always new files, so a rejected test stays in the
+   tree where the next commit sweeps it up. Found on the first live run.
+-- `git reset --hard` has the same blind spot, at three more sites.
+-- `git reset --hard -- <path>` is **fatal**: *Cannot do hard reset with paths*. Only `clean` takes a pathspec. Prose describing an
+-  impossible command is how the first two of these arose.
+-- `git clean` **without `-x`** spares gitignored paths, so the venv, the checklist and the coverage report survive. Do not add `-x`.
++- `git reset --hard` has the same blind spot when used bare, at three more sites.
++- `git reset --hard -- <path>` is **fatal**: *Cannot do hard reset with paths*. Prose describing an impossible command is how the
++  first two of these arose.
++- **Scoping `checkout` to a pathspec does not fix the class — it adds a fourth instance, sharper than the first three.**
++  `git checkout -- <path1> <path2>` validates every pathspec entry before touching anything: if even one does not match a
++  tracked file, the whole command aborts and restores **nothing**, not even the entries that would have matched. Verified:
++  `git checkout -- tracked.py untracked.py` (a legitimately modified tracked file plus a new untracked one) exited 1 and left
++  `tracked.py` unrestored; `tracked.py` alone exited 0 and succeeded. This is the *ordinary* shape of a violating dispatch, not an
++  edge case — a pathspec built from what a check found routinely mixes a modified tracked file with a new untracked one, because
++  Red's tests are almost always new files. The failure shape is the worst available: `checkout` silently restores nothing, `clean`
++  (see below) still removes the untracked half, and the tree looks reverted while the tracked modification survives into the next
++  commit — exactly the bug this section opens with, reintroduced by the fix for the third instance.
++- **The resolution: `checkout` is retired from this mechanism entirely.** Every revert site now pairs `git reset --hard HEAD` (no
++  pathspec, tree-wide, so there is nothing for it to abort on) with a scoped `git clean -fd -- <pathspec>`. `clean` does not share
++  `checkout`'s atomicity failure — it evaluates each pathspec entry independently, so a non-matching entry is skipped, not treated
++  as an error that aborts the rest. Verified: `git clean -fd -- tracked.py untracked.py` removed only `untracked.py` and exited 0.
++  If you ever find yourself about to write `git checkout -- <anything>` into a revert path in this project, that is this trap
++  restarting — use `reset --hard` plus scoped `clean` instead, see `skills/run-tdd-cycle/SKILL.md`'s *Reverting a dispatch*.
++- `git clean` **without `-x`** spares gitignored paths, so the venv, the checklist and the coverage report survive. Do not add
++  `-x`.
+ 
+ ## The environment lies too
+ 
+ - **Restoring source does not invalidate bytecode.** A suite once reported a failure with a traceback the source could not produce,
+   and git called the tree clean because `.pyc` is gitignored. The same mechanism serves a false **green**, which is where it would
+-  be believed. `PYTHONDONTWRITEBYTECODE=1` is in the configured commands for this reason.
++  be believed. `PYTHONDONTWRITEBYTECODE=1` is in the configured commands for this reason — still relevant, since `e2e/` is still a
++  Python/pytest fixture.
+ - **The mutation run leaves `e2e/mutants/` behind**, which permanently breaks the configured test command until removed. The
+-  wrapper traps it and the commands pass `--ignore=e2e/mutants`.
+-
+-## Platform constraints
+-
+-bash **3.2.57** (macOS system bash): no `${v,,}`, no `${v^^}`, no associative arrays, no `mapfile`. Fold case with
+-`tr '[:upper:]' '[:lower:]'`.
+-
+-BSD `realpath` has **no `-m`**, so it cannot canonicalise a path that does not exist yet — which is every `Write` of a new file.
+-`cd "$dir" && pwd -P` is the portable route, and it returns the true stored case of every directory component.
++  wrapper (`e2e/mutmut.sh`) traps it and the commands pass `--ignore=e2e/mutants`.
+ 
+ ## Where the defects come from
+ 
+-All twenty first-iteration defects originated **in the plan**, none from an implementer — because that plan embedded the
++Iteration 1's twenty defects all originated **in the plan**, none from an implementer — because that plan embedded the
+ implementation and left the implementer nothing to decide. Implementers caught five by flagging rather than transcribing.
+ 
+-The current plan carries design intent and no code, for exactly that reason. If you find yourself writing an implementation into a
+-plan document, that is the failure mode restarting.
++Iteration 2's plan carried design intent and no code, for exactly that reason, and the failure mode it was built to prevent did
++not recur — but a related one did, one layer up: see *The spec is not a safe substitute for the files* above. Writing an
++implementation into a plan document is the original failure mode restarting; writing an unverified claim about the system into a
++brief or a spec is its sibling. Both are caught the same way — check the file the claim is about before it goes in writing.
+diff --git a/agents/tdd-red.md b/agents/tdd-red.md
+index ebb23d1..56247d8 100644
+--- a/agents/tdd-red.md
++++ b/agents/tdd-red.md
+@@ -27,20 +27,22 @@ already has you consult. If that is still not enough, report
+ Anything else — `git`, `rm`, `mv`, `sed` — is denied by design, not because you
+ did something wrong. Use `Read` to inspect, and `Edit` or
+ `Write` to change files within your permitted paths.
+ 
+ ## Your input
+ 
+ - A specification file path.
+ - One checklist item: the single behavior to test this cycle.
+ - The configured single-test command (`commands.single`), single-test-terse
+   command (`commands.singleTerse`, which may be `null`), and coverage command.
++- The current coverage baseline (uncovered-line count) to compare against —
++  step 4 needs it to tell `passing-covered` from `passing-flat`.
+ 
+ ## Your objective
+ 
+ Author **exactly one** test for that one behavior, determine its outcome, and
+ stop. Do not write a second test. Do not test behavior beyond the item.
+ 
+ ## Procedure
+ 
+ 1. Read the spec and any existing tests to match conventions and avoid duplicating coverage.
+ 2. Write one test for the assigned behavior.
+diff --git a/agents/tdd-refactor.md b/agents/tdd-refactor.md
+index aa4ab93..a93bb3c 100644
+--- a/agents/tdd-refactor.md
++++ b/agents/tdd-refactor.md
+@@ -21,21 +21,24 @@ not code that makes it tell you more.
+ 
+ **Your `Bash` access is limited to the commands configured for your role.**
+ Anything else — `git`, `rm`, `mv`, `sed` — is denied by design, not because you
+ did something wrong. Use `Read` to inspect, and `Edit` or
+ `Write` to change files within your permitted paths.
+ 
+ ## Your input
+ 
+ - The trigger that caused your dispatch (duplication, function length, naming drift).
+ - The source paths in scope.
+-- The configured full-suite command.
++- The configured full-suite command and coverage command — step 2 needs the
++  latter to check its own gate before handing over.
++- A `knownRed` list of tests that were already failing before this run began —
++  step 1 needs it to tell your own breakage from inherited breakage.
+ 
+ ## Your window into the tests
+ 
+ **You may never open a test file.** You may read everything the runner prints
+ on its own when your change breaks something — test names, failure messages,
+ assertion diffs, tracebacks that quote source lines. That is not a violation;
+ it is your only feedback channel, and it is sufficient. Writing code that
+ makes the runner print more than that, so a test file passes through it, is
+ the same violation as opening the file directly.
+ 
+diff --git a/docs/superpowers/specs/2026-07-30-tdd-subagent-workflow-design.md b/docs/superpowers/specs/2026-07-30-tdd-subagent-workflow-design.md
+index da2e81b..08095ec 100644
+--- a/docs/superpowers/specs/2026-07-30-tdd-subagent-workflow-design.md
++++ b/docs/superpowers/specs/2026-07-30-tdd-subagent-workflow-design.md
+@@ -377,21 +377,21 @@ agent_type not a tdd-* role              → permit   (unrelated work)
+ tdd-red | tdd-green | tdd-refactor
+         | tdd-mutate                     → apply that role's rules
+ ```
+ 
+ **The payload shape differs by caller, and that difference is the dispatch** *(iteration 2, measured under exec form)*. A subagent call carries `agent_id` and `agent_type`; a main-thread call omits **both keys entirely**. The key is absent, not present-and-null — a distinction worth preserving in code, because treating "absent" and "null" as one case is how a fail-open hides.
+ 
+ **`tool_input.file_path` arrives absolute**, even when the agent was given a relative path: a dispatch asking for `e2e/spec.md` produced `/Users/…/claude-tdd/e2e/spec.md` in the payload. The path layer must not assume repo-relative input.
+ 
+ **The namespace strip is not an implementation detail** *(iteration 2: the pseudocode above previously omitted it)*. Plugin-provided agents arrive namespaced — `claude-tdd:tdd-red`, verified empirically on Claude Code 2.1.220. Matching the bare name alone misses every real dispatch, falls through to permit, and renders the guard **entirely inert** while every test using a bare-name payload still passes. This was the single most consequential defect in the project, and the canonical pseudocode has to show its fix. Stripping is deliberately broad: another plugin shipping its own `tdd-red` is also constrained here — a false denial, loud and safe, versus matching too narrowly and permitting silently.
+ 
+-**Detection where prevention is impossible** *(iteration 2)*. The orchestrator already reads everything and audits every commit, so it is the right place for the counter-measure the hook cannot provide: scan Red's committed test files for source-file reads (`open(`, `require(`, `include`, `File.read`) targeting a `globs.source` path, and treat a hit as a guardrail violation under the existing revert-and-re-dispatch rule. That converts the strongest bypass from undetectable to detected-at-commit, using the same prevent-and-verify split the design relies on everywhere else.
++**Detection where prevention is impossible** *(iteration 2)*. The orchestrator already reads everything and audits every commit, so it is the right place for the counter-measure the hook cannot provide: scan Red's committed test files for source-file reads targeting a `globs.source` path. `open(` or `File.read` reading it as text is a hit on its own. `require(`/`include` naming it is **not**, by itself — that is how a test loads the module under test to exercise its behavior, and every Red test does exactly that; it becomes a hit only combined with the pattern above, the loaded value then treated as text and surfaced rather than exercised as behavior. Either way, treat a hit as a guardrail violation under the existing revert-and-re-dispatch rule. That converts the strongest bypass from undetectable to detected-at-commit, using the same prevent-and-verify split the design relies on everywhere else.
+ 
+ **Its ceiling must be stated wherever it is described.** This is a substring heuristic against an LLM-authored file. It raises the cost of the bypass and catches the obvious spelling; it does not close the channel. It is a **detector, not a control**, and describing it otherwise would manufacture exactly the false confidence this section exists to remove.
+ 
+ **Why `agent_type` and not a phase-marker file.** An earlier draft had the orchestrator write `.tdd/phase` before each dispatch. That design is broken, and the spike (`docs/superpowers/spikes/2026-07-30-hook-in-subagent.md`) showed why: during the red phase the orchestrator itself runs `git diff --name-only` to audit Red's work. A marker-based guard would judge that main-thread call against Red's Bash allowlist, find `git diff` does not prefix-match the test command, and **deny the orchestrator's own audit.** A marker file cannot distinguish orchestrator from agent. `agent_type` can, and is the only thing that can.
+ 
+ Dropping the marker also removes the stale-marker failure mode and the strictly-sequential constraint, which existed only because one global file cannot describe two concurrent cycles.
+ 
+ **The hook fails closed — but only once it knows the caller is a constrained role.** For a recognized `tdd-*` agent, an unreadable or unparseable `.tdd/config.json`, an unresolvable path, or an unmappable role all deny. A guard that cannot evaluate must not default to permitting; that would disable read isolation silently, which is the exact failure this design exists to prevent. `/tdd-init` and preflight both check the interpreter so the loud failure lands at setup rather than mid-cycle.
+ 
+ **The one failure the guard cannot make fail closed is its own.** An uncaught exception, a syntax error, or a missing interpreter exits non-zero-but-not-2, which `PreToolUse` treats as a non-blocking error and permits. Two consequences the implementation must honour: wrap the whole body so that *any* thrown error becomes a deliberate exit 2 rather than a stack trace, and keep the preflight probe, which is the only check that catches a guard that never ran at all.
+diff --git a/skills/run-tdd-cycle/SKILL.md b/skills/run-tdd-cycle/SKILL.md
+index 3a045e9..e4a4eb7 100644
+--- a/skills/run-tdd-cycle/SKILL.md
++++ b/skills/run-tdd-cycle/SKILL.md
+@@ -180,71 +180,83 @@ untracked files, and `reset --hard` alone can never remove them — only `clean`
+ 
+ **Only the `clean` half takes a pathspec — and that pathspec is every path the triggering check actually found, not the role's
+ write globs.** For most of the checks below, a guardrail violation is *by definition* a write to a path that does not match the
+ role's globs — that is what makes it a violation rather than ordinary work — so the rogue file sits outside the glob by
+ construction, and a `clean` scoped to the glob can never reach it. (Red's content-scan hit, below, is the one exception: it is a
+ violation found *inside* `globs.test`. The found-paths pathspec still reaches it — the same mechanism, applied uniformly, rather
+ than a second scoping rule for a second kind of violation.) Two cases, not one; do not collapse them:
+ 
+ - **A check found concrete paths responsible for the discard.** Red's audit and Green's each name the paths that failed the
+   check — a glob mismatch, or, for Red, a content-scan hit (see *Per item*) — even though a content-scan hit sits *inside*
+-  `globs.test` by construction, unlike every other violation in this bucket. Refactor's incomplete-restore check and the
+-  mutation pass's tree-clean recovery each re-run `git status
+-  --porcelain` (and `git diff HEAD`) and find it non-empty when it was supposed to be clean — that finding **is** a list of
+-  concrete paths, the same way an audit's is. **Refactor's hard coverage gate belongs here too, for a reason specific to
+-  Refactor:** its own audit step (see *Per item*) is one clause with no defined violation branch, so unlike Green's coverage-gate
+-  overrun below — which fires only after an audit that *does* gate conformance — reaching Refactor's gate proves nothing about
+-  whether every touched path stayed inside `globs.source`. Run the same `git diff --name-only` / `git status --porcelain` Red's
+-  and Green's audits use, fresh, at the point the gate fires, and scope `clean` to what it returns instead. In every one of
+-  these five sites, scope `clean` to **every path the check found**, not only the subset that broke the glob match where one
+-  exists. A dispatch that violated the glob usually also wrote legitimate in-glob files alongside the rogue one — leaving those
+-  behind after `clean` reproduces the exact bug this section opens with (a rejected file surviving to be swept into a later
+-  commit), just for the half of the dispatch that happened to pass the glob check. And a dirty path found at any of these sites
+-  is not automatically confined to `globs.source`: the guard that normally keeps Refactor and Mutate inside it is the same
+-  fallible mechanism Preflight item 7 exists to probe, so a dirty path outside the glob here is the backstop scenario, not a
+-  hypothetical one.
++  `globs.test` by construction, unlike every other violation in this bucket. **Refactor's own audit now names them too, the same
++  way** — a glob mismatch against `globs.source`, with the identical `Violation → revert` branch Red's and Green's have; it was
++  missing one before, not exempt from needing one. Refactor's incomplete-restore check and the mutation pass's tree-clean
++  recovery each re-run `git status --porcelain` (and `git diff HEAD`) and find it non-empty when it was supposed to be clean —
++  that finding **is** a list of concrete paths, the same way an audit's is. **Refactor's hard coverage gate belongs here too,
++  even though its own audit gates conformance now:** the gate re-derives `git diff --name-only` / `git status --porcelain`
++  fresh, at the point it fires, rather than falling back to `globs.source` the way Green's coverage-gate overrun below does — a
++  re-derived list is strictly more inclusive than a pattern, and this is the backstop site for anything that reached the tree by
++  a route the audit did not account for, so narrowing it to the glob would only lose paths for a rationale (the audit already
++  passed) that is exactly the assumption the backstop exists to not need. In every one of these six sites, scope `clean` to
++  **every path the check found**, not only the subset that broke the glob match where one exists. A dispatch that violated the
++  glob usually also wrote legitimate in-glob files alongside the rogue one — leaving those behind after `clean` reproduces the
++  exact bug this section opens with (a rejected file surviving to be swept into a later commit), just for the half of the
++  dispatch that happened to pass the glob check. And a dirty path found at any of these sites is not automatically confined to
++  `globs.source`: the guard that normally keeps Refactor and Mutate inside it is the same fallible mechanism Preflight item 7
++  exists to probe, so a dirty path outside the glob here is the backstop scenario, not a hypothetical one.
+ - **No check found anything — the discard follows a judgment made from an already-clean audit that gates conformance.** Red's
+   `passing-flat` outcome, Green's unreproducible pass, Green's full-suite regression, and Green's coverage-gate overrun are
+-  decisions made *after* that dispatch's own audit already passed with nothing flagged — and, unlike Refactor's audit, Red's and
+-  Green's each have a defined `Violation → revert` branch (see *Per item*) — for Red, that branch now also covers a content-scan
+-  hit — which is what makes "the audit already confirmed everything is inside the glob, and, for Red, clear of a content-scan
+-  hit" a fact rather than an assumption. There is no list of problem paths to name here, only that earlier confirmation. Fall
+-  back to `globs.test` for Red, `globs.source` for Green. Refactor and Mutate have no site in this bucket: every one of their
+-  discards is the found-paths case above.
++  decisions made *after* that dispatch's own audit already passed with nothing flagged, and Red's and Green's each have a
++  defined `Violation → revert` branch (see *Per item*) — for Red, that branch now also covers a content-scan hit and a
++  fabricated `testId` — which is what makes "the audit already confirmed everything is inside the glob, and, for Red, clear of a
++  content-scan hit" a fact rather than an assumption. There is no list of problem paths to name here, only that earlier
++  confirmation. Fall back to `globs.test` for Red, `globs.source` for Green. Refactor and Mutate have no site in this bucket:
++  Refactor's own audit now has a `Violation → revert` branch too, but its one downstream check gated by that audit — the hard
++  coverage gate — deliberately stays in the found-paths bucket above rather than joining Green's coverage-gate overrun here, for
++  the inclusiveness reason just given. Every one of Refactor's and Mutate's discards is the found-paths case above.
+ 
+ Either way, an unscoped `git clean -fd` would delete legitimately untracked work elsewhere in the tree, so never run `clean`
+ without one of these two pathspecs — the found paths, or the role's glob fallback. (`clean` without `-x` spares gitignored paths,
+ so the venv, the checklist and the coverage report survive either way; do not add `-x`.)
+ 
+ Branches below say **revert** or **reset and clean** and point here — both now name the identical mechanism, `reset --hard HEAD`
+ plus a scoped `clean`. They do not spell out the bare git commands at the point of use, deliberately: an orchestrator reading
+ `git checkout -- .`, or a scoped `git checkout -- <pathspec>`, at the point of use would run exactly that — which is the defect
+ this section exists to fix, twice over now. Keeping the mechanism defined in exactly one place is also what let this fix land as
+-an edit to this section alone, rather than nine separate edits at every call site.
++an edit to this section alone, rather than ten separate edits at every call site.
+ 
+ ## Coverage baselines
+ 
+ All three roles are gated on coverage, and every gate compares against a baseline you capture. Skip all of this if
+ `commands.coverage` is null.
+ 
+ **A measurement you cannot parse is unavailable, never zero.** Every gate in this workflow compares a number against a threshold, so
+ an extractor that returns `0` on a report shape it does not recognise silently satisfies all of them: Green's overbuild check
+ passes, Refactor's hard-zero check passes, and CRAP finds no triggers. Nothing else in the design would notice. If a report cannot
+ be parsed, say so, skip the gate explicitly, and record it in the run summary as unenforced — do not let a parse failure read as a
+ clean result.
+ 
+-Run the coverage command and record the uncovered-line count:
++Run the coverage command and record the uncovered-line count, **then write it to `checklist.json`'s `baselines` field before doing
++anything else with it** — `{ "uncoveredLines": <int>, "capturedAt": "<phase and item this was measured before>" }`:
+ 
+ - **at preflight**, as the run's starting baseline
+ - **immediately before each Green dispatch** (after Red's commit)
+ - **immediately before each Refactor dispatch**
+ 
++**A baseline held only in your own context is not durable.** It was previously kept only in conversation, so a compaction between
++capturing it and comparing against it left the gate comparing against nothing, or against a wrong figure — silently, because
++nothing else in the design would notice a baseline that quietly became `0` or vanished. Writing it the moment you capture it means
++a compaction mid-dispatch loses your context, not the number. When you compare after a dispatch returns, read `baselines` back
++from `checklist.json` rather than trusting whatever your own context still remembers — and if `capturedAt` no longer names the
++phase and item you are about to gate, the baseline is stale: re-measure before comparing rather than gating against a figure
++captured for a different point in the run.
++
+ Compare after each dispatch. If a baseline reports zero total lines — an empty project, a first implementation — skip that cycle's
+ gate; there is nothing meaningful to compare against.
+ 
+ **Red is the one role that measures for its own branch decision.** It needs the coverage delta to distinguish `passing-covered` from
+ `passing-flat`, and it needs that answer before it can report at all — so you pass it the current baseline and it runs coverage
+ itself. You then re-measure to confirm, exactly as you re-run Green's test rather than trusting its word.
+ 
+ For Green and Refactor, measuring is your job. They may check themselves to self-correct before handing over, which is cheaper than
+ a re-dispatch, but your measurement is the one that decides.
+ 
+@@ -264,23 +276,33 @@ a re-dispatch, but your measurement is the one that decides.
+    `require(`/`include` naming a `globs.source` path is **not, on its own, a hit.** That is how a test loads the module under
+    test to exercise its behavior, and every Red test does exactly that — flagging it unconditionally would fire on the normal
+    case this rule exists to leave alone. It becomes a hit only combined with the pattern above: the loaded value then treated as
+    text and surfaced — printed, concatenated into an assertion message, returned as a string — rather than exercised as
+    behavior.
+ 
+    **This is a detector, not a control.** It is a substring-and-judgment heuristic against a file an LLM wrote, applied by you
+    reading the file rather than by a literal grep: it raises the cost of the bypass and catches the obvious spelling, and it does
+    not close the channel.
+ 
+-   Violation (glob mismatch or content-scan hit) → **revert** (see *Reverting a dispatch*) scoped to every path this audit found
+-   touched, not only the ones that failed the check — the whole dispatch is rejected, not just its offending half. Re-dispatch
+-   quoting the rule and the specific paths that failed it, up to `limits.violationRetries` times. Beyond that → stop, escalate.
++   **On a `failing` outcome, also validate `testId` before you or Green ever run it — a `blocked` or discarded report has no test
++   to validate, so this does not apply there.** Where `{testId}` is a filesystem path — pytest node IDs are,
++   `path/to/test_file.py::test_name` — a fabricated one invokes the configured runner against a path outside the test tree the
++   moment it is run. If `testId` contains a `/`, the portion up to a trailing `::` (or the whole string, if there is none) names a
++   path; confirm it matches `globs.test`, the same partition just checked above. A `testId` with no `/` — a bare test name, which
++   is what jest, go and dotnet report — cannot name a path outside the tree, and there is nothing to validate. This is the primary
++   defence: validate before dispatching it, rather than executing whatever Red reported. Rejecting `..` in the Bash guard's delta
++   (`bashVerdict`) is defence in depth behind it, not a substitute for it.
++
++   Violation (glob mismatch, a content-scan hit, or — on a `failing` outcome — a `testId` that fails the check above) →
++   **revert** (see *Reverting a dispatch*) scoped to every path this audit found touched, not only the ones that failed the check
++   — the whole dispatch is rejected, not just its offending half. Re-dispatch quoting the rule and the specific paths that failed
++   it, up to `limits.violationRetries` times. Beyond that → stop, escalate.
+ 
+    **An empty diff is not a passing audit.** "Every touched path matched" is vacuously true when nothing was touched. If Red reports
+    `failing`, `passing-covered`, or `passing-flat`, it claims to have written a test — so at least one path must have changed. Zero
+    changed paths alongside any of those outcomes means the agent reported work it did not do: treat it as `blocked` and escalate
+    rather than committing an empty commit and moving on. The same applies to Green's audit below.
+ 3. Branch on `outcome`:
+    - `failing` → record the handover's `testId` on the item, commit `red: <behavior>`, status `red`, continue to Green.
+    - `passing-covered` → **re-measure coverage yourself before committing.** This branch writes a commit and skips Green entirely on
+      the strength of a number the agent computed about its own work; it is the one place nothing else would catch a wrong answer.
+      Delta confirmed → commit `test: <behavior>`, status `done`, next item. Delta not confirmed → treat as `passing-flat`.
+@@ -303,21 +325,23 @@ a re-dispatch, but your measurement is the one that decides.
+    - Any mutation still passes → the test does not close the gap. Re-dispatch once, naming the mutation that survived it. Still
+      surviving → status `blocked`, escalate.
+ 
+    - `blocked` → status `blocked`, record the reason, **stop and escalate**.
+ 
+ `blocked` is not `redundant`. `redundant` means a test was written, passed, and moved no coverage — the behavior is already covered.
+ `blocked` means Red failed to do its job. Collapsing them would silently drop a spec item as "already covered" without verification.
+ 
+ ### Green
+ 
+-1. Dispatch `tdd-green` with **only** Red's handover report. Do not paste test source — that is the whole point of the separation.
++1. Dispatch `tdd-green` with Red's handover report and `limits.greenAttempts` — **only** those, and no test source. `tdd-green.md`
++   step 3 expects the attempt limit directly from you; withholding it is not the separation this rule protects, just a missing
++   input.
+ 2. On return, audit as above against `globs.source`.
+ 3. `outcome: stuck` → record the reason on the item, write the checklist, then stop and escalate with the agent's attempts.
+ 4. Independently verify: run the configured single-test command against `testId` yourself. Do not take the agent's word for it.
+    **Not passing → revert (see *Reverting a dispatch*), treat it as `stuck`, and escalate.** An agent reporting a pass the orchestrator
+    cannot reproduce is worse than one reporting failure, and committing on its word would bury it.
+ 5. **Run the full suite**, subtracting `knownRed`. Green only ever runs one test, so nothing else in the loop would notice it
+    regressing a previously-passing test elsewhere — the next signal would be a Refactor dispatch that may never fire, or the mutation
+    pass after every item is done. New failure → **revert** (see *Reverting a dispatch*), re-dispatch once naming the regressed tests.
+    Still failing → stop and escalate.
+ 6. **Coverage gate** (skip entirely if `commands.coverage` is null, or if the baseline reports zero total lines):
+@@ -350,29 +374,36 @@ By `crapMode`:
+ - `native` — read the score straight from the coverage report (PHPUnit, Cobertura).
+ - `computed` — run `commands.complexity` for per-method cyclomatic complexity, take per-file line coverage from the coverage report,
+    map covered lines onto each method's line range to get `cov(m)`, then apply the formula.
+ - `unavailable` — skip; use `maxFunctionLines`.
+ 
+ The line-range mapping is the fiddly part and the most likely thing to be quietly wrong. If a method's computed coverage is `1.0`
+ for every method in a file you know is partly untested, the mapping is broken — say so rather than reporting no triggers.
+ 
+ No hit → status `done`, next item. This avoids paying for a subagent to conclude "nothing to do", a common case in early cycles.
+ 
+-On dispatch: pass the trigger, the source paths in scope, and `knownRed`. Audit against `globs.source`.
++On dispatch: pass the trigger, the source paths in scope, and `knownRed`. Audit against `globs.source`: `git diff --name-only`
++plus `git status --porcelain`, every touched path must match.
++
++**Violation (glob mismatch) → revert** (see *Reverting a dispatch*) scoped to every path this audit found touched. Re-dispatch
++quoting the rule and the specific paths that failed it, up to `limits.violationRetries` times. Beyond that → stop, escalate. Same
++branch Red's and Green's audits have; Refactor was missing it, not exempt from it.
+ 
+ Then apply the **hard coverage gate**: run coverage yourself and compare against the pre-dispatch baseline. Any increase in
+ uncovered lines beyond `coverageGates.refactorMaxNewUncovered` (default 0) → **reset and clean** (see *Reverting a dispatch*),
+-scoped to `git diff --name-only` plus `git status --porcelain` run fresh at this point — the "Audit against `globs.source`" step
+-above has no defined violation consequence, so nothing has yet confirmed every touched path stayed inside `globs.source`, and
+-falling back to that glob here would carry the gap into the one site meant to catch it — and record `reverted`, regardless of
+-what the agent reported. New uncovered lines mean new behavior, and Refactor adding behavior is a boundary violation, not a
+-quality issue. There is no re-dispatch — reverting is the correct outcome.
++scoped to `git diff --name-only` plus `git status --porcelain` run fresh at this point, rather than falling back to
++`globs.source` the way Green's coverage-gate overrun does — the audit immediately above now gates conformance too, so a fresh
++scan finds nothing the audit did not already accept, but it stays fresh, not glob-scoped, because a re-derived path list is
++strictly more inclusive than a pattern and this is the backstop site for anything that reached the tree by a route the audit
++did not account for — and record `reverted`, regardless of what the agent reported. New uncovered lines mean new behavior, and
++Refactor adding behavior is a boundary violation, not a quality issue. There is no re-dispatch — reverting is the correct
++outcome.
+ 
+ Branch on all four outcomes:
+ 
+ - `improved` and the gate passed → commit `refactor: <behavior>`.
+ - `no-change-needed` → commit nothing, record it, continue. This is a good outcome, not a failure; the trigger fired and the agent
+   judged there was nothing worth doing.
+ - `reverted` → record it and continue. A refactor that backed out cleanly is not a failed cycle.
+ - `blocked` → **stop and escalate.** Refactor reports `blocked` when it could not evaluate its own work — typically a suite that was
+   already failing. That is a broken precondition, not a judgement call, and continuing past it means every later Refactor dispatch
+   hits the same wall silently. This is the same rule as the Escalation section below; there is no Refactor exemption.
+@@ -397,20 +428,25 @@ that execute without asserting.
+    `crapMode: "unavailable"` there are no scores to rank by — fall back to the source files changed since the last mutation
+    round, longest function first, and say in the report that ranking was unguided. Do not dispatch with an empty target
+    list; that guarantees `mutantsAttempted: 0`.
+ 2. **Verify the tree is clean before dispatching**: `git status --porcelain` and `git diff HEAD` must both be empty. `tdd-mutate`'s
+    prompt tells it you have already done this, and it skips its own check on that basis — so if you skip it too, nobody checks. A
+    mutate run started on a dirty tree cannot distinguish its own mutations from pre-existing edits, and its restore step would
+    silently revert your work along with its own. Dirty → stop and report; do not dispatch.
+ 3. Dispatch **`tdd-mutate`** with the ranked target list, `limits.mutantsPerPass`, `knownRed`, and the mutation command if one is
+    configured.
+ 
++   **`outcome: "blocked"` → stop and escalate.** `tdd-mutate` reports `blocked` when a suite failure outside `knownRed` left it
++   unable to tell a killed mutant from breakage it inherited — the same broken-precondition case Refactor's `blocked` is, not a
++   judgement call, and there is no Mutate exemption from the Escalation section below either. Do not fall through to the
++   tree-clean check or the suite re-run below on a `blocked` return; there is nothing there to verify.
++
+ **Restoring source is not enough — invalidate the language's compiled cache too.** `git status` will call the tree clean, because
+ caches are gitignored, while the interpreter still holds bytecode compiled from the *mutated* source. Observed on the first live
+ pass: after a kill verification the suite reported a failure whose traceback showed source that could not produce it, and clearing
+ `__pycache__` returned it to green. A false red is the lucky outcome; the same mechanism can serve a false green from a cache
+ compiled before a bad restore, and step 5 below is exactly where that would be believed.
+ 
+ For Python, prefix the configured commands with `PYTHONDONTWRITEBYTECODE=1` so no cache is written at all — verified to suppress
+ `__pycache__` and to still satisfy the guard's Bash allowlist. Other toolchains have their own caches; whatever the language, the
+ rule is that a restore is not complete until the cache is too.
+ 
+@@ -421,21 +457,21 @@ rule is that a restore is not complete until the cache is too.
+    suite check that did not subtract it, and leaving it flat would dead-end every mutation pass on any run where preflight recorded a
+    non-empty `knownRed` — reproducing the exact failure the threading rule above was added to prevent.
+ 6. **Group survivors by `missingBehavior` first**, then append one checklist item per distinct behavior. Several mutants routinely
+    map to a single gap — the first live pass returned four survivors of which three were "nothing asserts divide's error message"
+    (mutated to `None`, to an `XX`-wrapped string, and to upper case). One test closes all three, so queueing three Red cycles wastes
+    two of them. Keep every mutant in the item's `mutant` field as evidence, and report the survivor count, not the item count.
+ 
+    For each distinct behavior, append:
+ 
+        { "id": <next>, "behavior": "<the survivor's missingBehavior>",
+-         "status": "pending", "origin": "mutation",
++         "status": "pending", "testId": null, "origin": "mutation",
+          "mutant": { "file": ..., "line": ...,
+                      "mutations": [ ...every mutant that revealed this gap... ] } }
+ 
+ 7. **Increment `mutationRoundsRun` in `checklist.json` and write the file — before the branch below, not after it.** This is the one
+    piece of loop state nothing else reconstructs, and the survivor branch hands control back to the per-item loop without ever
+    reaching a step written later, so it must be written first.
+ 8. Branch on survivors and the count just written:
+    - No survivors → done.
+    - Survivors found, and `mutationRoundsRun` (read back from `checklist.json`, not from memory — on a resumed run your context has
+      no record of passes already spent) has not yet reached `limits.mutationRounds` → report the survivor count and **resume the
+diff --git a/tests/skill-consistency.test.mjs b/tests/skill-consistency.test.mjs
+new file mode 100644
+index 0000000..c89a707
+--- /dev/null
++++ b/tests/skill-consistency.test.mjs
+@@ -0,0 +1,209 @@
++// Task 13 (2026-08-01-architecture-review-remediation): a set of narrow
++// prose-consistency fixes to SKILL.md and agents/*.md, each routed here by a
++// specific reviewer finding. There is no code path exercising any of this —
++// SKILL.md is followed by an LLM orchestrator, not executed — so these tests
++// pin the exact phrasing the fix landed as, scoped to the section it landed
++// in, the same way tests/config-contract.test.mjs scopes its extraction to
++// avoid a whole-file grep passing when the key is missing from the specific
++// block a model actually copies from (see AGENTS.md, "Verification
++// instruments lie").
++//
++// A prose-presence test proves less than a behavioural one. It is still
++// worth more than nothing: it fails loudly the day someone edits the
++// surrounding section and drops the sentence this task added, which is
++// exactly the kind of drift AGENTS.md's "Fixing the document about the
++// artifact is not fixing the artifact" warns about — except here the
++// artifact IS the document.
++
++import test from 'node:test';
++import assert from 'node:assert/strict';
++import fs from 'node:fs';
++import path from 'node:path';
++import { fileURLToPath } from 'node:url';
++
++const HERE = path.dirname(fileURLToPath(import.meta.url));
++const REPO_ROOT = path.join(HERE, '..');
++
++const SKILL_PATH = path.join(REPO_ROOT, 'skills', 'run-tdd-cycle', 'SKILL.md');
++const RED_AGENT_PATH = path.join(REPO_ROOT, 'agents', 'tdd-red.md');
++const REFACTOR_AGENT_PATH = path.join(REPO_ROOT, 'agents', 'tdd-refactor.md');
++const SPEC_PATH = path.join(REPO_ROOT, 'docs', 'superpowers', 'specs', '2026-07-30-tdd-subagent-workflow-design.md');
++
++const skillText = fs.readFileSync(SKILL_PATH, 'utf8');
++const redAgentText = fs.readFileSync(RED_AGENT_PATH, 'utf8');
++const refactorAgentText = fs.readFileSync(REFACTOR_AGENT_PATH, 'utf8');
++const specText = fs.readFileSync(SPEC_PATH, 'utf8');
++
++/** Lines from the first startRe match through the line BEFORE the next endRe match (exclusive of endRe). Returns null if startRe never matches. */
++function extractSection(text, startRe, endRe) {
++  const lines = text.split('\n');
++  const startIdx = lines.findIndex((l) => startRe.test(l));
++  if (startIdx === -1) return null;
++  let endIdx = lines.findIndex((l, i) => i > startIdx && endRe.test(l));
++  if (endIdx === -1) endIdx = lines.length;
++  return lines.slice(startIdx, endIdx).join('\n');
++}
++
++// ---------------------------------------------------------------------------
++// I5: Green's dispatch must name BOTH Red's handover report and
++// limits.greenAttempts. tdd-green.md step 3 expects the attempt limit
++// directly from the orchestrator; SKILL.md previously said "only" the report.
++// ---------------------------------------------------------------------------
++
++const greenSection = extractSection(skillText, /^### Green$/, /^### Refactor trigger check$/);
++
++test('SKILL.md located the Green per-item section', () => {
++  assert.notEqual(greenSection, null);
++});
++
++test("SKILL.md's Green dispatch step names both the handover report and limits.greenAttempts (I5)", () => {
++  assert.ok(/Dispatch `tdd-green`/.test(greenSection ?? ''), 'could not find the Green dispatch line');
++  assert.ok(/Red's handover report/.test(greenSection ?? ''), 'Green dispatch no longer mentions the handover report');
++  assert.ok(/limits\.greenAttempts/.test(greenSection ?? ''), 'Green dispatch does not mention limits.greenAttempts');
++});
++
++// ---------------------------------------------------------------------------
++// I4: testId must be validated against globs.test orchestrator-side before
++// it is ever run, not merely trusted from Red's report.
++// ---------------------------------------------------------------------------
++
++const redSection = extractSection(skillText, /^### Red$/, /^### Green$/);
++
++test('SKILL.md located the Red per-item section', () => {
++  assert.notEqual(redSection, null);
++});
++
++test("SKILL.md's Red audit validates testId against globs.test before it is used (I4)", () => {
++  assert.ok(/validate `testId`/.test(redSection ?? ''), 'no testId validation instruction found in the Red audit');
++  assert.ok(
++    /confirm it matches `globs\.test`/.test(redSection ?? ''),
++    'testId validation does not check it against globs.test',
++  );
++});
++
++test('rules.mjs still rejects ".." in the Bash delta as defence in depth behind the orchestrator-side testId check', () => {
++  const rulesText = fs.readFileSync(path.join(REPO_ROOT, 'hooks', 'lib', 'rules.mjs'), 'utf8');
++  assert.ok(rulesText.includes("delta.includes('..')"), "bashVerdict's '..' rejection is gone — I4's defence in depth is not in place");
++});
++
++// ---------------------------------------------------------------------------
++// I8: tdd-mutate's blocked outcome must be tied to stop-and-escalate, the
++// same way Red's, Green's and Refactor's are.
++// ---------------------------------------------------------------------------
++
++const mutationSection = extractSection(skillText, /^## Mutation pass$/, /^## Completion$/);
++
++test('SKILL.md located the Mutation pass section', () => {
++  assert.notEqual(mutationSection, null);
++});
++
++test("SKILL.md ties tdd-mutate's blocked outcome to stop-and-escalate (I8)", () => {
++  assert.ok(/outcome: "blocked"/.test(mutationSection ?? ''), "no blocked-outcome branch found in the Mutation pass section");
++  assert.ok(/stop and escalate/i.test(mutationSection ?? ''), 'blocked branch does not say stop and escalate');
++});
++
++// ---------------------------------------------------------------------------
++// Task 7 deferred item: Refactor's own audit needs an explicit
++// Violation -> revert branch, matching Red's and Green's.
++// ---------------------------------------------------------------------------
++
++const refactorSection = extractSection(skillText, /^### Refactor trigger check$/, /^## Mutation pass$/);
++
++test('SKILL.md located the Refactor per-item section', () => {
++  assert.notEqual(refactorSection, null);
++});
++
++test("SKILL.md's Refactor audit has an explicit Violation -> revert branch (Task 7 deferred item)", () => {
++  assert.ok(
++    /Violation \(glob mismatch\) → revert/.test(refactorSection ?? ''),
++    "Refactor's audit has no explicit Violation -> revert branch",
++  );
++  assert.ok(/limits\.violationRetries/.test(refactorSection ?? ''), 'Refactor violation branch does not mention the retry limit');
++});
++
++test("the Reverting-a-dispatch site count reflects Refactor's new audit branch (nine sites become ten)", () => {
++  const revertingSection = extractSection(skillText, /^## Reverting a dispatch$/, /^## Coverage baselines$/);
++  assert.notEqual(revertingSection, null);
++  assert.ok(
++    /ten separate edits at every call site/.test(revertingSection ?? ''),
++    "the historical site count was not updated after Refactor's audit gained a revert branch (still says 'nine')",
++  );
++  assert.ok(!/nine separate edits/.test(revertingSection ?? ''), 'the stale "nine separate edits" count is still present');
++});
++
++// ---------------------------------------------------------------------------
++// Task 6 deferred item: the mutation-pass item-append literal must declare
++// testId: null, matching the decompose-time schema's "every loop-read field
++// is declared" rule.
++// ---------------------------------------------------------------------------
++
++test('the mutation-pass item-append literal declares "testId": null (Task 6 deferred item)', () => {
++  const appendBlock = extractSection(skillText, /"id": <next>, "behavior":/, /^7\./);
++  assert.notEqual(appendBlock, null, 'could not locate the mutation-pass append literal');
++  assert.ok(appendBlock.includes('"testId": null'), 'the append literal is missing "testId": null');
++});
++
++// ---------------------------------------------------------------------------
++// S5b: coverage baselines must be persisted into checklist.json, not held
++// only in the orchestrator's own context.
++// ---------------------------------------------------------------------------
++
++const baselinesSection = extractSection(skillText, /^## Coverage baselines$/, /^## Per item$/);
++
++test('SKILL.md located the Coverage baselines section', () => {
++  assert.notEqual(baselinesSection, null);
++});
++
++test("SKILL.md instructs writing captured coverage baselines to checklist.json's baselines field (S5b)", () => {
++  assert.ok(/write it to `checklist\.json`'s `baselines` field/.test(baselinesSection ?? ''), 'no instruction to persist the baseline to disk');
++  assert.ok(/"uncoveredLines"/.test(baselinesSection ?? ''), 'baselines field shape (uncoveredLines) not shown');
++  assert.ok(/"capturedAt"/.test(baselinesSection ?? ''), 'baselines field shape (capturedAt) not shown');
++});
++
++// ---------------------------------------------------------------------------
++// I7: tdd-red.md's "Your input" omitted the coverage baseline its own step 4
++// compares against; tdd-refactor.md's omitted knownRed (step 1 uses it) and,
++// found alongside it, the coverage command (step 2 uses it).
++// ---------------------------------------------------------------------------
++
++const redInputSection = extractSection(redAgentText, /^## Your input$/, /^## Your objective$/);
++const refactorInputSection = extractSection(refactorAgentText, /^## Your input$/, /^## Your window into the tests$/);
++
++test('tdd-red.md located its "Your input" section', () => {
++  assert.notEqual(redInputSection, null);
++});
++
++test('tdd-red.md declares the coverage baseline as an input (I7)', () => {
++  assert.ok(/coverage baseline/.test(redInputSection ?? ''), 'tdd-red.md\'s "Your input" does not mention the coverage baseline');
++});
++
++test('tdd-refactor.md located its "Your input" section', () => {
++  assert.notEqual(refactorInputSection, null);
++});
++
++test('tdd-refactor.md declares knownRed as an input (I7)', () => {
++  assert.ok(/`knownRed`/.test(refactorInputSection ?? ''), 'tdd-refactor.md\'s "Your input" does not mention knownRed');
++});
++
++test('tdd-refactor.md declares the coverage command as an input (self-identified alongside I7)', () => {
++  assert.ok(/coverage command/.test(refactorInputSection ?? ''), 'tdd-refactor.md\'s "Your input" does not mention the coverage command');
++});
++
++// ---------------------------------------------------------------------------
++// Task 9 deferred item, authorised for a spec edit: the spec named all four
++// content-scan tokens uniformly as hits; SKILL.md correctly demotes
++// require(/include. The spec was the one that was too absolute.
++// ---------------------------------------------------------------------------
++
++test("the spec no longer claims require(/include are unconditional content-scan hits", () => {
++  const detectionSection = extractSection(specText, /\*\*Detection where prevention is impossible\*\*/, /\*\*Its ceiling must be stated/);
++  assert.notEqual(detectionSection, null, 'could not locate the detection-where-prevention-is-impossible paragraph');
++  assert.ok(
++    /not\*\*, by itself/.test(detectionSection) || /is \*\*not\*\*/.test(detectionSection),
++    'the spec does not carve out require(/include the way SKILL.md does',
++  );
++  assert.ok(
++    !/\(`open\(`, `require\(`, `include`, `File\.read`\)/.test(detectionSection),
++    'the spec still lists all four tokens uniformly as hit-triggers',
++  );
++});

@@ -1,0 +1,76 @@
+{
+  "testCount": 7,
+  "testCommand": "PYTHONDONTWRITEBYTECODE=1 e2e/.venv/bin/pytest -q --ignore=e2e/mutants e2e",
+  "note": "finalChecklist and commitSubjects below are recorded documentation from the actual live /tdd run that produced e2e/'s current git history: .tdd/checklist.json is gitignored, so it exists on the machine that ran it but not in this repo. e2e/smoke.mjs does NOT assert testCount against git log or a live checklist.json -- a legitimate future commit touching e2e/, or a fresh machine with no .tdd/checklist.json on disk, would break an exact-match assertion for no real reason. Use these as the comparison target when a human runs the full live workflow end to end; see AGENTS.md's 'Running the plugin against itself' section. testCount is the one figure smoke.mjs does assert, because pytest's own summary line is a stable, resettable ground truth that does not depend on any gitignored file.",
+  "finalChecklist": {
+    "spec": "e2e/spec.md",
+    "knownRed": [],
+    "mutationRoundsRun": 2,
+    "items": [
+      {
+        "id": 1,
+        "behavior": "add(a, b) returns the sum of two numbers",
+        "status": "redundant",
+        "reason": "Red wrote a passing test that moved no coverage; add() is already covered by test_smoke."
+      },
+      {
+        "id": 2,
+        "behavior": "subtract(a, b) returns the difference",
+        "status": "done"
+      },
+      {
+        "id": 3,
+        "behavior": "divide(a, b) raises ValueError when b is zero",
+        "status": "done"
+      },
+      {
+        "id": 4,
+        "behavior": "divide returns the arithmetic quotient — divide(7, 2) == 3.5, distinguishing it from a*b, b/a and a//b",
+        "status": "done",
+        "origin": "mutation",
+        "mutant": {
+          "file": "e2e/src/calc/__init__.py",
+          "line": 12,
+          "mutations": ["return a * b", "return b / a", "return a // b"]
+        }
+      },
+      {
+        "id": 5,
+        "behavior": "dividing by zero raises ValueError whose message is exactly 'division by zero'",
+        "status": "done",
+        "origin": "mutation",
+        "mutant": {
+          "file": "e2e/src/calc/__init__.py",
+          "line": 11,
+          "mutations": ["raise ValueError(\"XXdivision by zeroXX\")"]
+        }
+      },
+      {
+        "id": 6,
+        "behavior": "divide with a negative divisor returns the correct negative quotient rather than raising — divide(7, -2) == -3.5",
+        "status": "done",
+        "origin": "mutation",
+        "mutant": {
+          "file": "e2e/src/calc/__init__.py",
+          "line": 10,
+          "mutations": ["if b <= 0:"]
+        }
+      }
+    ]
+  },
+  "commitSubjects": [
+    "test(plugin): add e2e fixture project for the end-to-end run",
+    "chore: configure TDD subagent workflow",
+    "chore: untrack python bytecode committed with the fixture",
+    "red: subtract(a, b) returns the difference",
+    "green: subtract(a, b) returns the difference",
+    "chore: untrack source bytecode",
+    "red: divide(a, b) raises ValueError when b is zero",
+    "green: divide(a, b) raises ValueError when b is zero",
+    "test(plugin): plant a covers-without-asserting test for the mutation pass",
+    "fix(plugin): stop the mutation run from breaking the test command",
+    "test: divide returns the arithmetic quotient",
+    "test: divide's zero-division message is exactly 'division by zero'",
+    "test: divide only rejects a zero divisor, not any non-positive one"
+  ]
+}

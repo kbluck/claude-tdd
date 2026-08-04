@@ -1,0 +1,355 @@
+# Review package: 6cce7b9..43f038d
+
+## Commits
+43f038d test(hook): correct an unverified claim in the previous comment fix
+f6db27b test(hook): close the compositional gap between agent tools and the matcher
+de0d1d0 test(hook): correct stale RED-state comments now that both gaps closed
+467c1eb chore: stop shipping .mcp.json, a developer-machine MCP pointer
+bc3e841 test(hook): pin hooks.json's matcher against guard.mjs's TOOL_DISPATCH keys
+7f6a878 test(agent): pin tdd-*.md tools: frontmatter to exactly Read/Write/Edit/Bash
+
+## Files changed
+ .gitignore                     |   1 +
+ .mcp.json                      |   8 ----
+ tests/agents.test.mjs          |  33 ++++++++++++++
+ tests/config-contract.test.mjs |  25 ++++++-----
+ tests/guard.test.mjs           | 100 +++++++++++++++++++++++++++++++++++++++++
+ tests/rules.test.mjs           |   9 ++--
+ 6 files changed, 153 insertions(+), 23 deletions(-)
+
+## Diff
+diff --git a/.gitignore b/.gitignore
+index dadfe15..bde0b8a 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -13,20 +13,21 @@
+ #                                                                              #
+ # Full documentation about gitignore: https://git-scm.com/docs/gitignore       #
+ ################################################################################
+ 
+ ################################################################################
+ ###                                 Project                                  ###
+ ################################################################################
+ 
+ .superpowers/
+ .tdd/checklist.json
++.mcp.json
+ 
+ ################################################################################
+ ###                                JetBrains                                 ###
+ ################################################################################
+ 
+ # Covers JetBrains IDEs: Android Studio, AppCode, CLion, DataGrip, GoLand,
+ # IntelliJ, PhpStorm, PyCharm, Rider, RubyMine, and WebStorm.
+ # https://intellij-support.jetbrains.com/hc/en-us/articles/206544839
+ 
+ # User-specific files
+diff --git a/.mcp.json b/.mcp.json
+deleted file mode 100644
+index bfe8acb..0000000
+--- a/.mcp.json
++++ /dev/null
+@@ -1,8 +0,0 @@
+-{
+-  "mcpServers": {
+-    "jetbrains": {
+-      "url": "http://127.0.0.1:64462/stream",
+-      "type": "http"
+-    }
+-  }
+-}
+diff --git a/tests/agents.test.mjs b/tests/agents.test.mjs
+index 53e0584..23c2d58 100644
+--- a/tests/agents.test.mjs
++++ b/tests/agents.test.mjs
+@@ -55,27 +55,60 @@ test('ROLES is non-empty (a matrix that silently enumerates nothing looks identi
+   assert.ok(Array.isArray(ROLES));
+   assert.ok(ROLES.length > 0, 'ROLES must not be empty');
+ });
+ 
+ test('agents/*.md exists and was actually enumerated', () => {
+   const files = agentFiles();
+   assert.ok(files.length > 0, 'expected at least one agents/*.md file');
+   assert.equal(files.length, 4, `expected exactly 4 agent files (one per ROLES entry), found ${files.length}`);
+ });
+ 
++/**
++ * Extract the `tools:` frontmatter field as a sorted array of tool names,
++ * matching the comma-separated form the agent files use (`tools: Read,
++ * Write, Edit, Bash`).
++ */
++function frontmatterTools(filePath) {
++  const text = fs.readFileSync(filePath, 'utf8');
++  const match = text.match(/^tools:[ \t]*(.+)$/m);
++  if (!match) return null;
++  return match[1].split(',').map((t) => t.trim()).filter(Boolean).sort();
++}
++
++// Grep/Glob sit outside the PreToolUse matcher (hooks/hooks.json), so a call
++// to either never reaches the guard at all, and Grep returns file content --
++// the spec makes their absence here explicitly load-bearing (design spec:
++// "The three agents only ever legitimately need to run the commands in
++// config.json ... Grep and Glob are deliberately not granted"). This is an
++// EQUALITY check, not a subset check: a subset check would permit an agent
++// file gaining an extra tool, and an addition (not a removal) is the
++// direction that actually opens a bypass.
++const EXPECTED_TOOLS = ['Bash', 'Edit', 'Read', 'Write'];
++
+ for (const file of agentFiles()) {
+   test(`${path.basename(file)}: declares a name: field that is a member of ROLES`, () => {
+     const name = frontmatterName(file);
+     assert.notEqual(name, null, `${path.basename(file)} has no 'name:' frontmatter field`);
+     assert.ok(ROLES.includes(name), `${path.basename(file)} declares name '${name}', which is not in ROLES (${ROLES.join(', ')})`);
+   });
+ 
++  test(`${path.basename(file)}: declares tools: exactly Read, Write, Edit, Bash -- no more, no less`, () => {
++    const tools = frontmatterTools(file);
++    assert.notEqual(tools, null, `${path.basename(file)} has no 'tools:' frontmatter field`);
++    assert.deepEqual(
++      tools,
++      EXPECTED_TOOLS,
++      `${path.basename(file)} declares tools: ${tools.join(', ')}; expected exactly ${EXPECTED_TOOLS.join(', ')} -- ` +
++        'Grep/Glob must never appear here (they bypass the PreToolUse matcher entirely)',
++    );
++  });
++
+   test(`${path.basename(file)}: its declared name is what the guard dispatches on`, () => {
+     const guardPath = guardSourcePath();
+     assert.notEqual(guardPath, null, 'neither hooks/guard.mjs nor hooks/guard.sh exists');
+     const name = frontmatterName(file);
+     const guardSource = fs.readFileSync(guardPath, 'utf8');
+     assert.ok(
+       guardSource.includes(`${name})`) || guardSource.includes(`'${name}'`) || guardSource.includes(`"${name}"`),
+       `${path.basename(guardPath)} does not appear to dispatch on '${name}' (declared by ${path.basename(file)})`,
+     );
+   });
+diff --git a/tests/config-contract.test.mjs b/tests/config-contract.test.mjs
+index e23c0d9..2a6671f 100644
+--- a/tests/config-contract.test.mjs
++++ b/tests/config-contract.test.mjs
+@@ -1,26 +1,27 @@
+ // node:test port of tests/config-contract.test.sh.
+ //
+ // Pins the .tdd/config.json schema that /tdd-init must produce and that the
+ // guard and orchestrator consume. Three independent copies of this schema
+ // exist (the fixture, commands/tdd-init.md's Step 7 template, and the spec's
+ // own example block) and they have drifted from each other before — see the
+ // comments inline, and AGENTS.md's "Fixing the document about the artifact
+ // is not fixing the artifact".
+ //
+ // This file mostly does not touch hooks/lib/rules.mjs and is not expected to
+-// be red-because-of-a-stub. Most of it pins a property the repository already
+-// satisfies (like agents.test.mjs). The one deliberate exception is the
+-// singleTerse drift check at the bottom, which is expected to be RED right
+-// now and records a real, currently-unclosed gap (plan Task 8). The Node
+-// floor drift check near the bottom DOES import hooks/lib/rules.mjs, but only
+-// to read the already-implemented NODE_FLOOR constant (Task 3), not to
++// be red-because-of-a-stub. All of it pins a property the repository already
++// satisfies (like agents.test.mjs), including the singleTerse drift check at
++// the bottom: it was a deliberate RED recording a real gap (plan Task 8) when
++// written, and now passes -- commands.singleTerse landed in both the fixture
++// and the tdd-init.md Step 7 template, closing the gap it was recording. The
++// Node floor drift check near the bottom DOES import hooks/lib/rules.mjs, but
++// only to read the already-implemented NODE_FLOOR constant (Task 3), not to
+ // exercise a stub.
+ 
+ import test from 'node:test';
+ import assert from 'node:assert/strict';
+ import fs from 'node:fs';
+ import path from 'node:path';
+ import { fileURLToPath } from 'node:url';
+ import { NODE_FLOOR } from '../hooks/lib/rules.mjs';
+ 
+ const HERE = path.dirname(fileURLToPath(import.meta.url));
+@@ -244,26 +245,26 @@ test('spec: the derived schema loop enumerated at least 19 keys', () => {
+ // never checked against the template either) is structurally invisible to
+ // them — this is exactly the shape of gap the plan calls out: "The spec is
+ // deliberately the outlier. The iteration-2 revision added
+ // commands.singleTerse ... to the spec's schema blocks and to neither of the
+ // other two copies... The contract test derives its expected keys from the
+ // fixture and asserts presence, so an extra spec key does not fail it — the
+ // suite is green and the drift is unasserted, which is the shape of the
+ // defect that test exists to catch."
+ //
+ // This closes that hole by deriving keys from the SPEC instead, and
+-// asserting they also appear in the fixture and the template. It is
+-// EXPECTED TO FAIL right now for commands.singleTerse, which is present in
+-// the spec's block and absent from both the fixture and commands/tdd-init.md
+-// — verified directly above (tests/fixtures/config.json has no
+-// "singleTerse" key). That failure is the correct record of the gap; closing
+-// it is plan Task 8's job, not this suite's.
++// asserting they also appear in the fixture and the template. This USED TO
++// FAIL for commands.singleTerse, which was present in the spec's block and
++// absent from both the fixture and commands/tdd-init.md -- that failure was
++// the correct record of the gap plan Task 8 closed. singleTerse now appears
++// in tests/fixtures/config.json and the tdd-init.md Step 7 template, so both
++// drift checks below pass.
+ // ---------------------------------------------------------------------------
+ 
+ // JSON.parse(specBlock) is deliberately kept OUT of module scope and computed
+ // fresh inside each test body below (never cached at the top of the file):
+ // this is a hand-maintained prose document, not a dedicated JSON fixture, and
+ // a future edit that breaks the embedded JSON must fail the ONE test that
+ // depends on it — not crash collection for the entire file before any test
+ // runs (node:test's own version of "green means nothing": a throw during
+ // collection can report zero failures).
+ // The bash start anchor ('"version": 1,') matches the SECOND line of the
+diff --git a/tests/guard.test.mjs b/tests/guard.test.mjs
+index 08ad7d7..4fe5d4e 100644
+--- a/tests/guard.test.mjs
++++ b/tests/guard.test.mjs
+@@ -46,20 +46,120 @@ test('hooks.json: PreToolUse is registered in EXEC form (node + guard.mjs args,
+   assert.ok(
+     guardHook.args.some((a) => typeof a === 'string' && a.includes('guard.mjs')),
+     `expected one of the args to reference guard.mjs, got ${JSON.stringify(guardHook.args)}`,
+   );
+ });
+ 
+ test('sanity: hooks/guard.mjs exists (Task 3 has landed) — the tests below exercise it directly', () => {
+   assert.equal(fs.existsSync(GUARD_MJS_PATH), true, 'hooks/guard.mjs is missing — Task 3 is expected to have created it');
+ });
+ 
++/**
++ * Read guard.mjs's TOOL_DISPATCH table keys straight from its source text,
++ * rather than importing the module — guard.mjs calls main() unconditionally
++ * at import time (it reads stdin synchronously), so importing it here would
++ * hang the test runner. This mirrors the text-extraction approach
++ * frontmatterName() above already uses against agent files.
++ */
++function toolDispatchKeys() {
++  const source = fs.readFileSync(GUARD_MJS_PATH, 'utf8');
++  const block = source.match(/const TOOL_DISPATCH = \{([\s\S]*?)\n\};/);
++  assert.notEqual(block, null, 'could not locate the TOOL_DISPATCH table in guard.mjs — has it been renamed?');
++  const keys = [...block[1].matchAll(/^\s*(\w+):/gm)].map((m) => m[1]);
++  assert.ok(keys.length > 0, 'TOOL_DISPATCH table appears to declare no keys');
++  return keys;
++}
++
++test("hooks.json: the matcher's tool set is exactly guard.mjs's TOOL_DISPATCH keys — not a second hand-typed copy", () => {
++  // hooks.json's matcher gates which tool calls ever reach guard.mjs at all;
++  // a tool missing from the matcher never invokes the guard regardless of
++  // what TOOL_DISPATCH says about it (dead code), and a tool present in the
++  // matcher but absent from TOOL_DISPATCH falls through to guard.mjs's
++  // "unrecognized tool" deny (harmless, but a sign the two have drifted).
++  // Derived from guard.mjs's own table rather than hardcoded here a second
++  // time — AGENTS.md already records two hand-maintained copies of one value
++  // as a defect class this project has paid for.
++  const hooksJson = JSON.parse(fs.readFileSync(HOOKS_JSON_PATH, 'utf8'));
++  const preToolUse = hooksJson?.hooks?.PreToolUse ?? [];
++  const guardEntry = preToolUse.find((entry) =>
++    (entry.hooks ?? []).some((h) => h.type === 'command' && JSON.stringify(h).includes('guard')));
++  assert.notEqual(guardEntry, undefined, 'no PreToolUse entry references the guard');
++  assert.equal(typeof guardEntry.matcher, 'string', 'the guard\'s PreToolUse entry has no string matcher');
++
++  const matcherTools = guardEntry.matcher.split('|');
++  const dispatchTools = toolDispatchKeys();
++
++  // Compared as sorted sets, not raw string/order equality: a regex
++  // alternation matches identically regardless of the order its branches are
++  // written in, so reordering either list has no security effect and must
++  // not fail this test -- only an actual add or remove should.
++  assert.deepEqual(
++    [...matcherTools].sort(),
++    [...dispatchTools].sort(),
++    `hooks.json matcher tools (${matcherTools.join(', ')}) must be exactly guard.mjs's TOOL_DISPATCH keys (${dispatchTools.join(', ')})`,
++  );
++});
++
++/** hooks.json's PreToolUse matcher, as a Set of its tool tokens. */
++function matcherToolSet() {
++  const hooksJson = JSON.parse(fs.readFileSync(HOOKS_JSON_PATH, 'utf8'));
++  const preToolUse = hooksJson?.hooks?.PreToolUse ?? [];
++  const guardEntry = preToolUse.find((entry) =>
++    (entry.hooks ?? []).some((h) => h.type === 'command' && JSON.stringify(h).includes('guard')));
++  assert.notEqual(guardEntry, undefined, 'no PreToolUse entry references the guard');
++  return new Set(guardEntry.matcher.split('|'));
++}
++
++/**
++ * Every tool granted to every agents/*.md file, as a Set. Reads the
++ * frontmatter directly rather than importing anything from
++ * tests/agents.test.mjs — test files in this suite do not depend on each
++ * other's internals.
++ */
++function agentGrantedToolSet() {
++  const agentsDir = path.join(REPO_ROOT, 'agents');
++  const files = fs.readdirSync(agentsDir).filter((f) => f.endsWith('.md'));
++  assert.ok(files.length > 0, 'expected at least one agents/*.md file');
++  const tools = new Set();
++  for (const f of files) {
++    const text = fs.readFileSync(path.join(agentsDir, f), 'utf8');
++    const match = text.match(/^tools:[ \t]*(.+)$/m);
++    assert.notEqual(match, null, `${f} has no 'tools:' frontmatter field`);
++    for (const t of match[1].split(',').map((s) => s.trim()).filter(Boolean)) tools.add(t);
++  }
++  return tools;
++}
++
++test('hooks.json: every tool granted to an agent in its tools: frontmatter is covered by the matcher', () => {
++  // The two tests above only cross-check hooks.json against guard.mjs, and
++  // guard.mjs against itself -- both self-consistent, so an edit that
++  // narrows the matcher AND TOOL_DISPATCH together (e.g. dropping Bash from
++  // both in the same diff) would satisfy both without ever being compared
++  // against what agents/*.md actually grants. That is this finding's stated
++  // failure scenario in its literal form: an agent keeps a tool in its
++  // tools: frontmatter, the matcher no longer covers it, so a call using it
++  // never reaches the guard at all -- the entire allowlist for that tool
++  // goes dark with no denial and no failing test anywhere else. This
++  // compares the matcher against agents/*.md directly, independent of
++  // TOOL_DISPATCH, to close that gap. Subset, not equality: the matcher may
++  // legitimately cover tools no agent currently holds (MultiEdit,
++  // NotebookEdit, NotebookRead), it must never omit one an agent does.
++  const matcherTools = matcherToolSet();
++  const granted = agentGrantedToolSet();
++  const uncovered = [...granted].filter((t) => !matcherTools.has(t));
++  assert.deepEqual(
++    uncovered,
++    [],
++    `agents/*.md grant tool(s) the matcher does not cover, so a call using them would never reach the guard: ${uncovered.join(', ')}`,
++  );
++});
++
+ // ---------------------------------------------------------------------------
+ // Sandbox + payload helpers
+ // ---------------------------------------------------------------------------
+ 
+ /** A fresh sandbox directory with .tdd/config.json copied from `fixturePath`. */
+ function makeSandbox(fixturePath = FIXTURE_CONFIG_PATH) {
+   const dir = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'tdd-guard-test-')));
+   fs.mkdirSync(path.join(dir, '.tdd'), { recursive: true });
+   fs.copyFileSync(fixturePath, path.join(dir, '.tdd', 'config.json'));
+   fs.mkdirSync(path.join(dir, 'src'), { recursive: true });
+diff --git a/tests/rules.test.mjs b/tests/rules.test.mjs
+index 0265e00..5c5aa2c 100644
+--- a/tests/rules.test.mjs
++++ b/tests/rules.test.mjs
+@@ -467,23 +467,26 @@ const METACHARS = [
+ ];
+ 
+ for (const [name, cmd] of METACHARS) {
+   test(`bash: '${name}' in the delta is denied`, () => {
+     assertDeny(bashVerdict(cmd, T_FULL));
+   });
+ }
+ 
+ // Spec: "The delta check must also reject traversal (iteration 2)" — defence
+ // in depth behind the orchestrator-side testId validation (plan Task 13,
+-// I4). Not yet landed anywhere (that item is explicitly future work), so
+-// this is expected to stay red past Task 3 until Task 13 closes it — still
+-// the correct record of the gap in the meantime.
++// I4). This delta-level check (bashVerdict's own '..' rejection) landed in
++// Task 3 and is what this test pins directly. The orchestrator-side testId
++// validation it backs up landed later, in Task 13 (SKILL.md's Red section);
++// tests/skill-consistency.test.mjs pins that prose AND re-checks this same
++// rules.mjs rejection from the I4 side (see its "still rejects '..' in the
++// Bash delta as defence in depth" test).
+ test('bash: .. traversal in the delta is denied', () => {
+   assertDeny(bashVerdict('pytest -q ../../etc/passwd', T_SINGLE));
+ });
+ 
+ test('bash: in-place edit via bash is denied (unrelated command)', () => {
+   assertDeny(bashVerdict('sed -i s/a/b/ src/a.py', T_SINGLE));
+ });
+ 
+ test('bash: empty template denies', () => {
+   assertDeny(bashVerdict('pytest -q', ''));

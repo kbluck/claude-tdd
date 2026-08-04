@@ -1,0 +1,149 @@
+# Review package: 9c2172b..a7de8c5
+
+## Commits
+a7de8c5 fix(skill): stop resume preflight from baselining an in-progress red test
+2dae17f fix(skill): stop decompose from clobbering a resume, fix mutation counter order
+
+## Files changed
+ skills/run-tdd-cycle/SKILL.md | 50 ++++++++++++++++++++++++++++++++++---------
+ 1 file changed, 40 insertions(+), 10 deletions(-)
+
+## Diff
+diff --git a/skills/run-tdd-cycle/SKILL.md b/skills/run-tdd-cycle/SKILL.md
+index a5d27e6..1a6ce06 100644
+--- a/skills/run-tdd-cycle/SKILL.md
++++ b/skills/run-tdd-cycle/SKILL.md
+@@ -10,22 +10,37 @@ That asymmetry is deliberate: the guarantee is that no *agent* couples a test to
+ has full visibility.
+ 
+ Announce: "Using run-tdd-cycle to implement `<spec>`."
+ 
+ ## Preflight — all seven, in order, before any dispatch
+ 
+ 1. **Git repo, clean tree.** Reverting a dispatch destroys working-tree state — see *Reverting a dispatch* for what that actually
+    runs. Dirty → stop, ask the user to commit or stash.
+ 2. **`.tdd/config.json` exists.** Missing → tell the user to run `/tdd-init`. Do not write one yourself.
+ 3. **The full suite passes.** Run the configured test command. Green's stop condition is "this test now passes" and Refactor's is
+-   "all tests still pass" — both are meaningless against an already-red suite. If red, list the failing test IDs, ask the user whether
+-   to proceed, and if so record them in `checklist.json` as `knownRed`.
++   "all tests still pass" — both are meaningless against an already-red suite.
++
++   **`knownRed` is captured once, at first-run preflight, and never re-derived.** It means "failing before this run began" — a
++   property of the starting tree, not of whatever this check happens to see. Before treating a red suite as a candidate baseline,
++   determine first run vs. resume the same way `## Decompose` does: does `.tdd/checklist.json` exist and have items?
++
++   - **First run** (checklist absent or empty). If red, list the failing test IDs, ask the user whether to proceed, and if so record
++     them in `checklist.json` as `knownRed`.
++   - **Resume** (checklist present with items). Read the checklist's existing `knownRed` — this step does not ask for it again and
++     does not overwrite it. If the suite is red, attribute every failure before deciding anything: the item currently at status
++     `red` has a committed `red: <behavior>` commit for it (`git log --grep`, exact match on that item's `behavior` text) — a
++     failure in a test file that commit touched is the expected mid-cycle state, Red's own test with Green not yet run, not a
++     baseline, and must not be added to `knownRed`. **A red suite is not automatically a baseline just because this is a resume.**
++     Any failure that is not in that commit's test files is a genuinely new red suite, not a resume artifact: treat it exactly like
++     the first-run case above — list it, ask the user, and if they agree to proceed, append it to the existing recorded `knownRed`
++     rather than overwriting the list. If no item is currently at status `red`, there is nothing to attribute to and every failure
++     falls into this branch.
+ 
+    **`knownRed` is not a note to yourself; it must be threaded or it is a lie.** Every later suite comparison is against "the baseline
+    you were given", never against zero failures — and `tdd-refactor` and `tdd-mutate` both stop on a suite that is not green, so they
+    must receive the list or they will refuse to run for the rest of the session. Pass `knownRed` in every Refactor and Mutate dispatch.
+    When you check a suite yourself, subtract it before judging. If you find yourself unable to thread it somewhere, stop and say so
+    rather than proceeding with an allowlist that only exists in the file.
+ 4. **Spec file readable and non-empty.** Unreadable or empty → stop; there is nothing to decompose.
+ 5. **The glob partition is still exhaustive.** `git ls-files`; every path must match `test`, `source`, or `ignore`. Drift since
+    init → stop and tell the user to re-run `/tdd-init`. This is what makes the guard's read denylist sound.
+ 6. **Node is on `PATH` and is at least v22** — the floor `hooks/lib/rules.mjs` enforces on itself as `NODE_FLOOR`. A floor, not a
+@@ -54,20 +69,32 @@ Announce: "Using run-tdd-cycle to implement `<spec>`."
+    2.1.220) and this is the check that catches it disappearing.
+ 
+    **Only an observed denial passes this check.** If the probe cannot be dispatched, errors, or returns something you cannot
+    interpret, that is not a pass — it is the same unknown state as a missing denial, and it fails closed. The one outcome that
+    clears preflight is the agent reporting back that the read was denied, with the guard's message in it.
+ 
+ There is no phase marker to clear — the guard identifies callers from the payload's `agent_type`.
+ 
+ ## Decompose
+ 
++**Decompose runs only when the checklist is absent.** Before doing anything else, check whether `.tdd/checklist.json`
++exists and has items:
++
++- **Absent, or present with no items** → this is a first run. Continue below.
++- **Present with items** → this is a resume, not a first run. Load the file exactly as written — every field, including any this
++  section does not itself populate (`baselines`, for instance, is written by the coverage-gate machinery elsewhere in this file, not
++  here) — rather than reconstructing only the fields below. Do not write a new checklist: doing so is exactly what discarded every
++  item's `status`, `knownRed`, `mutationRoundsRun`, and the baselines before this branch existed. Re-surface every item with status
++  `blocked` and ask the user before continuing (see *Completion*), then resume the per-item loop from the first item whose status is
++  not terminal — `pending`, `red`, and `green` are not terminal; `done`, `redundant`, and `blocked` are. Skip the approval step below;
++  it is for a new decomposition, not a continued one.
++
+ Read the spec once. Write `.tdd/checklist.json`:
+ 
+     {
+       "spec": "<path>",
+       "knownRed": ["<test ids excluded from comparisons>"],
+       "mutationRoundsRun": 0,
+       "items": [
+         { "id": 1, "behavior": "<one testable behavior>", "status": "pending" }
+       ]
+     }
+@@ -82,21 +109,21 @@ reaches `done`.
+ Each item is **one** behavior, small enough for a single test. Order them so earlier items do not depend on later ones.
+ 
+ **Show the checklist to the user and get approval before the first dispatch.** Bad decomposition is cheap to fix here and expensive
+ to fix on cycle 9.
+ 
+ **A checklist with no items is a failed decomposition, not a finished run.** Completion below is "no item is `pending`", which an
+ empty list satisfies immediately — so a spec you could not decompose would report success having built nothing. Require at least one
+ item, state the count when you present it, and if the spec yields none, say so and stop rather than proceeding.
+ 
+ `status`: `pending` → `red` → `green` → `done`, or terminating at `redundant` or `blocked`. Write the file after every transition.
+-An interrupted run resumes from this file, not from your context.
++An interrupted run resumes from this file, not from your context — the branch at the top of this section is exactly how.
+ 
+ ## Reverting a dispatch
+ 
+ Several branches below say to discard an agent's work. **`git checkout -- .` is not sufficient on its own** — it restores tracked
+ files but leaves untracked ones in place, and Red's tests are almost always new files. Verified during the first live run: after
+ `git checkout -- .`, a rejected `passing-flat` test was still sitting in the tree, where the next item's commit would have swept it
+ up.
+ 
+ Revert means both:
+ 
+@@ -308,27 +335,30 @@ rule is that a restore is not complete until the cache is too.
+    (mutated to `None`, to an `XX`-wrapped string, and to upper case). One test closes all three, so queueing three Red cycles wastes
+    two of them. Keep every mutant in the item's `mutant` field as evidence, and report the survivor count, not the item count.
+ 
+    For each distinct behavior, append:
+ 
+        { "id": <next>, "behavior": "<the survivor's missingBehavior>",
+          "status": "pending", "origin": "mutation",
+          "mutant": { "file": ..., "line": ...,
+                      "mutations": [ ...every mutant that revealed this gap... ] } }
+ 
+-7. Survivors found → report the count and **resume the per-item loop**. The new items run as ordinary Red→Green cycles.
+-8. No survivors, or `mutationRoundsRun` (read from `checklist.json`) has reached `limits.mutationRounds` → done. Read the count from
+-   the file, not from memory of this session — on a resumed run your context has no record of passes already spent.
+-
+-9. Increment `mutationRoundsRun` in `checklist.json` and write the file.
+-
+-That increment is a numbered step rather than trailing advice because it is the one piece of loop state nothing else reconstructs.
++7. **Increment `mutationRoundsRun` in `checklist.json` and write the file — before the branch below, not after it.** This is the one
++   piece of loop state nothing else reconstructs, and the survivor branch hands control back to the per-item loop without ever
++   reaching a step written later, so it must be written first.
++8. Branch on survivors and the count just written:
++   - No survivors → done.
++   - Survivors found, and `mutationRoundsRun` (read back from `checklist.json`, not from memory — on a resumed run your context has
++     no record of passes already spent) has not yet reached `limits.mutationRounds` → report the survivor count and **resume the
++     per-item loop**. The new items run as ordinary Red→Green cycles.
++   - Survivors found, but `mutationRoundsRun` has reached `limits.mutationRounds` → done. Report the survivors found but not
++     pursued, so the cap's cost is visible rather than silently swallowed.
+ 
+ If the pass skipped mutants because of `mutantsPerPass`, say how many. A capped pass that reports "no survivors" without mentioning
+ the cap reads as a clean bill of health it did not earn.
+ 
+ **`mutantsAttempted: 0` is a failed pass, not a clean one.** No targets ranked, a mutation tool that did not run, a CRAP computation
+ that produced no scores — each yields zero survivors and looks identical to a suite whose tests are genuinely strong. Check
+ `mutantsAttempted` before believing `survivors`, and if it is zero, report the pass as unable to run rather than as passing.
+ 
+ ## Completion
+ 

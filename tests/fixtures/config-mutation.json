@@ -6,7 +6,7 @@
     "singleTerse": "pytest -q --tb=line {testId}",
     "coverage": "pytest -q --cov --cov-report=json:.tdd/coverage.json",
     "complexity": "radon cc -j -s src",
-    "mutation": null
+    "mutation": "mutmut run"
   },
   "globs": {
     "test": ["tests/**", "**/test_*.py"],

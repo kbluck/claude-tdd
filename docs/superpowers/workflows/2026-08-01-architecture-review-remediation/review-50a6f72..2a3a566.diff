@@ -1,0 +1,834 @@
+# Review package: 50a6f72..2a3a566
+
+## Commits
+2a3a566 fix(plugin): stop the resume-scratch cleanup reaching real worktrees
+5b71676 docs(plugin): document the e2e smoke check and live resume procedure
+4246ee5 test(plugin): add automated smoke checks for the e2e workflow fixture
+
+## Files changed
+ AGENTS.md                               |  22 ++
+ e2e/expected-outcome.json               |  76 +++++++
+ e2e/fixtures/checklist-resume-seed.json |  25 +++
+ e2e/fixtures/prepare-resume-scratch.mjs | 103 +++++++++
+ e2e/lib/checklist-invariants.mjs        | 150 +++++++++++++
+ e2e/smoke.mjs                           | 364 ++++++++++++++++++++++++++++++++
+ package.json                            |   3 +-
+ 7 files changed, 742 insertions(+), 1 deletion(-)
+
+## Diff
+diff --git a/AGENTS.md b/AGENTS.md
+index ecf3c75..708280d 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -54,20 +54,42 @@ The bash harness (`tests/run.sh` sourcing `tests/*.test.sh`) is retired — Task
+ `hooks/lib/rules.sh`, the files it existed to test. Four of its five test files (`agents`, `config-contract`, `guard`, `rules`)
+ have a `.test.mjs` equivalent under `node:test`. The fifth, `tests/smoke.test.sh`, needed no successor: it tested only the bash
+ harness's own `assert_eq`/`assert_contains` functions, not anything about this plugin — `node:test`'s assertions are Node's own
+ and need no such self-test.
+ 
+ ## Running the plugin against itself
+ 
+ `e2e/` is a pytest fixture for exercising the workflow end to end. Run `/tdd-init` (it detects the fixture), then `/tdd e2e/spec.md`.
+ The venv at `e2e/.venv` needs `pytest`, `pytest-cov`, `radon` and `mutmut`.
+ 
++**`e2e/` is also wired into a headless smoke check — `npm run smoke` (`node e2e/smoke.mjs`).** It is a separate entry point,
++deliberately not part of `node --test`: it needs the pytest venv and spawns real `git` subprocesses, and the unit suite's job is
++to stay under a second, not to shell out. It diffs the fixture's recorded outcome (`e2e/expected-outcome.json`) against a fresh
++run, seeds a real regression and confirms the configured test command catches it, and exercises the Task 6 (resume) and Task 7
++(out-of-glob revert) fixes this review added — see the header comment in `e2e/smoke.mjs` for exactly which cases are automated
++versus scaffolded for a live session, and `.superpowers/sdd/2026-08-01-architecture-review-remediation/task-12-report.md` for the
++full breakdown.
++
++**A subagent cannot dispatch `tdd-*` subagents, so the resume case needs a human (or a main-thread session) to actually run it:**
++
++1. `node e2e/fixtures/prepare-resume-scratch.mjs` — builds a detached scratch git worktree whose `e2e/` matches the interrupted
++   state `e2e/fixtures/checklist-resume-seed.json` describes (add() done, subtract()'s test written but unimplemented, divide()
++   untouched) and seeds `.tdd/checklist.json` there. Prints the worktree path and the remaining steps.
++2. `cd` into the printed path. `.tdd/config.json` is gitignored, so the worktree starts without one — run `/tdd-init` if it is
++   missing (or copy one from a project whose globs already cover `e2e/`).
++3. In a live Claude Code session with that worktree as the project, run `/tdd e2e/spec.md`. Confirm it resumes — no fresh
++   decomposition, no re-approval prompt for the two items that already have state — rather than overwriting the checklist.
++4. After it advances at least one item, run
++   `node e2e/lib/checklist-invariants.mjs e2e/fixtures/checklist-resume-seed.json <worktree>/.tdd/checklist.json` to confirm every
++   field a resume must preserve actually survived.
++5. `git worktree remove --force <worktree>` to clean up.
++
+ ---
+ 
+ # Traps
+ 
+ Every item below was paid for. Twenty defects were recorded across the first iteration — twelve found by review, eight only by
+ running — plus six more from an independent architecture review that document review had passed over roughly forty times.
+ 
+ ## A green suite is not evidence
+ 
+ `run.sh` fails a file that contributes **zero** assertions, and fails an empty glob. It does **not** catch a file that dies
+diff --git a/e2e/expected-outcome.json b/e2e/expected-outcome.json
+new file mode 100644
+index 0000000..366a0e9
+--- /dev/null
++++ b/e2e/expected-outcome.json
+@@ -0,0 +1,76 @@
++{
++  "testCount": 7,
++  "testCommand": "PYTHONDONTWRITEBYTECODE=1 e2e/.venv/bin/pytest -q --ignore=e2e/mutants e2e",
++  "note": "finalChecklist and commitSubjects below are recorded documentation from the actual live /tdd run that produced e2e/'s current git history: .tdd/checklist.json is gitignored, so it exists on the machine that ran it but not in this repo. e2e/smoke.mjs does NOT assert testCount against git log or a live checklist.json -- a legitimate future commit touching e2e/, or a fresh machine with no .tdd/checklist.json on disk, would break an exact-match assertion for no real reason. Use these as the comparison target when a human runs the full live workflow end to end; see AGENTS.md's 'Running the plugin against itself' section. testCount is the one figure smoke.mjs does assert, because pytest's own summary line is a stable, resettable ground truth that does not depend on any gitignored file.",
++  "finalChecklist": {
++    "spec": "e2e/spec.md",
++    "knownRed": [],
++    "mutationRoundsRun": 2,
++    "items": [
++      {
++        "id": 1,
++        "behavior": "add(a, b) returns the sum of two numbers",
++        "status": "redundant",
++        "reason": "Red wrote a passing test that moved no coverage; add() is already covered by test_smoke."
++      },
++      {
++        "id": 2,
++        "behavior": "subtract(a, b) returns the difference",
++        "status": "done"
++      },
++      {
++        "id": 3,
++        "behavior": "divide(a, b) raises ValueError when b is zero",
++        "status": "done"
++      },
++      {
++        "id": 4,
++        "behavior": "divide returns the arithmetic quotient — divide(7, 2) == 3.5, distinguishing it from a*b, b/a and a//b",
++        "status": "done",
++        "origin": "mutation",
++        "mutant": {
++          "file": "e2e/src/calc/__init__.py",
++          "line": 12,
++          "mutations": ["return a * b", "return b / a", "return a // b"]
++        }
++      },
++      {
++        "id": 5,
++        "behavior": "dividing by zero raises ValueError whose message is exactly 'division by zero'",
++        "status": "done",
++        "origin": "mutation",
++        "mutant": {
++          "file": "e2e/src/calc/__init__.py",
++          "line": 11,
++          "mutations": ["raise ValueError(\"XXdivision by zeroXX\")"]
++        }
++      },
++      {
++        "id": 6,
++        "behavior": "divide with a negative divisor returns the correct negative quotient rather than raising — divide(7, -2) == -3.5",
++        "status": "done",
++        "origin": "mutation",
++        "mutant": {
++          "file": "e2e/src/calc/__init__.py",
++          "line": 10,
++          "mutations": ["if b <= 0:"]
++        }
++      }
++    ]
++  },
++  "commitSubjects": [
++    "test(plugin): add e2e fixture project for the end-to-end run",
++    "chore: configure TDD subagent workflow",
++    "chore: untrack python bytecode committed with the fixture",
++    "red: subtract(a, b) returns the difference",
++    "green: subtract(a, b) returns the difference",
++    "chore: untrack source bytecode",
++    "red: divide(a, b) raises ValueError when b is zero",
++    "green: divide(a, b) raises ValueError when b is zero",
++    "test(plugin): plant a covers-without-asserting test for the mutation pass",
++    "fix(plugin): stop the mutation run from breaking the test command",
++    "test: divide returns the arithmetic quotient",
++    "test: divide's zero-division message is exactly 'division by zero'",
++    "test: divide only rejects a zero divisor, not any non-positive one"
++  ]
++}
+diff --git a/e2e/fixtures/checklist-resume-seed.json b/e2e/fixtures/checklist-resume-seed.json
+new file mode 100644
+index 0000000..b5e555c
+--- /dev/null
++++ b/e2e/fixtures/checklist-resume-seed.json
+@@ -0,0 +1,25 @@
++{
++  "spec": "e2e/spec.md",
++  "knownRed": ["tests/test_known_flaky.py::test_pretend_baseline_failure"],
++  "mutationRoundsRun": 0,
++  "items": [
++    {
++      "id": 1,
++      "behavior": "add(a, b) returns the sum of two numbers",
++      "status": "redundant",
++      "reason": "Red wrote a passing test that moved no coverage; add() is already covered by test_smoke."
++    },
++    {
++      "id": 2,
++      "behavior": "subtract(a, b) returns the difference",
++      "status": "red",
++      "testId": "tests/test_subtract.py::test_subtract_returns_difference"
++    },
++    {
++      "id": 3,
++      "behavior": "divide(a, b) raises ValueError when b is zero",
++      "status": "pending",
++      "testId": null
++    }
++  ]
++}
+diff --git a/e2e/fixtures/prepare-resume-scratch.mjs b/e2e/fixtures/prepare-resume-scratch.mjs
+new file mode 100644
+index 0000000..221826c
+--- /dev/null
++++ b/e2e/fixtures/prepare-resume-scratch.mjs
+@@ -0,0 +1,103 @@
++#!/usr/bin/env node
++// @ts-check
++/**
++ * Builds a scratch git worktree whose e2e/ fixture matches the INTERRUPTED
++ * state `checklist-resume-seed.json` (sibling file) describes: add() is
++ * implemented and committed, subtract()'s test exists but subtract() has not
++ * been written yet (item 2: status "red"), and divide() has neither test nor
++ * implementation (item 3: status "pending").
++ *
++ * A human then points a live Claude Code session at that worktree and runs
++ * `/tdd e2e/spec.md`, to exercise the actual resume branch in `## Decompose`
++ * of skills/run-tdd-cycle/SKILL.md (Task 6) -- a subagent cannot dispatch
++ * subagents, so this script only does the mechanical setup. See AGENTS.md's
++ * "Running the plugin against itself" section for the full procedure,
++ * including how to compare the result with checklist-invariants.mjs.
++ *
++ * Also imported by e2e/smoke.mjs to headlessly verify the scratch this
++ * produces is well-formed -- clean tree, subtract genuinely red, divide
++ * genuinely untested -- before any human spends a live session on it.
++ */
++import { execFileSync } from 'node:child_process';
++import fs from 'node:fs';
++import os from 'node:os';
++import path from 'node:path';
++import { fileURLToPath } from 'node:url';
++
++const HERE = path.dirname(fileURLToPath(import.meta.url));
++const REPO_ROOT = path.resolve(HERE, '..', '..');
++const SEED_PATH = path.join(HERE, 'checklist-resume-seed.json');
++
++/**
++ * @param {string[]} args
++ * @param {string} cwd
++ */
++function git(args, cwd) {
++  return execFileSync('git', args, { cwd, encoding: 'utf8' });
++}
++
++/**
++ * @param {string} [targetDir] defaults to a fresh mkdtemp directory
++ * @returns {{ scratchDir: string, cleanup: () => void }}
++ */
++export function prepareResumeScratch(targetDir) {
++  const dir = targetDir ?? fs.mkdtempSync(path.join(os.tmpdir(), 'tdd-resume-scratch-'));
++
++  // A linked worktree at HEAD, detached so it never contends with whatever
++  // branch the main working tree has checked out. Only tracked files come
++  // across -- .tdd/config.json and .tdd/checklist.json are gitignored, so
++  // the worktree starts with neither, matching a fresh clone.
++  git(['worktree', 'add', '--detach', '--quiet', dir, 'HEAD'], REPO_ROOT);
++
++  const calcPath = path.join(dir, 'e2e', 'src', 'calc', '__init__.py');
++  fs.writeFileSync(calcPath, 'def add(a, b):\n    return a + b\n');
++
++  const dividePath = path.join(dir, 'e2e', 'tests', 'test_divide.py');
++  fs.rmSync(dividePath, { force: true });
++
++  git(['add', '-A'], dir);
++  git(
++    [
++      'commit',
++      '-q',
++      '-m',
++      'scratch: roll back e2e/ to the interrupted state checklist-resume-seed.json describes (local resume test only)',
++    ],
++    dir,
++  );
++
++  fs.mkdirSync(path.join(dir, '.tdd'), { recursive: true });
++  fs.copyFileSync(SEED_PATH, path.join(dir, '.tdd', 'checklist.json'));
++
++  const cleanup = () => {
++    try {
++      git(['worktree', 'remove', '--force', dir], REPO_ROOT);
++    } finally {
++      // Deliberately NOT `git worktree prune`: `remove --force` above already
++      // deregisters *this* worktree, and `prune` sweeps every worktree entry
++      // whose directory is currently unreachable -- including a developer's
++      // own unrelated worktree if its volume happens to be unmounted at this
++      // moment. This script must never touch state it did not create in the
++      // real repository's .git.
++      fs.rmSync(dir, { recursive: true, force: true });
++    }
++  };
++
++  return { scratchDir: dir, cleanup };
++}
++
++if (import.meta.url === `file://${process.argv[1]}`) {
++  const target = process.argv[2];
++  const { scratchDir } = prepareResumeScratch(target);
++  const invariantsPath = path.join(REPO_ROOT, 'e2e', 'lib', 'checklist-invariants.mjs');
++  const resultPath = path.join(scratchDir, '.tdd', 'checklist.json');
++  console.log(scratchDir);
++  console.log('');
++  console.log('Scratch worktree ready. Next, in a live Claude Code session:');
++  console.log(`  1. cd ${scratchDir}`);
++  console.log('  2. Confirm .tdd/config.json exists (run /tdd-init if not -- it is gitignored, so a fresh worktree never has one).');
++  console.log('  3. Run: /tdd e2e/spec.md');
++  console.log('  4. After it resumes and advances at least one item, compare:');
++  console.log(`     node ${invariantsPath} ${SEED_PATH} ${resultPath}`);
++  console.log(`  5. Remove the worktree when done: git -C ${REPO_ROOT} worktree remove --force ${scratchDir}`);
++}
+diff --git a/e2e/lib/checklist-invariants.mjs b/e2e/lib/checklist-invariants.mjs
+new file mode 100644
+index 0000000..a80ea16
+--- /dev/null
++++ b/e2e/lib/checklist-invariants.mjs
+@@ -0,0 +1,150 @@
++#!/usr/bin/env node
++// @ts-check
++/**
++ * Structural invariants a resumed `checklist.json` must satisfy relative to
++ * the state it resumed from (Task 6: `## Decompose` in
++ * `skills/run-tdd-cycle/SKILL.md` loads the file on a resume rather than
++ * overwriting it).
++ *
++ * This checks SHAPE, not whether the workflow's decisions were correct. It
++ * cannot know whether Green *should* have landed by the time you compare —
++ * only that whatever did happen did not silently discard what a resume must
++ * preserve: terminal items' status and recorded fields, `knownRed`, and
++ * `mutationRoundsRun` never regressing.
++ *
++ * Used two ways:
++ *   1. Headlessly, from `e2e/smoke.mjs` — bite-checked against a fabricated
++ *      "Decompose overwrote the file" reconstruction, which is exactly the
++ *      pre-Task-6 bug, and against a legitimately advanced checklist, which
++ *      must pass.
++ *   2. By a human after a REAL live resume, as a CLI:
++ *
++ *          node e2e/lib/checklist-invariants.mjs <seed.json> <result.json>
++ *
++ *      See AGENTS.md's "Running the plugin against itself" section and
++ *      `e2e/fixtures/prepare-resume-scratch.mjs` for how to produce both
++ *      files from an actual `/tdd` resume.
++ */
++
++/**
++ * @typedef {{ id: number|string, behavior?: string, status: string, testId?: string|null, [k: string]: any }} ChecklistItem
++ * @typedef {{ spec?: string, knownRed?: string[], mutationRoundsRun?: number, items?: ChecklistItem[] }} Checklist
++ */
++
++const TERMINAL_STATUSES = new Set(['done', 'redundant', 'blocked']);
++
++// Legitimate progress only ever moves an item forward through this order.
++// `done`, `redundant`, and `blocked` share a rank because they are mutually
++// exclusive terminal outcomes, not a sequence -- which of the three seed
++// landed on must still match exactly (checked separately, below); this rank
++// only catches a terminal item sliding back to a non-terminal one, or a
++// non-terminal item sliding backward (e.g. "red" reverting to "pending",
++// which a fresh Decompose does to every item).
++const STATUS_RANK = { pending: 0, red: 1, green: 2, done: 3, redundant: 3, blocked: 3 };
++
++/**
++ * @param {Checklist} seed the checklist as it existed before the resumed run
++ * @param {Checklist} result the checklist after the resumed run touched it
++ * @returns {{ ok: boolean, violations: string[] }}
++ */
++export function checkResumePreserved(seed, result) {
++  const violations = [];
++
++  if (!seed || typeof seed !== 'object') {
++    return { ok: false, violations: ['seed is not a checklist object'] };
++  }
++  if (!result || typeof result !== 'object') {
++    return { ok: false, violations: ['result is not a checklist object'] };
++  }
++
++  if (seed.spec !== undefined && result.spec !== seed.spec) {
++    violations.push(`spec changed: seed="${seed.spec}" result="${result.spec}"`);
++  }
++
++  const seedKnownRed = Array.isArray(seed.knownRed) ? seed.knownRed : [];
++  const resultKnownRed = Array.isArray(result.knownRed) ? result.knownRed : [];
++  for (const id of seedKnownRed) {
++    if (!resultKnownRed.includes(id)) {
++      violations.push(`knownRed dropped an entry a resume must preserve: "${id}"`);
++    }
++  }
++
++  const seedRounds = typeof seed.mutationRoundsRun === 'number' ? seed.mutationRoundsRun : 0;
++  const resultRounds = result.mutationRoundsRun;
++  if (typeof resultRounds !== 'number') {
++    violations.push(`mutationRoundsRun is missing or not a number in the result (got ${JSON.stringify(resultRounds)})`);
++  } else if (resultRounds < seedRounds) {
++    violations.push(`mutationRoundsRun regressed: seed=${seedRounds} result=${resultRounds}`);
++  }
++
++  const seedItems = Array.isArray(seed.items) ? seed.items : [];
++  const resultItems = Array.isArray(result.items) ? result.items : [];
++  if (resultItems.length < seedItems.length) {
++    violations.push(`item count shrank: seed had ${seedItems.length}, result has ${resultItems.length}`);
++  }
++
++  const resultById = new Map(resultItems.map((it) => [it.id, it]));
++  for (const seedItem of seedItems) {
++    const found = resultById.get(seedItem.id);
++    if (!found) {
++      violations.push(`item ${seedItem.id} ("${seedItem.behavior ?? ''}") is missing from the result`);
++      continue;
++    }
++
++    const seedRank = STATUS_RANK[seedItem.status];
++    const foundRank = STATUS_RANK[found.status];
++    if (foundRank === undefined) {
++      violations.push(`item ${seedItem.id}: result has an unrecognised status "${found.status}"`);
++    } else if (seedRank !== undefined && foundRank < seedRank) {
++      violations.push(`item ${seedItem.id}: status regressed from "${seedItem.status}" to "${found.status}"`);
++    }
++
++    if (TERMINAL_STATUSES.has(seedItem.status)) {
++      // A terminal item (done/redundant/blocked) is finished work. A resume
++      // must load it unchanged -- only an unconditional Decompose rewrite
++      // would touch it, and that is exactly the bug Task 6 fixed. The rank
++      // check above only confirms it didn't slide back to non-terminal; the
++      // three terminal outcomes are mutually exclusive, so an exact match is
++      // still required here.
++      if (found.status !== seedItem.status) {
++        violations.push(`item ${seedItem.id}: terminal status "${seedItem.status}" was overwritten with "${found.status}"`);
++      }
++      if ((found.testId ?? null) !== (seedItem.testId ?? null)) {
++        violations.push(
++          `item ${seedItem.id}: testId changed on a terminal item (seed=${JSON.stringify(seedItem.testId ?? null)}, result=${JSON.stringify(found.testId ?? null)})`,
++        );
++      }
++    } else if (seedItem.testId) {
++      // A non-terminal item (pending/red/green) that already recorded a
++      // testId must never regress back to null -- that is the fingerprint of
++      // a fresh Decompose, which always initialises testId to null.
++      if (!found.testId) {
++        violations.push(`item ${seedItem.id}: testId "${seedItem.testId}" was cleared (result has no testId)`);
++      }
++    }
++  }
++
++  return { ok: violations.length === 0, violations };
++}
++
++if (import.meta.url === `file://${process.argv[1]}`) {
++  const [seedPath, resultPath] = process.argv.slice(2);
++  if (!seedPath || !resultPath) {
++    console.error('usage: node checklist-invariants.mjs <seed.json> <result.json>');
++    process.exit(2);
++  }
++  const fs = await import('node:fs');
++  /** @type {Checklist} */
++  const seed = JSON.parse(fs.readFileSync(seedPath, 'utf8'));
++  /** @type {Checklist} */
++  const result = JSON.parse(fs.readFileSync(resultPath, 'utf8'));
++  const verdict = checkResumePreserved(seed, result);
++  if (verdict.ok) {
++    console.log('resume preserved: OK');
++    process.exit(0);
++  } else {
++    console.error('resume preserved: FAILED');
++    for (const v of verdict.violations) console.error(`  - ${v}`);
++    process.exit(1);
++  }
++}
+diff --git a/e2e/smoke.mjs b/e2e/smoke.mjs
+new file mode 100644
+index 0000000..8459a3a
+--- /dev/null
++++ b/e2e/smoke.mjs
+@@ -0,0 +1,364 @@
++#!/usr/bin/env node
++// @ts-check
++/**
++ * Headless smoke checks for the e2e/ TDD-workflow fixture (Task 12).
++ *
++ * `e2e/` used to be a recorded artifact: nothing re-ran it, nothing diffed
++ * its result against a committed expectation. This file is the mechanism
++ * that does both, PLUS the two cases the 2026-08-01 architecture review
++ * found broken and nothing exercised: resume (Task 6) and an out-of-glob
++ * revert (Task 7).
++ *
++ * Run: `node e2e/smoke.mjs` or `npm run smoke`.
++ *
++ * NOT part of `node --test`. This filename deliberately avoids the
++ * `*.test.mjs` / `*-test.mjs` / `test-*.mjs` / `test.mjs` patterns node:test
++ * discovers by default (verified empirically -- see the Task 12 report), and
++ * this file needs a Python venv and spawns real `git` subprocesses; it does
++ * not belong in the unit suite's <2s budget.
++ *
++ * ---------------------------------------------------------------------------
++ * What is genuinely automated here, and what is only scaffolded for a human
++ * running a live Claude Code session, is NOT the same thing. A subagent
++ * cannot dispatch tdd-* subagents, so nothing that requires an actual
++ * orchestrator reading SKILL.md and making a judgement call can run from
++ * this file. Read the Task 12 report for the explicit table; the short
++ * version:
++ *
++ *   AUTOMATED (this file asserts on real process/git output):
++ *     - the fixture's recorded pytest count, and that breaking source fails
++ *       it and restoring source un-fails it (a seeded regression)
++ *     - the git-mechanics claim `## Reverting a dispatch` makes about
++ *       `git clean -fd` skipping tracked paths in a mixed pathspec
++ *     - the out-of-glob revert: BOTH that the pre-Task-7 scoping (role's own
++ *       glob only) leaves a rogue file behind, AND that the post-Task-7
++ *       scoping (every path the audit found) removes it
++ *     - the resume comparator's own correctness (checklist-invariants.mjs),
++ *       bite-checked against a fabricated pre-Task-6 "Decompose overwrote
++ *       the file" reconstruction
++ *     - that prepare-resume-scratch.mjs actually produces a clean, genuinely
++ *       interrupted-looking worktree (subtract red, divide untested)
++ *
++ *   SCAFFOLDED, NOT AUTOMATED (needs a live orchestrator):
++ *     - an actual `/tdd e2e/spec.md` resume against that scratch worktree
++ *     - comparing its real resulting checklist.json with
++ *       checklist-invariants.mjs
++ */
++
++import { spawnSync, execFileSync } from 'node:child_process';
++import fs from 'node:fs';
++import os from 'node:os';
++import path from 'node:path';
++import assert from 'node:assert/strict';
++import { fileURLToPath } from 'node:url';
++import { checkResumePreserved } from './lib/checklist-invariants.mjs';
++import { prepareResumeScratch } from './fixtures/prepare-resume-scratch.mjs';
++
++const HERE = path.dirname(fileURLToPath(import.meta.url));
++const REPO_ROOT = path.resolve(HERE, '..');
++const PYTEST = path.join(REPO_ROOT, 'e2e', '.venv', 'bin', 'pytest');
++const CALC_SRC = path.join(REPO_ROOT, 'e2e', 'src', 'calc', '__init__.py');
++const EXPECTED = JSON.parse(fs.readFileSync(path.join(HERE, 'expected-outcome.json'), 'utf8'));
++const RESUME_SEED = JSON.parse(fs.readFileSync(path.join(HERE, 'fixtures', 'checklist-resume-seed.json'), 'utf8'));
++
++let passed = 0;
++let failed = 0;
++
++/**
++ * @param {string} name
++ * @param {() => void} fn
++ */
++function check(name, fn) {
++  try {
++    fn();
++    passed += 1;
++    console.log(`ok - ${name}`);
++  } catch (err) {
++    failed += 1;
++    console.log(`FAIL - ${name}`);
++    console.log(`       ${err instanceof Error ? err.message : String(err)}`);
++  }
++}
++
++// ---------------------------------------------------------------------------
++// Section 1: the fixture's own recorded outcome, and a seeded regression
++// ---------------------------------------------------------------------------
++
++/** @returns {import('node:child_process').SpawnSyncReturns<string>} */
++function runFixturePytest(cwd = REPO_ROOT) {
++  return spawnSync(PYTEST, ['-q', '--ignore=e2e/mutants', 'e2e'], {
++    cwd,
++    encoding: 'utf8',
++    env: { ...process.env, PYTHONDONTWRITEBYTECODE: '1' },
++  });
++}
++
++check('e2e fixture: the pytest venv is present (provision e2e/.venv before running this)', () => {
++  assert.ok(fs.existsSync(PYTEST), `expected a pytest executable at ${PYTEST}`);
++});
++
++check(`e2e fixture: recorded outcome — pytest reports exactly "${EXPECTED.testCount} passed"`, () => {
++  const result = runFixturePytest();
++  assert.equal(result.status, 0, `pytest exited ${result.status}\n${result.stdout}\n${result.stderr}`);
++  assert.match(
++    result.stdout,
++    new RegExp(`\\b${EXPECTED.testCount} passed\\b`),
++    `expected "${EXPECTED.testCount} passed" in pytest output, got:\n${result.stdout}`,
++  );
++});
++
++check('seeded regression: breaking subtract() fails the configured test command, restoring it goes green again', () => {
++  const original = fs.readFileSync(CALC_SRC, 'utf8');
++  const needle = 'def subtract(a, b):\n    return a - b';
++  assert.ok(original.includes(needle), 'fixture source has drifted from what this seeded mutation expects — update the mutation');
++  const mutated = original.replace(needle, 'def subtract(a, b):\n    return a + b');
++
++  // This is the one check in this file that mutates real TRACKED source. The
++  // `finally` below covers a thrown assertion, but not a kill signal or an
++  // uncaught crash between here and there -- and an unrestored mutation is a
++  // regression a developer could then commit. Belt and braces: a synchronous
++  // restore registered against both an ordinary exit and the signals that
++  // would otherwise terminate the process before `finally` ever runs.
++  let restored = false;
++  function restore() {
++    if (restored) return;
++    restored = true;
++    fs.writeFileSync(CALC_SRC, original);
++  }
++  const onSigint = () => {
++    restore();
++    process.exit(130);
++  };
++  const onSigterm = () => {
++    restore();
++    process.exit(143);
++  };
++  process.once('exit', restore);
++  process.once('SIGINT', onSigint);
++  process.once('SIGTERM', onSigterm);
++
++  try {
++    fs.writeFileSync(CALC_SRC, mutated);
++    const redResult = runFixturePytest();
++    assert.notEqual(redResult.status, 0, 'seeded regression did not fail the suite — the seeded mutation is not being exercised');
++    assert.match(
++      redResult.stdout,
++      /test_subtract_returns_difference/,
++      `expected the subtract test to be named as a failure, got:\n${redResult.stdout}`,
++    );
++  } finally {
++    restore();
++    process.removeListener('SIGINT', onSigint);
++    process.removeListener('SIGTERM', onSigterm);
++    // The 'exit' listener is intentionally left registered: it is idempotent
++    // (the `restored` guard makes any later invocation a no-op) and 'exit'
++    // only fires once, at real process shutdown.
++  }
++  const greenResult = runFixturePytest();
++  assert.equal(greenResult.status, 0, `restoring the source did not restore a green suite\n${greenResult.stdout}\n${greenResult.stderr}`);
++  const treeStatus = execFileSync('git', ['status', '--porcelain', '--', 'e2e/src'], { cwd: REPO_ROOT, encoding: 'utf8' });
++  assert.equal(treeStatus.trim(), '', `e2e/src is not clean after the seeded-regression check restored it:\n${treeStatus}`);
++});
++
++// ---------------------------------------------------------------------------
++// Section 2: the out-of-glob revert (Task 7) — sandboxed git mechanics only,
++// never against this repository's own tree.
++// ---------------------------------------------------------------------------
++
++/** @param {string[]} args @param {string} cwd */
++function git(args, cwd) {
++  return execFileSync('git', args, { cwd, encoding: 'utf8' });
++}
++
++/** A fresh git sandbox with a tracked baseline and a gitignored venv stand-in. */
++function makeGlobSandbox() {
++  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tdd-e2e-smoke-glob-'));
++  fs.mkdirSync(path.join(dir, 'src'), { recursive: true });
++  fs.mkdirSync(path.join(dir, 'tests'), { recursive: true });
++  fs.mkdirSync(path.join(dir, 'venv'), { recursive: true });
++  fs.writeFileSync(path.join(dir, '.gitignore'), 'venv/\n');
++  fs.writeFileSync(path.join(dir, 'src', 'a.py'), 'ORIGINAL\n');
++  fs.writeFileSync(path.join(dir, 'tests', 'test_a.py'), 'test\n');
++  git(['init', '-q'], dir);
++  git(['config', 'user.email', 'smoke@test.local'], dir);
++  git(['config', 'user.name', 'smoke'], dir);
++  git(['add', '.gitignore', 'src/a.py', 'tests/test_a.py'], dir);
++  git(['commit', '-q', '-m', 'baseline'], dir);
++  return dir;
++}
++
++/**
++ * Seeds exactly the shape SKILL.md's "Reverting a dispatch" section
++ * describes: a tracked in-glob edit, a legitimate untracked in-glob file, one
++ * untracked file OUTSIDE both globs (the violation), and a gitignored stand-in
++ * for the venv/checklist/coverage report that must survive any revert.
++ * @param {string} dir
++ */
++function seedGlobViolation(dir) {
++  fs.writeFileSync(path.join(dir, 'src', 'a.py'), 'MODIFIED\n');
++  fs.writeFileSync(path.join(dir, 'tests', 'test_new.py'), 'new\n');
++  fs.writeFileSync(path.join(dir, 'rogue.py'), 'rogue\n');
++  fs.writeFileSync(path.join(dir, 'venv', 'marker.txt'), 'marker\n');
++}
++
++/** @param {string} dir @returns {string} */
++function gitStatus(dir) {
++  return git(['status', '--porcelain'], dir);
++}
++
++/**
++ * The orchestrator's audit: every path `git status --porcelain` names, parsed
++ * to bare paths. NOT a general-purpose porcelain parser -- `line.slice(3)` is
++ * only correct for the plain modified/untracked entries `seedGlobViolation`
++ * produces here. A rename (`R  old -> new`) or a quoted path (spaces,
++ * non-ASCII, under `core.quotePath`) would break it. Good enough for this
++ * sandbox; do not reuse this as the reference implementation of the audit.
++ * @param {string} dir
++ */
++function foundPaths(dir) {
++  return gitStatus(dir)
++    .split('\n')
++    .filter(Boolean)
++    .map((line) => line.slice(3));
++}
++
++check(
++  "SKILL.md's revert claim: `git clean -fd` given a mixed tracked+untracked pathspec skips the tracked entry silently and exits 0",
++  () => {
++    const dir = makeGlobSandbox();
++    try {
++      seedGlobViolation(dir);
++      git(['reset', '--hard', 'HEAD'], dir); // src/a.py is now clean/tracked again
++      const out = execFileSync('git', ['clean', '-fd', '--', 'src/a.py', 'rogue.py'], { cwd: dir, encoding: 'utf8' });
++      assert.doesNotMatch(out, /src\/a\.py/, `clean reported acting on the tracked path:\n${out}`);
++      assert.match(out, /rogue\.py/, `clean did not report removing the untracked path:\n${out}`);
++    } finally {
++      fs.rmSync(dir, { recursive: true, force: true });
++    }
++  },
++);
++
++check(
++  "out-of-glob revert — PRE-TASK-7 REGRESSION: `clean` scoped to the role's own write glob cannot reach a rogue file outside it",
++  () => {
++    const dir = makeGlobSandbox();
++    try {
++      seedGlobViolation(dir);
++      git(['reset', '--hard', 'HEAD'], dir);
++      git(['clean', '-fd', '--', 'src/**'], dir); // the pre-fix scoping: the role's own glob only
++      const status = gitStatus(dir);
++      assert.match(status, /\?\? rogue\.py/, `expected the pre-fix scoping to leave rogue.py behind, but it is gone:\n${status}`);
++    } finally {
++      fs.rmSync(dir, { recursive: true, force: true });
++    }
++  },
++);
++
++check(
++  'out-of-glob revert — POST-TASK-7 FIX: `clean` scoped to every path the audit found removes the rogue file and fully restores the tree',
++  () => {
++    const dir = makeGlobSandbox();
++    try {
++      seedGlobViolation(dir);
++      const paths = foundPaths(dir);
++      assert.ok(paths.includes('rogue.py'), `sandbox setup bug: audit did not find rogue.py among ${JSON.stringify(paths)}`);
++      git(['reset', '--hard', 'HEAD'], dir);
++      execFileSync('git', ['clean', '-fd', '--', ...paths], { cwd: dir, encoding: 'utf8' });
++      const status = gitStatus(dir);
++      assert.equal(status, '', `tree not fully reverted:\n${status}`);
++      assert.equal(fs.existsSync(path.join(dir, 'rogue.py')), false, 'rogue.py survived the post-fix revert');
++      assert.equal(fs.readFileSync(path.join(dir, 'src', 'a.py'), 'utf8'), 'ORIGINAL\n', 'tracked file was not restored to HEAD');
++      assert.equal(fs.existsSync(path.join(dir, 'venv', 'marker.txt')), true, 'clean removed a gitignored path — must survive (no -x)');
++    } finally {
++      fs.rmSync(dir, { recursive: true, force: true });
++    }
++  },
++);
++
++// ---------------------------------------------------------------------------
++// Section 3: resume (Task 6) — the comparator is automated and bite-checked;
++// an actual live resume is not (see Section 4 and the report).
++// ---------------------------------------------------------------------------
++
++check('resume comparator: a legitimately advanced checklist (loaded, not rebuilt) reports preserved', () => {
++  const advanced = structuredClone(RESUME_SEED);
++  advanced.items = advanced.items.map((/** @type {any} */ item) => {
++    if (item.id === 2) return { ...item, status: 'done' }; // Green landed and it was committed
++    if (item.id === 3) return { ...item, status: 'red', testId: 'tests/test_divide.py::test_divide_by_zero_raises_value_error' };
++    return item;
++  });
++  const verdict = checkResumePreserved(RESUME_SEED, advanced);
++  assert.equal(verdict.ok, true, `expected a legitimate resume to pass: ${JSON.stringify(verdict.violations)}`);
++});
++
++check('resume comparator bite-check: an unconditional Decompose rewrite (the pre-Task-6 bug) is caught', () => {
++  const rebuilt = {
++    spec: RESUME_SEED.spec,
++    knownRed: [],
++    mutationRoundsRun: 0,
++    items: RESUME_SEED.items.map((/** @type {any} */ item) => ({ id: item.id, behavior: item.behavior, status: 'pending', testId: null })),
++  };
++  const verdict = checkResumePreserved(RESUME_SEED, rebuilt);
++  assert.equal(verdict.ok, false, 'comparator failed to catch a full Decompose overwrite — it has no teeth');
++  assert.ok(verdict.violations.some((v) => v.includes('item 1') && v.includes('status')), `expected a violation naming item 1's clobbered status, got: ${JSON.stringify(verdict.violations)}`);
++  assert.ok(verdict.violations.some((v) => v.includes('item 2')), `expected a violation naming item 2, got: ${JSON.stringify(verdict.violations)}`);
++  assert.ok(RESUME_SEED.knownRed.length > 0, 'fixture bug: seed knownRed must be non-empty for this bite-check to mean anything');
++  assert.ok(verdict.violations.some((v) => v.includes('knownRed')), `expected a knownRed violation, got: ${JSON.stringify(verdict.violations)}`);
++});
++
++check('resume comparator bite-check: mutationRoundsRun regressing backward is caught even when every item field matches', () => {
++  const seed = { spec: 's', knownRed: [], mutationRoundsRun: 1, items: [{ id: 1, behavior: 'b', status: 'pending', testId: null }] };
++  const regressed = { ...seed, mutationRoundsRun: 0 };
++  const verdict = checkResumePreserved(seed, regressed);
++  assert.equal(verdict.ok, false, 'comparator did not catch mutationRoundsRun regressing from 1 to 0');
++});
++
++check('resume comparator bite-check: a non-terminal item sliding backward (red -> pending) is caught even with testId untouched', () => {
++  const seed = { spec: 's', knownRed: [], mutationRoundsRun: 0, items: [{ id: 1, behavior: 'b', status: 'red', testId: 'tests/test_x.py::test_x' }] };
++  const regressed = { spec: 's', knownRed: [], mutationRoundsRun: 0, items: [{ id: 1, behavior: 'b', status: 'pending', testId: 'tests/test_x.py::test_x' }] };
++  const verdict = checkResumePreserved(seed, regressed);
++  assert.equal(verdict.ok, false, 'comparator did not catch a non-terminal item regressing from "red" to "pending"');
++});
++
++// ---------------------------------------------------------------------------
++// Section 4: the resume scratch prep is itself automated and verified here.
++// The live /tdd resume it sets up for is NOT — see the report.
++// ---------------------------------------------------------------------------
++
++check('resume scratch prep: prepare-resume-scratch.mjs produces a clean, genuinely-interrupted worktree', () => {
++  const { scratchDir, cleanup } = prepareResumeScratch();
++  try {
++    const src = fs.readFileSync(path.join(scratchDir, 'e2e', 'src', 'calc', '__init__.py'), 'utf8');
++    assert.match(src, /def add/, 'scratch source is missing add()');
++    assert.doesNotMatch(src, /def subtract/, 'scratch source should not implement subtract() yet (item 2 is "red")');
++    assert.doesNotMatch(src, /def divide/, 'scratch source should not implement divide() yet (item 3 is "pending")');
++    assert.equal(fs.existsSync(path.join(scratchDir, 'e2e', 'tests', 'test_divide.py')), false, 'divide test should not exist yet');
++    assert.equal(fs.existsSync(path.join(scratchDir, 'e2e', 'tests', 'test_subtract.py')), true, 'subtract test should already exist (Red already ran)');
++
++    const checklist = JSON.parse(fs.readFileSync(path.join(scratchDir, '.tdd', 'checklist.json'), 'utf8'));
++    assert.deepEqual(checklist, RESUME_SEED, 'seeded .tdd/checklist.json does not match the committed resume-seed fixture');
++
++    const status = git(['status', '--porcelain'], scratchDir);
++    assert.equal(status.trim(), '', `scratch worktree is not clean (Preflight #1 requires this):\n${status}`);
++
++    const result = runFixturePytest(scratchDir);
++    assert.notEqual(result.status, 0, 'expected the scratch suite to be red (subtract test exists, subtract() is unimplemented)');
++    assert.match(result.stdout, /test_subtract/, `expected a subtract-related failure, got:\n${result.stdout}`);
++  } finally {
++    cleanup();
++  }
++});
++
++// ---------------------------------------------------------------------------
++
++const total = passed + failed;
++console.log('');
++console.log(`# smoke checks: ${total}`);
++console.log(`# pass: ${passed}`);
++console.log(`# fail: ${failed}`);
++if (total === 0) {
++  console.error('smoke.mjs ran zero checks — that is a failure, not a clean pass');
++  process.exitCode = 1;
++} else {
++  process.exitCode = failed === 0 ? 0 : 1;
++}
+diff --git a/package.json b/package.json
+index 3001529..4bf37b6 100644
+--- a/package.json
++++ b/package.json
+@@ -1,14 +1,15 @@
+ {
+   "name": "claude-tdd",
+   "private": true,
+   "type": "module",
+   "description": "Dev tooling for the claude-tdd plugin's hooks — type checking only, no build step.",
+   "scripts": {
+     "typecheck": "tsc --noEmit",
+-    "test": "node --test"
++    "test": "node --test",
++    "smoke": "node e2e/smoke.mjs"
+   },
+   "devDependencies": {
+     "typescript": "^7.0.2",
+     "@types/node": "^22.20.1"
+   }
+ }

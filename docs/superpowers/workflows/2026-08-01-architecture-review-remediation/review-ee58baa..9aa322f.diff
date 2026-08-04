@@ -1,0 +1,217 @@
+# Review package: ee58baa..9aa322f
+
+## Commits
+9aa322f docs(hook): disclose and test the out-of-root read-denies behaviour
+
+## Files changed
+ AGENTS.md                                           |  5 ++++-
+ .../2026-07-30-tdd-subagent-workflow-design.md      |  2 ++
+ hooks/lib/rules.mjs                                 | 10 ++++++++++
+ tests/paths.test.mjs                                | 19 +++++++++++++++++++
+ tests/rules.test.mjs                                | 21 +++++++++++++++++++++
+ 5 files changed, 56 insertions(+), 1 deletion(-)
+
+## Diff
+diff --git a/AGENTS.md b/AGENTS.md
+index d41baaa..ecf3c75 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -44,21 +44,24 @@ One type and scope per commit; split when a change spans two. Every type except
+ ## Tests
+ 
+ ```bash
+ node --test                # whole suite, run from the repo root, exits non-zero on any failure
+ ```
+ 
+ `node --test` (no args) discovers every `tests/**/*.test.mjs` file. Point it at one file (`node --test tests/rules.test.mjs`) or
+ add `--test-name-pattern <regex>` to narrow further; the suite is fast enough that neither is usually necessary.
+ 
+ The bash harness (`tests/run.sh` sourcing `tests/*.test.sh`) is retired — Task 3 deleted it along with `hooks/guard.sh` and
+-`hooks/lib/rules.sh`, the files it existed to test. Every one of its test files has a `.test.mjs` equivalent under `node:test`.
++`hooks/lib/rules.sh`, the files it existed to test. Four of its five test files (`agents`, `config-contract`, `guard`, `rules`)
++have a `.test.mjs` equivalent under `node:test`. The fifth, `tests/smoke.test.sh`, needed no successor: it tested only the bash
++harness's own `assert_eq`/`assert_contains` functions, not anything about this plugin — `node:test`'s assertions are Node's own
++and need no such self-test.
+ 
+ ## Running the plugin against itself
+ 
+ `e2e/` is a pytest fixture for exercising the workflow end to end. Run `/tdd-init` (it detects the fixture), then `/tdd e2e/spec.md`.
+ The venv at `e2e/.venv` needs `pytest`, `pytest-cov`, `radon` and `mutmut`.
+ 
+ ---
+ 
+ # Traps
+ 
+diff --git a/docs/superpowers/specs/2026-07-30-tdd-subagent-workflow-design.md b/docs/superpowers/specs/2026-07-30-tdd-subagent-workflow-design.md
+index 5dbe6f1..44742be 100644
+--- a/docs/superpowers/specs/2026-07-30-tdd-subagent-workflow-design.md
++++ b/docs/superpowers/specs/2026-07-30-tdd-subagent-workflow-design.md
+@@ -319,20 +319,22 @@ The bash implementation is retired by the port, but the lesson is not, and neith
+ 
+ **Canonicalise, do not normalise.** Resolve both root and target through the filesystem, then compare:
+ 
+ - **`fs.realpathSync.native`** resolves symlinks and returns the filesystem's own stored spelling of every component **including the basename**. Verified: `E2E/SRC` resolves to `.../e2e/src`, and `E2E/tests/TEST_divide.py` to `.../e2e/tests/test_divide.py`. One call replaces the whole lexical layer, closes the case bypass and the symlink route together, and needs no case-sensitivity probe and no configuration. It is strictly stronger than the shell recipe it replaces, which recovered directory case only.
+ - **Resolve the nearest existing ancestor, then re-append the tail.** `realpath` throws `ENOENT` on a path that does not exist — verified against a not-yet-created test file, which is every `Write` Red performs. Walk up to the deepest ancestor that resolves, then re-append the remainder. Resolving only the parent directory — the obvious recipe — rejects a legitimate write into a new subdirectory.
+ - **The non-existent tail is the residual, and folding it is asymmetric.** Whatever did not resolve keeps the spelling the caller supplied, because the filesystem has no stored case for a component that does not exist yet. Close it by **folding case only in the direction that fails closed**: a *read* matches the denylist against the resolved path **or** its case-folded form, and either match denies; a *write* matches the allowlist on the resolved path only, since folding a write comparison would permit more rather than less. On a case-sensitive filesystem this costs a false denial for a repository carrying both `src/` and `SRC/` — loud and safe, the same trade already accepted for the plugin-namespace strip.
+ 
+   Note how much smaller this residual is than the shell design's: there, every basename was unresolved and the fold carried the whole burden. Here it covers only genuinely new paths.
+ - **`realpath` failures deny.** A permissions error, a broken symlink, a path that resolves outside the root: none can be evaluated, and an unevaluable check on a read must not reach `allow`.
+ 
++**This is a deliberate departure from the retired bash guard, not merely an incidental consequence of using `fs.realpathSync.native`.** The bash implementation stripped the project root by a literal string prefix: a path that resolved outside the root stayed an unmatched absolute string, matched no configured glob, and — reads being a denylist — was silently *permitted*. `toRepoRelative` returns `null` for exactly this case (unresolvable, or resolved outside the root), and `pathVerdict` denies on a `null` `relPath` in **both** modes, not only on write. An unplaceable path cannot be classified against the `test`/`source`/`ignore` partition the whole read-isolation argument depends on being exhaustive, and that is the same "check cannot be evaluated" case this design already treats as fail-closed everywhere else — it would be inconsistent to make an exception for it on the read side alone. This also closes the class the `/private` symlink residual belonged to: an absolute path naming the same file by a route the literal prefix strip never recognised as in-root at all.
++
+ Correctness here is a property of *spellings*, not of any one spelling, so it is tested as a matrix: for each role × mode × canonical target, every spelling of that target must produce an identical verdict. A new spelling becomes one row rather than one more review finding.
+ 
+ ### Separators are normalised before matching *(iteration 2)*
+ 
+ Cross-platform support introduces a bypass that did not exist while the plugin was macOS-only, and it is the same shape as every other one: **`e2e\src\calc\x.py` matches no POSIX-spelled glob, and a read that matches nothing is permitted.** Windows tool payloads carry backslashes, and the configured globs are written with forward slashes.
+ 
+ The trap is that the platform-native API makes it worse rather than better. Verified: `path.win32.normalize("e2e/src/x.py")` returns `e2e\src\x.py`, and `path.win32.join` produces backslashes. **Using the ambient `path` module for matching would manufacture the bypass on Windows** — every glob comparison would be made against a string the globs cannot match.
+ 
+ The rule is therefore: **globs are a POSIX-spelled dialect, and every path is converted into that dialect before any comparison.** Convert separators to `/` on both root and target immediately after canonicalisation, and match with the project's own matcher rather than any platform-aware helper. Drive-letter case (`C:\` versus `c:\`) is covered by the same asymmetric fold as the rest of the path.
+ 
+diff --git a/hooks/lib/rules.mjs b/hooks/lib/rules.mjs
+index 46c4013..a786a84 100644
+--- a/hooks/lib/rules.mjs
++++ b/hooks/lib/rules.mjs
+@@ -201,20 +201,30 @@ export function toRepoRelative(targetPath, rootPath) {
+  * Verdict for a path access.
+  *
+  * Writes are an allowlist: no match denies. Reads are a denylist: only a match
+  * against the forbidden set denies. That asymmetry is deliberate and is why
+  * case folding is applied to reads only — folding widens the match, which is
+  * fail-closed for a denylist and fail-OPEN for an allowlist.
+  *
+  * Every field is validated. A missing role, an unknown mode, a null relPath, or
+  * a glob list that is not an array of strings must deny.
+  *
++ * A null relPath (from toRepoRelative: unresolvable, or resolved OUTSIDE the
++ * root) denies on READ as well as write. This is a deliberate departure from
++ * the retired bash guard, which left an out-of-root path absolute, matched no
++ * configured glob, and — reads being a denylist — permitted it. An unplaceable
++ * path cannot be classified against the test/source/ignore partition the
++ * whole read-isolation argument depends on being exhaustive; that is the
++ * "check cannot be evaluated" case, and this design's governing rule is that
++ * such a case must not reach allow, on either side of the mode split. See the
++ * spec's canonicalisation section.
++ *
+  * @param {object} input
+  * @param {string} input.role bare role name, namespace already stripped
+  * @param {'read'|'write'} input.mode
+  * @param {string | null} input.relPath repo-relative, from toRepoRelative
+  * @param {unknown} input.testGlobs
+  * @param {unknown} input.sourceGlobs
+  * @returns {Verdict}
+  */
+ export function pathVerdict({ role, mode, relPath, testGlobs, sourceGlobs } = /** @type {any} */ ({})) {
+   if (mode !== 'read' && mode !== 'write') {
+diff --git a/tests/paths.test.mjs b/tests/paths.test.mjs
+index 24285f7..a90ba8e 100644
+--- a/tests/paths.test.mjs
++++ b/tests/paths.test.mjs
+@@ -82,20 +82,39 @@ after(() => {
+ 
+ test('toRepoRelative: a real path OUTSIDE the root returns null (not "relative to something else")', () => {
+   // os.tmpdir() is a real, resolvable directory, and an ANCESTOR of ROOT
+   // (ROOT was created under it) -- so this exercises "not inside the root",
+   // not "cannot resolve at all".
+   const outside = fs.realpathSync.native(os.tmpdir());
+   const rel = toRepoRelative(outside, ROOT);
+   assert.equal(rel, null, 'a path that is an ancestor of the root, not inside it, must not be treated as in-root');
+ });
+ 
++// Chains the property above into pathVerdict, at the SEAM, rather than
++// asserting it twice in isolation. rules.test.mjs pins "pathVerdict(relPath:
++// null) denies on read" as a unit property with a hand-passed null; this
++// pins that toRepoRelative's REAL null output — for a real out-of-root path,
++// resolved through the actual function guard.mjs calls in production —
++// reaches pathVerdict and denies there too. Deliberately a departure from
++// the retired bash guard, which left an out-of-root path absolute, matched
++// no configured glob, and (reads being a denylist) PERMITTED it: an
++// unplaceable path cannot be classified against the test/source/ignore
++// partition the read-isolation argument depends on being exhaustive, so
++// "cannot be evaluated" must not reach allow, on either side of the API.
++test('toRepoRelative + pathVerdict: a path resolving outside the root denies on read at the seam, not just as a hand-passed null', () => {
++  const outside = fs.realpathSync.native(os.tmpdir());
++  const rel = toRepoRelative(outside, ROOT);
++  assert.equal(rel, null, 'sanity: still resolves to null through the real function');
++  const verdict = pathVerdict({ role: RED, mode: 'read', relPath: rel, testGlobs: TEST_GLOBS, sourceGlobs: SOURCE_GLOBS });
++  assertDeny(verdict, 'a read of a real path outside the root must deny, not fall through to "no match against the denylist => allow"');
++});
++
+ test('toRepoRelative: a root that does not resolve at all returns null', () => {
+   const bogusRoot = path.join(ROOT, 'this-directory-was-never-created');
+   const target = path.join(bogusRoot, 'src', 'a.py');
+   assert.equal(toRepoRelative(target, bogusRoot), null);
+ });
+ 
+ test('toRepoRelative: resolves the nearest EXISTING ancestor and re-appends a non-existent leaf (a brand-new file)', () => {
+   // Every Write of a new test is exactly this shape: 'tests/' exists,
+   // 'test_brand_new.py' does not. realpath alone throws ENOENT on this;
+   // resolving only the parent (the "obvious" recipe the spec warns against)
+diff --git a/tests/rules.test.mjs b/tests/rules.test.mjs
+index f7b8bf6..0265e00 100644
+--- a/tests/rules.test.mjs
++++ b/tests/rules.test.mjs
+@@ -30,20 +30,21 @@ import {
+   matchesAny,
+   pathVerdict,
+   bashVerdict,
+   runtimeSupported,
+ } from '../hooks/lib/rules.mjs';
+ import {
+   assertAllow,
+   assertDeny,
+   assertVerdictShape,
+   assertDistinctReasons,
++  assertSameVerdict,
+ } from './helpers/verdict-assertions.mjs';
+ 
+ const [RED, GREEN, REFACTOR, MUTATE] = ROLES;
+ 
+ const TEST_GLOBS = ['tests/**', '**/test_*.py'];
+ const SOURCE_GLOBS = ['src/**'];
+ 
+ // ---------------------------------------------------------------------------
+ // Glob dialect: globMatch(pattern, filePath)
+ //
+@@ -261,20 +262,40 @@ test('fail-closed: unknown role denies', () => {
+ });
+ 
+ test('fail-closed: unknown mode denies', () => {
+   assertDeny(pathVerdict({ role: RED, mode: 'delete', relPath: 'src/a.py', testGlobs: TEST_GLOBS, sourceGlobs: SOURCE_GLOBS }));
+ });
+ 
+ test('fail-closed: null relPath denies', () => {
+   assertDeny(pathVerdict({ role: RED, mode: 'write', relPath: null, testGlobs: TEST_GLOBS, sourceGlobs: SOURCE_GLOBS }));
+ });
+ 
++// A null relPath denies on READ too, not merely on write — a deliberate
++// departure from the retired bash guard, which left an out-of-root path
++// absolute, matched no glob, and (reads being a denylist) PERMITTED it. An
++// unresolvable/unplaceable path cannot be classified against the
++// test/source/ignore partition the whole read-isolation argument depends on
++// being exhaustive; that is the "check cannot be evaluated" case, and this
++// design's governing rule is that such a case must not reach allow. See the
++// spec's canonicalisation section for the write-up. Compared with
++// assertSameVerdict rather than two separate assertDeny calls so this reads
++// as ONE property (denies identically regardless of mode), not two
++// coincidentally-identical ones — and so the reason is asserted to actually
++// NAME the rule, not merely that the call denied.
++test('fail-closed: null relPath denies for read too, with the identical reason as write (one property, not two)', () => {
++  const writeVerdict = pathVerdict({ role: RED, mode: 'write', relPath: null, testGlobs: TEST_GLOBS, sourceGlobs: SOURCE_GLOBS });
++  const readVerdict = pathVerdict({ role: RED, mode: 'read', relPath: null, testGlobs: TEST_GLOBS, sourceGlobs: SOURCE_GLOBS });
++  assertDeny(writeVerdict, 'null relPath denies a write');
++  assertDeny(readVerdict, 'null relPath denies a read');
++  assertSameVerdict(writeVerdict, readVerdict, 'a null relPath must be denied identically regardless of mode — the path cannot be classified at all, before mode-specific rules ever run');
++});
++
+ test('fail-closed: testGlobs that is not an array (string) denies a red write', () => {
+   assertDeny(pathVerdict({ role: RED, mode: 'write', relPath: 'tests/test_a.py', testGlobs: 'tests/**', sourceGlobs: SOURCE_GLOBS }));
+ });
+ 
+ test('fail-closed: testGlobs array containing a non-string denies, even though the string entry would otherwise match', () => {
+   assertDeny(pathVerdict({ role: RED, mode: 'write', relPath: 'tests/test_a.py', testGlobs: ['tests/**', 7], sourceGlobs: SOURCE_GLOBS }));
+ });
+ 
+ test('fail-closed: sourceGlobs as a plain object (not an array) denies a green write', () => {
+   assertDeny(pathVerdict({ role: GREEN, mode: 'write', relPath: 'src/a.py', testGlobs: TEST_GLOBS, sourceGlobs: { 0: 'src/**' } }));
