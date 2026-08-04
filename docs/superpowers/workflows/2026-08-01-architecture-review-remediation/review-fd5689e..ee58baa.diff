@@ -1,0 +1,2670 @@
+# Review package: fd5689e..ee58baa
+
+## Commits
+ee58baa test(hook): fix a case-fold WRITE test that could not fail
+ed67878 test(hook): cover NotebookRead's own path key, not just NotebookEdit's
+932e07a feat(hook): port the guard and decision rules to node
+
+## Files changed
+ AGENTS.md                     |  10 +-
+ hooks/guard.mjs               | 212 +++++++++++++++++
+ hooks/guard.sh                | 150 ------------
+ hooks/hooks.json              |   3 +-
+ hooks/lib/rules.mjs           | 228 +++++++++++++++++--
+ hooks/lib/rules.sh            | 171 --------------
+ package-lock.json             | 406 +++++++++++++++++++++++++++++++++
+ package.json                  |  14 ++
+ tests/agents.test.sh          |  26 ---
+ tests/config-contract.test.sh | 120 ----------
+ tests/guard.test.mjs          | 516 +++++++++++++++++++++++++++++++++++++-----
+ tests/guard.test.sh           | 206 -----------------
+ tests/rules.test.mjs          |  21 +-
+ tests/rules.test.sh           | 185 ---------------
+ tests/run.sh                  |  48 ----
+ tests/smoke.test.sh           |   4 -
+ tsconfig.json                 |  14 ++
+ 17 files changed, 1336 insertions(+), 998 deletions(-)
+
+## Diff
+diff --git a/AGENTS.md b/AGENTS.md
+index 7b0c71e..d41baaa 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -37,28 +37,28 @@ One type and scope per commit; split when a change spans two. Every type except
+ | `spec` | the specification |
+ | `plan` | the task plan |
+ | `agent` | subagent definitions |
+ | `command` | slash commands |
+ | `hook` | hook scripts |
+ | `skill` | skill definitions |
+ 
+ ## Tests
+ 
+ ```bash
+-bash tests/run.sh          # whole suite, ~1.3s, exits non-zero on any failure
++node --test                # whole suite, run from the repo root, exits non-zero on any failure
+ ```
+ 
+-No single-test selector; `run.sh` globs `tests/*.test.sh` and the suite is fast enough not to need one.
++`node --test` (no args) discovers every `tests/**/*.test.mjs` file. Point it at one file (`node --test tests/rules.test.mjs`) or
++add `--test-name-pattern <regex>` to narrow further; the suite is fast enough that neither is usually necessary.
+ 
+-Test files are **sourced, not executed**: no shebang, no `set -e`, no `exit`. They call `assert_eq` and `assert_contains` from
+-`run.sh` and use `$REPO_ROOT`. Because they are sourced into `run.sh`'s own scope, a test file that assigns `BEFORE`, `FOUND` or
+-`t` breaks the harness guard silently.
++The bash harness (`tests/run.sh` sourcing `tests/*.test.sh`) is retired — Task 3 deleted it along with `hooks/guard.sh` and
++`hooks/lib/rules.sh`, the files it existed to test. Every one of its test files has a `.test.mjs` equivalent under `node:test`.
+ 
+ ## Running the plugin against itself
+ 
+ `e2e/` is a pytest fixture for exercising the workflow end to end. Run `/tdd-init` (it detects the fixture), then `/tdd e2e/spec.md`.
+ The venv at `e2e/.venv` needs `pytest`, `pytest-cov`, `radon` and `mutmut`.
+ 
+ ---
+ 
+ # Traps
+ 
+diff --git a/hooks/guard.mjs b/hooks/guard.mjs
+new file mode 100644
+index 0000000..e38ab6e
+--- /dev/null
++++ b/hooks/guard.mjs
+@@ -0,0 +1,212 @@
++#!/usr/bin/env node
++// @ts-check
++/**
++ * PreToolUse guard for the TDD subagent workflow.
++ *
++ * Identifies the caller from the payload's agent_type. Main-thread calls
++ * carry no agent_type and are permitted untouched, so installing this
++ * plugin does not perturb unrelated sessions. Once a constrained tdd-*
++ * agent IS identified, any condition the guard cannot evaluate denies: a
++ * guard that fails open would silently disable read isolation, the one
++ * property nothing else in this design can enforce.
++ *
++ * Registered in exec form ("command": "node", "args": [".../guard.mjs"]) —
++ * no shell, so no ${VAR}-vs-$env:VAR dialect can intervene. See hooks.json.
++ */
++
++import fs from 'node:fs';
++import { ROLES, NODE_FLOOR, toRepoRelative, pathVerdict, bashVerdict, runtimeSupported } from './lib/rules.mjs';
++
++/**
++ * Per-role candidate command keys, tried in order until one matches. Red and
++ * Green both get {single, coverage}; Refactor gets {test, coverage,
++ * complexity}; Mutate gets {test, mutation}. Keyed on the namespace-stripped
++ * role spelling (ROLES), not the old bash short names — that spelling is what
++ * agents.test.mjs asserts the guard dispatches on.
++ * @type {Record<string, string[]>}
++ */
++const BASH_COMMAND_KEYS = {
++  'tdd-red': ['single', 'coverage'],
++  'tdd-green': ['single', 'coverage'],
++  'tdd-refactor': ['test', 'coverage', 'complexity'],
++  'tdd-mutate': ['test', 'mutation'],
++};
++
++/**
++ * Tool name -> { mode, path key in tool_input }. Bash has no path key.
++ * @type {Record<string, { mode: 'read'|'write'|'bash', pathKey: string|null }>}
++ */
++const TOOL_DISPATCH = {
++  Read: { mode: 'read', pathKey: 'file_path' },
++  NotebookRead: { mode: 'read', pathKey: 'notebook_path' },
++  Write: { mode: 'write', pathKey: 'file_path' },
++  Edit: { mode: 'write', pathKey: 'file_path' },
++  MultiEdit: { mode: 'write', pathKey: 'file_path' },
++  NotebookEdit: { mode: 'write', pathKey: 'notebook_path' },
++  Bash: { mode: 'bash', pathKey: null },
++};
++
++/**
++ * Emit the deny payload to stderr — synchronously, so nothing can truncate
++ * it — and set the exit code. On exit 2, PreToolUse ignores stdout entirely
++ * and reads only stderr; getting this backwards silently drops the message
++ * a blocked agent needs to self-correct.
++ * @param {string} message
++ */
++function deny(message) {
++  const body = JSON.stringify({
++    hookSpecificOutput: { permissionDecision: 'deny' },
++    systemMessage: message,
++  });
++  fs.writeSync(2, `${body}\n`);
++  process.exitCode = 2;
++}
++
++/**
++ * True when `rawPath` contains a literal '..' path segment. Checked on the
++ * untrusted, un-canonicalised payload string, before toRepoRelative ever
++ * runs — toRepoRelative resolves '..' as an ordinary filesystem operation
++ * (required so a path like 'tests/../src/a.py' that lands back inside the
++ * root still canonicalises correctly), so it cannot also be the traversal
++ * guard. Wrapping in slashes catches a leading or trailing '..' too.
++ * @param {string} rawPath
++ * @returns {boolean}
++ */
++function containsDotDotSegment(rawPath) {
++  const posix = rawPath.replace(/\\/g, '/');
++  return `/${posix}/`.includes('/../');
++}
++
++function main() {
++  // Checked before anything else can throw. Nothing in this project selects
++  // the hook's interpreter, so this is the only mechanism that enforces the
++  // version floor at all -- and it must be a deliberate deny, never a crash
++  // on a missing API, because a crash exits non-2 and permits.
++  if (!runtimeSupported(process.version)) {
++    deny(
++      `tdd guard: Node ${process.version} is below the supported floor (v${NODE_FLOOR}+). ` +
++        'The guard cannot safely evaluate tool calls under this runtime. Update Node, or run /tdd-init to re-check.',
++    );
++    return;
++  }
++
++  try {
++    runGuardBody();
++  } catch (err) {
++    // Wrap the whole body: any thrown error becomes a deliberate exit 2
++    // rather than an uncaught exception, which would exit non-2 and permit.
++    deny(
++      `tdd guard: an unexpected error occurred while evaluating this call; failing closed (${
++        err instanceof Error ? err.message : String(err)
++      })`,
++    );
++  }
++}
++
++function runGuardBody() {
++  const raw = fs.readFileSync(0, 'utf8');
++  const payload = JSON.parse(raw);
++
++  const rawAgentType = payload?.agent_type;
++  if (typeof rawAgentType !== 'string' || rawAgentType === '') {
++    return; // main thread / orchestrator -- no agent_type at all -- permit
++  }
++
++  // Plugin-provided agents arrive NAMESPACED ("claude-tdd:tdd-red"). Matching
++  // the bare name alone misses every real dispatch and renders the guard
++  // entirely inert. Stripping is deliberately broad: another plugin's own
++  // "tdd-red" is also constrained here -- a false denial, loud and safe,
++  // rather than matching too narrowly and permitting silently.
++  const role = rawAgentType.slice(rawAgentType.lastIndexOf(':') + 1);
++  if (!ROLES.includes(/** @type {any} */ (role))) {
++    return; // some other agent's work -- not ours
++  }
++
++  // From here on, every failure denies.
++  const root = process.env.TDD_PROJECT_DIR || process.env.CLAUDE_PROJECT_DIR
++    || (typeof payload?.cwd === 'string' ? payload.cwd : '');
++  if (!root) {
++    deny(`tdd guard: cannot determine the project root for ${rawAgentType}`);
++    return;
++  }
++  const rootNormalised = root.replace(/\\/g, '/').replace(/\/+$/, '');
++
++  const configPath = `${rootNormalised}/.tdd/config.json`;
++  /** @type {any} */
++  let config;
++  try {
++    config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
++  } catch (err) {
++    deny(
++      `tdd guard: .tdd/config.json is missing or malformed; run /tdd-init (${
++        err instanceof Error ? err.message : String(err)
++      })`,
++    );
++    return;
++  }
++
++  const testGlobs = config?.globs?.test;
++  const sourceGlobs = config?.globs?.source;
++
++  const toolName = payload?.tool_name;
++  const dispatch = Object.prototype.hasOwnProperty.call(TOOL_DISPATCH, toolName) ? TOOL_DISPATCH[toolName] : undefined;
++  if (!dispatch) {
++    deny(`tdd guard: ${rawAgentType} called an unrecognized tool '${toolName}'; the guard cannot classify it and fails closed`);
++    return;
++  }
++
++  if (dispatch.mode === 'bash') {
++    const command = payload?.tool_input?.command;
++    if (typeof command !== 'string' || command === '') {
++      deny(`tdd guard: this Bash call from ${rawAgentType} carries no command, so it cannot be checked; the guard fails closed`);
++      return;
++    }
++
++    const candidateKeys = BASH_COMMAND_KEYS[role];
++    if (!candidateKeys) {
++      deny(`tdd guard: unmappable role for agent '${rawAgentType}'`);
++      return;
++    }
++
++    /** @type {{allow: boolean, reason: string}} */
++    let verdict = { allow: false, reason: `no configured command for ${rawAgentType} matches` };
++    for (const key of candidateKeys) {
++      const template = config?.commands?.[key];
++      if (typeof template !== 'string' || template === '') continue;
++      verdict = bashVerdict(command, template);
++      if (verdict.allow) break;
++    }
++
++    if (verdict.allow) return;
++    deny(verdict.reason);
++    return;
++  }
++
++  const pathKey = /** @type {string} */ (dispatch.pathKey);
++  const rawPath = payload?.tool_input?.[pathKey];
++  if (typeof rawPath !== 'string' || rawPath === '') {
++    deny(`tdd guard: this ${toolName} call from ${rawAgentType} carries no ${pathKey}, so it cannot be checked; the guard fails closed`);
++    return;
++  }
++
++  // Reject traversal BEFORE canonicalisation -- see containsDotDotSegment's
++  // own comment for why this cannot live inside toRepoRelative.
++  if (containsDotDotSegment(rawPath)) {
++    deny(`tdd guard: path contains a '..' segment and cannot be classified safely: ${rawPath}`);
++    return;
++  }
++
++  const relPath = toRepoRelative(rawPath, rootNormalised);
++  const verdict = pathVerdict({
++    role,
++    mode: /** @type {'read'|'write'} */ (dispatch.mode),
++    relPath,
++    testGlobs,
++    sourceGlobs,
++  });
++
++  if (verdict.allow) return;
++  deny(verdict.reason);
++}
++
++main();
+diff --git a/hooks/guard.sh b/hooks/guard.sh
+deleted file mode 100755
+index 33ed041..0000000
+--- a/hooks/guard.sh
++++ /dev/null
+@@ -1,150 +0,0 @@
+-#!/usr/bin/env bash
+-# PreToolUse guard for the TDD subagent workflow.
+-#
+-# Identifies the caller from the payload's agent_type. Main-thread calls
+-# carry no agent_type and are permitted untouched, so installing this
+-# plugin does not perturb unrelated sessions. Once a constrained tdd-*
+-# agent IS identified, any condition the guard cannot evaluate denies: a
+-# guard that fails open would silently disable read isolation, the one
+-# property nothing else in this design can enforce.
+-set -uo pipefail
+-
+-deny() {
+-  printf '{"hookSpecificOutput":{"permissionDecision":"deny"},"systemMessage":"%s"}\n' \
+-    "$(printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g')" >&2
+-  exit 2
+-}
+-
+-input=$(cat)
+-
+-# jq is needed even to read agent_type. Absent jq, we cannot tell whether
+-# the caller is constrained — so we cannot safely permit or usefully deny
+-# every call in the session. Deny only once we know a tdd-* agent is
+-# calling; use a cheap grep to make that determination without jq.
+-if ! command -v jq >/dev/null 2>&1; then
+-  # Match the role names themselves rather than a compact-JSON key/value
+-  # spelling: `"agent_type": "tdd-red"` with a space would slip past a
+-  # pattern anchored on `"agent_type":"tdd-`, and slipping past means
+-  # permitting. A false positive here only denies during an already-broken
+-  # setup, so err wide.
+-  case "$input" in
+-    *tdd-red*|*tdd-green*|*tdd-refactor*|*tdd-mutate*)
+-      deny "tdd guard: jq is not on PATH; cannot evaluate tool calls safely. Run /tdd-init." ;;
+-    *) exit 0 ;;
+-  esac
+-fi
+-
+-agent=$(printf '%s' "$input" | jq -r '.agent_type // empty')
+-[ -n "$agent" ] || exit 0        # main thread / orchestrator — never constrained
+-
+-# Plugin-provided agents arrive NAMESPACED: "<plugin>:<agent>", verified
+-# empirically as "claude-tdd:tdd-red" on Claude Code 2.1.220. Matching the
+-# bare name alone misses every real dispatch, falls through to `*) exit 0`,
+-# and renders the guard entirely inert -- while every test using a bare-name
+-# payload still passes. Strip the namespace before matching.
+-#
+-# Stripping is deliberately broad: another plugin shipping its own `tdd-red`
+-# would also be constrained here. That is a false denial -- loud and safe --
+-# whereas matching too narrowly permits silently, which is the failure this
+-# guard exists to prevent.
+-case "${agent##*:}" in
+-  tdd-red)      role=red ;;
+-  tdd-green)    role=green ;;
+-  tdd-refactor) role=refactor ;;
+-  tdd-mutate)   role=mutation ;;
+-  *) exit 0 ;;                   # some other agent's work — not ours
+-esac
+-
+-# From here on, every failure denies.
+-root="${TDD_PROJECT_DIR:-${CLAUDE_PROJECT_DIR:-}}"
+-if [ -z "$root" ]; then
+-  root=$(printf '%s' "$input" | jq -r '.cwd // empty')
+-fi
+-[ -n "$root" ] || deny "tdd guard: cannot determine the project root for ${agent}"
+-
+-config="$root/.tdd/config.json"
+-[ -f "$config" ] || deny "tdd guard: .tdd/config.json is missing; run /tdd-init"
+-
+-# shellcheck disable=SC1090
+-. "$(dirname "${BASH_SOURCE[0]}")/lib/rules.sh" || deny "tdd guard: cannot load rules.sh"
+-
+-test_globs=$(jq -r '.globs.test | join(" ")' "$config" 2>/dev/null) \
+-  || deny "tdd guard: .tdd/config.json is malformed (globs.test)"
+-source_globs=$(jq -r '.globs.source | join(" ")' "$config" 2>/dev/null) \
+-  || deny "tdd guard: .tdd/config.json is malformed (globs.source)"
+-
+-tool=$(printf '%s' "$input" | jq -r '.tool_name // empty')
+-
+-# Every file-writing tool must map to a mode. Hook matchers are unanchored
+-# regex, so `Edit` in the matcher also delivers `MultiEdit` and
+-# `NotebookEdit` -- and an unmapped tool that fell through to `exit 0` would
+-# be silently permitted to write source. Unknown tools deny: if the matcher
+-# delivered something this case does not know, the safe answer is no.
+-# `path_key` names which tool_input field actually carries the target. Select
+-# it by tool rather than falling back through `file_path // notebook_path`:
+-# that precedence would validate `file_path` on a NotebookEdit call, which
+-# acts on `notebook_path` -- checking a field the tool ignores is the
+-# permissive kind of wrong.
+-case "$tool" in
+-  Read)                  mode=read;  path_key=file_path ;;
+-  NotebookRead)          mode=read;  path_key=notebook_path ;;
+-  Write|Edit|MultiEdit)  mode=write; path_key=file_path ;;
+-  NotebookEdit)          mode=write; path_key=notebook_path ;;
+-  Bash)                  mode=bash;  path_key= ;;
+-  *) deny "tdd guard: ${agent} called an unrecognized tool '${tool}'; the guard cannot classify it and fails closed" ;;
+-esac
+-
+-if [ "$mode" = "bash" ]; then
+-  cmd=$(printf '%s' "$input" | jq -r '.tool_input.command // empty')
+-
+-  # Each role gets its own runner command plus the measurement commands it is
+-  # judged on. Red, Green, and Refactor are gated on coverage and may measure
+-  # themselves. Mutate is not -- it is judged on whether mutants survive the
+-  # suite -- so it gets the mutation command instead.
+-  case "$role" in
+-    red|green) extra="single coverage" ;;
+-    refactor)  extra="test coverage complexity" ;;
+-    mutation)  extra="test mutation" ;;
+-    *)         deny "tdd guard: unmappable role for agent '${agent}'" ;;
+-  esac
+-
+-  verdict="deny: no configured command for ${agent} matches"
+-  for key in $extra; do
+-    template=$(jq -r ".commands.${key} // \"\"" "$config")
+-    [ -n "$template" ] && [ "$template" != "null" ] || continue
+-    v=$(tdd_bash_verdict "$cmd" "$template")
+-    if [ "$v" = "allow" ]; then verdict="allow"; break; fi
+-  done
+-  [ "$verdict" = "allow" ] && exit 0
+-  deny "$verdict"
+-fi
+-
+-path=$(printf '%s' "$input" | jq -r --arg k "$path_key" '.tool_input[$k] // empty')
+-
+-# A Read/Write/Edit with no file_path cannot be classified. Permitting it
+-# would be a hole shaped exactly like the tool call we most need to judge,
+-# so an unreadable payload denies.
+-[ -n "$path" ] || deny "tdd guard: this ${tool} call from ${agent} carries no file_path, so it cannot be checked; the guard fails closed"
+-
+-# Reject traversal BEFORE stripping the root prefix. "$root/../<repo>/src/a.py"
+-# resolves back inside the project but does not start with "$root/", so it
+-# would survive as an absolute path, match no glob, and be permitted on a
+-# read -- the same silent fail-open shape as the Task 3 defect.
+-case "/$path/" in
+-  */../*) deny "tdd guard: path contains a '..' segment and cannot be classified safely: $path" ;;
+-esac
+-
+-# Normalise BOTH sides before the prefix strip. An un-normalised `./x`, `x//y`,
+-# or a root with a trailing slash fails to strip, then matches no glob, and a
+-# no-match on a read means allow.
+-root=$(tdd_normalize_path "$root"); root="${root%/}"
+-path=$(tdd_normalize_path "$path")
+-
+-case "$path" in
+-  "$root"/*) rel="${path#"$root"/}" ;;   # inside the project
+-  *)         rel="$path" ;;              # already relative, or outside the project
+-esac
+-
+-verdict=$(tdd_path_verdict "$role" "$mode" "$rel" "$test_globs" "$source_globs")
+-[ "$verdict" = "allow" ] && exit 0
+-deny "$verdict"
+diff --git a/hooks/hooks.json b/hooks/hooks.json
+index 94061fb..0be1e19 100644
+--- a/hooks/hooks.json
++++ b/hooks/hooks.json
+@@ -1,17 +1,18 @@
+ {
+   "description": "Enforces Red/Green/Refactor role boundaries during a TDD cycle",
+   "hooks": {
+     "PreToolUse": [
+       {
+         "matcher": "Read|Write|Edit|MultiEdit|NotebookEdit|NotebookRead|Bash",
+         "hooks": [
+           {
+             "type": "command",
+-            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/guard.sh",
++            "command": "node",
++            "args": ["${CLAUDE_PLUGIN_ROOT}/hooks/guard.mjs"],
+             "timeout": 10
+           }
+         ]
+       }
+     ]
+   }
+ }
+diff --git a/hooks/lib/rules.mjs b/hooks/lib/rules.mjs
+index ed0e9a5..46c4013 100644
+--- a/hooks/lib/rules.mjs
++++ b/hooks/lib/rules.mjs
+@@ -1,89 +1,206 @@
+ // @ts-check
+ /**
+  * Pure decision functions for the TDD guard hook.
+  *
+- * STUB — every export denies. Task 3 implements these; Task 2's suite must run
+- * red against this file. The stub denies rather than throwing so that a test
+- * asserting a *deny* cannot pass by accident: a thrown error and a considered
+- * denial are different outcomes, and only one of them is evidence.
+- *
+- * Imported, never executed. No load-time side effects.
++ * No globals, no load-time side effects beyond importing `node:fs` itself
++ * (needed only by `toRepoRelative`'s canonicalisation). Every function
++ * degrades a malformed input to a deny/false rather than throwing — a caller
++ * bug must never become an exception, which, under the guard's exit-2-only
++ * semantics, permits.
+  */
+ 
++import fs from 'node:fs';
++
+ /**
+  * A verdict. `reason` is empty when `allow` is true, and names the violated
+  * rule otherwise — the guard forwards it to the agent as correctable feedback,
+  * so it has to say which rule, not merely that one fired.
+  * @typedef {{ allow: boolean, reason: string }} Verdict
+  */
+ 
+ /** Roles the guard constrains. Anything else is not ours and is permitted. */
+ export const ROLES = /** @type {const} */ (['tdd-red', 'tdd-green', 'tdd-refactor', 'tdd-mutate']);
+ 
+ /** Lowest Node major the guard will run under. See the spec: a floor, not a pin. */
+ export const NODE_FLOOR = 22;
+ 
++/** @returns {Verdict} */
++function allow() {
++  return { allow: true, reason: '' };
++}
++
++/**
++ * @param {string} reason
++ * @returns {Verdict}
++ */
++function deny(reason) {
++  return { allow: false, reason };
++}
++
++/**
++ * Convert either separator dialect to the POSIX one globs are spelled in.
++ * @param {string} p
++ * @returns {string}
++ */
++function toPosixSlashes(p) {
++  return p.replace(/\\/g, '/');
++}
++
+ /**
+  * Match one glob against one POSIX-spelled, repo-relative path.
+  *
+  * Dialect is defined here rather than delegated, because `path.matchesGlob` is
+  * experimental and absent before 22.5, and because `**` semantics are the
+  * subject of a live defect:
+  *   - `*`  matches within a single segment
+  *   - `**` crosses `/`
+  *   - a LEADING `**​/` matches at zero depth, so `**​/test_*.py` matches
+  *     `test_foo.py` as well as `a/b/test_foo.py`
+  *
+  * @param {string} pattern
+  * @param {string} filePath POSIX-spelled, already canonicalised
+  * @returns {boolean}
+  */
+ export function globMatch(pattern, filePath) {
+-  void pattern; void filePath;
+-  return false;
++  if (typeof pattern !== 'string' || typeof filePath !== 'string') return false;
++
++  let re = '^';
++  let i = 0;
++  const n = pattern.length;
++  while (i < n) {
++    const c = pattern[i];
++    if (c === '*' && pattern[i + 1] === '*') {
++      if (pattern[i + 2] === '/') {
++        // A leading (or mid-pattern) '**/' crosses zero or more whole path
++        // segments — it must match at ZERO depth (the S3 defect: '**/x' has
++        // to match 'x' itself, not merely something nested under a directory).
++        re += '(?:.*/)?';
++        i += 3;
++      } else {
++        // '**' not followed by '/' — matches anything, including '/'.
++        re += '.*';
++        i += 2;
++      }
++    } else if (c === '*') {
++      // A single '*' matches within one segment only.
++      re += '[^/]*';
++      i += 1;
++    } else {
++      re += c.replace(/[.+^${}()|[\]\\]/g, '\\$&');
++      i += 1;
++    }
++  }
++  re += '$';
++  return new RegExp(re).test(filePath);
+ }
+ 
+ /**
+  * True when any glob matches. `globs` is an ARRAY — the config is JSON, so the
+  * space-separated string that word-split in bash does not exist here, and
+  * neither does the pathname-expansion fail-open it caused.
+  *
+  * A non-array, or an array containing a non-string, must return false: an input
+  * that cannot be evaluated is not a match.
+  *
+  * @param {string} filePath
+  * @param {unknown} globs
+  * @returns {boolean}
+  */
+ export function matchesAny(filePath, globs) {
+-  void filePath; void globs;
+-  return false;
++  if (typeof filePath !== 'string') return false;
++  if (!Array.isArray(globs)) return false;
++  if (globs.length === 0) return false;
++  if (!globs.every((g) => typeof g === 'string')) return false;
++  return globs.some((g) => globMatch(/** @type {string} */ (g), filePath));
++}
++
++/**
++ * `globs` is usable as a governing list (an allowlist or a denylist) only when
++ * it is a non-empty array of strings. An empty or malformed list can prove
++ * nothing about a path, which is a DIFFERENT failure than "a valid list simply
++ * did not match" — the two must be distinguishable reasons (see pathVerdict).
++ * @param {unknown} globs
++ * @returns {boolean}
++ */
++function isUsableGlobList(globs) {
++  return Array.isArray(globs) && globs.length > 0 && globs.every((g) => typeof g === 'string');
++}
++
++/**
++ * Resolve the nearest existing ancestor of `absPosixPath` (POSIX-spelled,
++ * absolute) through `fs.realpathSync.native`, then report the unresolved
++ * tail. When the whole path exists, the "ancestor" is the path itself and the
++ * tail is empty — this single loop is both "resolve fully" and "resolve the
++ * parent and re-append the leaf", unified by walking one segment at a time.
++ * @param {string} absPosixPath
++ * @returns {{ resolvedPosix: string, tailSegments: string[] } | null}
++ */
++function resolveDeepestExisting(absPosixPath) {
++  const segments = absPosixPath.split('/');
++  for (let i = segments.length; i >= 1; i--) {
++    const candidate = segments.slice(0, i).join('/') || '/';
++    try {
++      const real = fs.realpathSync.native(candidate);
++      return {
++        resolvedPosix: toPosixSlashes(real).replace(/\/+$/, '') || '/',
++        tailSegments: segments.slice(i).filter(Boolean),
++      };
++    } catch {
++      // Try a shallower ancestor.
++    }
++  }
++  return null;
+ }
+ 
+ /**
+  * Canonicalise `targetPath` and express it relative to `rootPath`.
+  *
+  * Resolve the deepest ancestor that exists through the filesystem (which
+  * resolves symlinks and returns the stored case), re-append the unresolved
+  * tail, convert separators to `/`, and strip the root prefix.
+  *
+  * Returns `null` when the path is not inside the root, or when it cannot be
+  * resolved at all. `null` is NOT "permit" — the caller decides, and for a write
+  * it must deny.
+  *
+  * @param {string} targetPath may be absolute or relative, any separator dialect
+  * @param {string} rootPath
+  * @returns {string | null} repo-relative POSIX path, or null
+  */
+ export function toRepoRelative(targetPath, rootPath) {
+-  void targetPath; void rootPath;
++  if (typeof targetPath !== 'string' || targetPath === '') return null;
++  if (typeof rootPath !== 'string' || rootPath === '') return null;
++
++  /** @type {string} */
++  let rootResolved;
++  try {
++    rootResolved = fs.realpathSync.native(rootPath);
++  } catch {
++    return null;
++  }
++  const rootPosix = toPosixSlashes(rootResolved).replace(/\/+$/, '') || '/';
++
++  const targetPosix = toPosixSlashes(targetPath);
++  const absoluteTargetPosix = targetPosix.startsWith('/') ? targetPosix : `${rootPosix}/${targetPosix}`;
++
++  const resolved = resolveDeepestExisting(absoluteTargetPosix);
++  if (!resolved) return null;
++
++  const fullResolvedPosix = resolved.tailSegments.length > 0
++    ? `${resolved.resolvedPosix}/${resolved.tailSegments.join('/')}`
++    : resolved.resolvedPosix;
++
++  if (fullResolvedPosix === rootPosix) return '';
++  if (fullResolvedPosix.startsWith(`${rootPosix}/`)) {
++    return fullResolvedPosix.slice(rootPosix.length + 1);
++  }
+   return null;
+ }
+ 
+ /**
+  * Verdict for a path access.
+  *
+  * Writes are an allowlist: no match denies. Reads are a denylist: only a match
+  * against the forbidden set denies. That asymmetry is deliberate and is why
+  * case folding is applied to reads only — folding widens the match, which is
+  * fail-closed for a denylist and fail-OPEN for an allowlist.
+@@ -92,45 +209,120 @@ export function toRepoRelative(targetPath, rootPath) {
+  * a glob list that is not an array of strings must deny.
+  *
+  * @param {object} input
+  * @param {string} input.role bare role name, namespace already stripped
+  * @param {'read'|'write'} input.mode
+  * @param {string | null} input.relPath repo-relative, from toRepoRelative
+  * @param {unknown} input.testGlobs
+  * @param {unknown} input.sourceGlobs
+  * @returns {Verdict}
+  */
+-export function pathVerdict(input) {
+-  void input;
+-  return { allow: false, reason: 'stub: not implemented' };
++export function pathVerdict({ role, mode, relPath, testGlobs, sourceGlobs } = /** @type {any} */ ({})) {
++  if (mode !== 'read' && mode !== 'write') {
++    return deny(`the guard does not recognise mode '${mode}'; failing closed`);
++  }
++  if (typeof role !== 'string' || !ROLES.includes(/** @type {any} */ (role))) {
++    return deny(`the guard does not recognise role '${role}'; failing closed`);
++  }
++  if (typeof relPath !== 'string' || relPath === '') {
++    return deny('no resolvable path was provided for this call; the guard fails closed');
++  }
++
++  const isRed = role === 'tdd-red';
++
++  if (mode === 'write') {
++    const allowGlobs = isRed ? testGlobs : sourceGlobs;
++    const kind = isRed ? 'test' : 'source';
++    if (!isUsableGlobList(allowGlobs)) {
++      return deny(`no ${kind} globs are configured, so no write can be verified; the guard fails closed`);
++    }
++    if (matchesAny(relPath, allowGlobs)) {
++      return allow();
++    }
++    return deny(`${role} may only write ${kind} files; ${relPath} is not under the configured ${kind} globs`);
++  }
++
++  // mode === 'read'
++  const denyGlobs = isRed ? sourceGlobs : testGlobs;
++  const kind = isRed ? 'source' : 'test';
++  if (!isUsableGlobList(denyGlobs)) {
++    const cannotBe = kind === 'source' ? 'source' : 'a test';
++    return deny(`no ${kind} globs are configured, so ${relPath} cannot be shown not to be ${cannotBe}; the guard fails closed`);
++  }
++  const folded = relPath.toLowerCase();
++  if (matchesAny(relPath, denyGlobs) || matchesAny(folded, denyGlobs)) {
++    return deny(`${role} may not read ${kind} files; ${relPath} is under the configured ${kind} globs`);
++  }
++  return allow();
+ }
+ 
++/** Shell metacharacters banned from the agent-supplied delta. Shell-agnostic
++ * on purpose: Git Bash and PowerShell disagree on syntax but not on which of
++ * these are special to at least one of them. `&&` is not listed separately —
++ * banning `&` alone also catches it. */
++const BASH_METACHARACTERS = [';', '|', '&', '>', '<', '`', '$(', '\n'];
++
+ /**
+  * Verdict for a Bash command against one configured command template.
+  *
+  * The command must begin with the template's static prefix — everything before
+  * the first `{` placeholder. Whatever the agent added beyond that prefix (the
+  * delta) must contain no shell metacharacter and no `..`.
+  *
+  * An empty static prefix must DENY: a prefix that matches everything leaves
+  * only the metacharacter ban, so any clean-looking command would run.
+  *
+  * @param {string} command
+  * @param {string} template
+  * @returns {Verdict}
+  */
+ export function bashVerdict(command, template) {
+-  void command; void template;
+-  return { allow: false, reason: 'stub: not implemented' };
++  if (typeof template !== 'string') {
++    return deny('no command is configured for this phase; the guard fails closed');
++  }
++
++  const placeholderIdx = template.indexOf('{');
++  const rawPrefix = placeholderIdx === -1 ? template : template.slice(0, placeholderIdx);
++  const prefix = rawPrefix.replace(/\s+$/, '');
++
++  if (prefix === '') {
++    return deny('the configured command for this phase has no static prefix, so it cannot constrain anything; the guard fails closed');
++  }
++
++  if (typeof command !== 'string') {
++    return deny('no command was provided for this call; the guard fails closed');
++  }
++
++  if (!command.startsWith(prefix)) {
++    return deny(`only the configured command for this phase may be run; expected it to start with '${prefix}'`);
++  }
++
++  const delta = command.slice(prefix.length);
++
++  for (const metachar of BASH_METACHARACTERS) {
++    if (delta.includes(metachar)) {
++      return deny(`shell metacharacters are not permitted in arguments; got '${delta}'`);
++    }
++  }
++
++  if (delta.includes('..')) {
++    return deny(`'..' is not permitted in arguments; got '${delta}'`);
++  }
++
++  return allow();
+ }
+ 
+ /**
+  * True when `version` satisfies the floor. A FLOOR, never equality — the host
+  * chooses the interpreter, and a newer major is correct rather than an error.
+  *
+  * @param {string} version e.g. process.version, "v22.23.2"
+  * @returns {boolean}
+  */
+ export function runtimeSupported(version) {
+-  void version;
+-  return false;
++  if (typeof version !== 'string') return false;
++  const match = version.match(/^v?(\d+)\./);
++  if (!match) return false;
++  const major = Number(match[1]);
++  if (!Number.isFinite(major)) return false;
++  return major >= NODE_FLOOR;
+ }
+diff --git a/hooks/lib/rules.sh b/hooks/lib/rules.sh
+deleted file mode 100644
+index f3b251a..0000000
+--- a/hooks/lib/rules.sh
++++ /dev/null
+@@ -1,171 +0,0 @@
+-# Pure decision functions for the TDD guard hook.
+-# Sourced, never executed. No load-time side effects, no globals.
+-
+-# tdd_glob_match <pattern> <path>
+-# Returns 0 on match. `**` is normalized to `*` because inside [[ ]] a
+-# pattern's `*` already crosses `/`. Safe without `set -f`: bash does not
+-# perform pathname expansion on the right-hand pattern of [[ == ]].
+-tdd_glob_match() {
+-  local pat="${1//\*\*/*}"
+-  local path="${2:-}"
+-  [[ "$path" == $pat ]]
+-}
+-
+-# tdd_matches_any <path> <glob-string>
+-# Splits the space-separated glob string and tests each against the path.
+-#
+-# The split MUST run with pathname expansion disabled. Unquoted `$globs`
+-# would otherwise be expanded against the real filesystem -- `src/**` would
+-# become whatever files happen to exist -- making the verdict depend on the
+-# current directory and silently failing OPEN on reads. This function is the
+-# only place that split happens, so this is the only place that needs the
+-# guard.
+-tdd_matches_any() {
+-  local path="${1:-}" globs="${2:-}"
+-  local g rc=1 restore=0
+-
+-  case "$-" in
+-    *f*) ;;                       # caller already had noglob on
+-    *) restore=1; set -f ;;
+-  esac
+-
+-  for g in $globs; do
+-    if tdd_glob_match "$g" "$path"; then rc=0; break; fi
+-  done
+-
+-  if [ "$restore" = 1 ]; then set +f; fi
+-  return "$rc"
+-}
+-
+-# tdd_normalize_path <path>
+-# Collapses repeated slashes, leading `./`, and `/./` segments.
+-#
+-# Without this the guard is trivially bypassable. guard.sh strips the project
+-# root by literal prefix match, and the glob match then needs the relative path
+-# to start with the glob's literal prefix. A path spelled `./e2e/src/a.py`
+-# strips to nothing and matches no glob -- and because reads are a DENYLIST,
+-# no-match means ALLOW. Verified against the live config: red was denied
+-# `e2e/src/calc/__init__.py` and permitted `./e2e/src/calc/__init__.py`, the
+-# same file. `e2e//src/...` bypassed identically.
+-#
+-# Uses `tr -s` rather than `${p//\/\//\/}` deliberately: the replacement half
+-# of a bash substitution is not a pattern, so `\/` there leaves a literal
+-# backslash -- the same trap that produced the `**` normalization bug in this
+-# file's own history.
+-tdd_normalize_path() {
+-  local p="${1:-}"
+-  [ -n "$p" ] || { printf ''; return; }
+-  p=$(printf '%s' "$p" | tr -s '/')
+-  while :; do
+-    case "$p" in
+-      ./*)   p="${p#./}" ;;
+-      */./*) p="${p%%/./*}/${p#*/./}" ;;
+-      *)     break ;;
+-    esac
+-  done
+-  printf '%s' "$p"
+-}
+-
+-# tdd_path_verdict <role> <mode> <path> <test_globs> <source_globs>
+-# Echoes "allow" or "deny: <reason>".
+-#
+-# Every parameter defaults to empty rather than tripping `set -u`: this file
+-# is sourced under `set -u`, where an unset positional aborts the whole
+-# script. An aborted guard exits non-zero-but-not-2, which is treated as a
+-# non-blocking error and lets the tool call through. A caller bug must
+-# degrade to deny, never to a crash that permits.
+-tdd_path_verdict() {
+-  local role="${1:-}" mode="${2:-}" path="${3:-}"
+-  local test_globs="${4:-}" source_globs="${5:-}"
+-
+-  case "$role:$mode" in
+-    red:write)
+-      if [ -z "$test_globs" ]; then
+-        echo "deny: no test globs are configured, so no write can be verified; the guard fails closed"; return
+-      fi
+-      if tdd_matches_any "$path" "$test_globs"; then echo "allow"
+-      else echo "deny: Red may only write test files; $path is not under the configured test globs"; fi ;;
+-    red:read)
+-      if [ -z "$source_globs" ]; then
+-        echo "deny: no source globs are configured, so $path cannot be shown not to be source; the guard fails closed"; return
+-      fi
+-      if tdd_matches_any "$path" "$source_globs"; then
+-        echo "deny: Red may not read source files; $path is under the configured source globs"
+-      else echo "allow"; fi ;;
+-    green:write|refactor:write|mutation:write)
+-      if [ -z "$source_globs" ]; then
+-        echo "deny: no source globs are configured, so no write can be verified; the guard fails closed"; return
+-      fi
+-      if tdd_matches_any "$path" "$source_globs"; then echo "allow"
+-      else echo "deny: ${role} may only write source files; $path is not under the configured source globs"; fi ;;
+-    green:read|refactor:read|mutation:read)
+-      if [ -z "$test_globs" ]; then
+-        echo "deny: no test globs are configured, so $path cannot be shown not to be a test; the guard fails closed"; return
+-      fi
+-      if tdd_matches_any "$path" "$test_globs"; then
+-        echo "deny: ${role} may not read test files; $path is under the configured test globs. Work from the handover report and the test runner's output."
+-      else echo "allow"; fi ;;
+-    *)
+-      echo "deny: unknown role '${role}' or mode '${mode}'; the guard fails closed" ;;
+-  esac
+-}
+-
+-# tdd_bash_verdict <command> <template>
+-# Echoes "allow" or "deny: <reason>".
+-#
+-# The command must begin with the template's static prefix (everything
+-# before the first `{` placeholder). Whatever the agent added beyond that
+-# prefix — the delta — must contain no shell metacharacters. The template
+-# itself is trusted and may contain them.
+-#
+-# Both parameters default to empty, matching tdd_path_verdict above: this
+-# file is sourced under `set -u`, where an unset positional aborts the whole
+-# sourcing script. An aborted guard exits non-zero-but-not-2, which is
+-# treated as a non-blocking error and lets the tool call through. A caller
+-# bug must degrade to deny, never to a crash that permits.
+-tdd_bash_verdict() {
+-  local cmd="${1:-}" template="${2:-}"
+-
+-  if [ -z "$template" ]; then
+-    echo "deny: no command is configured for this phase; the guard fails closed"
+-    return
+-  fi
+-
+-  local prefix="${template%%\{*}"
+-
+-  # Trim trailing whitespace. [[:space:]] rather than a literal space, so a
+-  # tab before the placeholder does not survive into the prefix and cause
+-  # every normal space-separated invocation to fail the match.
+-  while :; do
+-    case "$prefix" in
+-      *[[:space:]]) prefix="${prefix%?}" ;;
+-      *) break ;;
+-    esac
+-  done
+-
+-  # An empty static prefix would make the prefix test `case "$cmd" in *)`,
+-  # which matches everything -- silently degrading the allowlist to "any
+-  # command without shell metacharacters". `cp -r /etc /tmp/exfil` would be
+-  # permitted. A template that is whitespace-only, or that starts with its
+-  # placeholder, must deny rather than wave everything through.
+-  if [ -z "$prefix" ]; then
+-    echo "deny: the configured command for this phase has no static prefix, so it cannot constrain anything; the guard fails closed"
+-    return
+-  fi
+-
+-  case "$cmd" in
+-    "$prefix"*) ;;
+-    *) echo "deny: only the configured command for this phase may be run; expected it to start with '${prefix}'"
+-       return ;;
+-  esac
+-
+-  local delta="${cmd#"$prefix"}"
+-  case "$delta" in
+-    *";"*|*"|"*|*"&"*|*">"*|*"<"*|*'`'*|*'$('*|*"
+-"*)
+-      echo "deny: shell metacharacters are not permitted in arguments; got '${delta}'"
+-      return ;;
+-  esac
+-
+-  echo "allow"
+-}
+diff --git a/package-lock.json b/package-lock.json
+new file mode 100644
+index 0000000..bb79504
+--- /dev/null
++++ b/package-lock.json
+@@ -0,0 +1,406 @@
++{
++  "name": "claude-tdd",
++  "lockfileVersion": 3,
++  "requires": true,
++  "packages": {
++    "": {
++      "name": "claude-tdd",
++      "devDependencies": {
++        "@types/node": "^22.20.1",
++        "typescript": "^7.0.2"
++      }
++    },
++    "node_modules/@types/node": {
++      "version": "22.20.1",
++      "resolved": "https://registry.npmjs.org/@types/node/-/node-22.20.1.tgz",
++      "integrity": "sha512-EANqOCF9QFyra+4pfxUcX9STKJpCLjMbObVzljIJomAWSnuSIEAvyzEU53GaajbXJEgdh0iEcPL+DGvpUd4k1Q==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "undici-types": "~6.21.0"
++      }
++    },
++    "node_modules/@typescript/typescript-aix-ppc64": {
++      "version": "7.0.2",
++      "resolved": "https://registry.npmjs.org/@typescript/typescript-aix-ppc64/-/typescript-aix-ppc64-7.0.2.tgz",
++      "integrity": "sha512-MTKKkWB7p/0E9xi1d1tHtZ5PiLkGEMIq88pK2CubZjOsLtYTLqhgIgi6zepFa+9GHZ6h05NMCkQxGKiPXMxXtQ==",
++      "cpu": [
++        "ppc64"
++      ],
++      "dev": true,
++      "license": "Apache-2.0",
++      "optional": true,
++      "os": [
++        "aix"
++      ],
++      "engines": {
++        "node": ">=16.20.0"
++      }
++    },
++    "node_modules/@typescript/typescript-darwin-arm64": {
++      "version": "7.0.2",
++      "resolved": "https://registry.npmjs.org/@typescript/typescript-darwin-arm64/-/typescript-darwin-arm64-7.0.2.tgz",
++      "integrity": "sha512-gowzar9MwS/aRWp6f3a4KUqzRjAZjOsmGNCM6LcTgXum+dBfgsBVMN+AgvOCCbguXyick6LJhpBszxMebJ8syA==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "Apache-2.0",
++      "optional": true,
++      "os": [
++        "darwin"
++      ],
++      "engines": {
++        "node": ">=16.20.0"
++      }
++    },
++    "node_modules/@typescript/typescript-darwin-x64": {
++      "version": "7.0.2",
++      "resolved": "https://registry.npmjs.org/@typescript/typescript-darwin-x64/-/typescript-darwin-x64-7.0.2.tgz",
++      "integrity": "sha512-SZ9xZInqApNlNGc9s0W1VSsktYSOe9cFqNOIqmN1Gs8SmkjKZYFt017G4VwPxASInODuAdbTW7sXiFUf893RgA==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "Apache-2.0",
++      "optional": true,
++      "os": [
++        "darwin"
++      ],
++      "engines": {
++        "node": ">=16.20.0"
++      }
++    },
++    "node_modules/@typescript/typescript-freebsd-arm64": {
++      "version": "7.0.2",
++      "resolved": "https://registry.npmjs.org/@typescript/typescript-freebsd-arm64/-/typescript-freebsd-arm64-7.0.2.tgz",
++      "integrity": "sha512-W5NH4y/J0plIIS5b2xvTEkU7JFxyqdMAOgf+Ilhl0vHQXKO5dZoxd+C/jEtq56c4F3wk71RB4BMRQ2XdI+bwYQ==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "Apache-2.0",
++      "optional": true,
++      "os": [
++        "freebsd"
++      ],
++      "engines": {
++        "node": ">=16.20.0"
++      }
++    },
++    "node_modules/@typescript/typescript-freebsd-x64": {
++      "version": "7.0.2",
++      "resolved": "https://registry.npmjs.org/@typescript/typescript-freebsd-x64/-/typescript-freebsd-x64-7.0.2.tgz",
++      "integrity": "sha512-UMGDx5sTpzNw3WiPebH7l90IWfJggEd+egHt/q6p7/Cm3zqoV7VxkGXt+3DxPIw8CcmvAB0j3sVVfbhX+M4Tpw==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "Apache-2.0",
++      "optional": true,
++      "os": [
++        "freebsd"
++      ],
++      "engines": {
++        "node": ">=16.20.0"
++      }
++    },
++    "node_modules/@typescript/typescript-linux-arm": {
++      "version": "7.0.2",
++      "resolved": "https://registry.npmjs.org/@typescript/typescript-linux-arm/-/typescript-linux-arm-7.0.2.tgz",
++      "integrity": "sha512-gffT3xPz9sR7j/YJExkyPntrI0P2EP9XbOyWzth2/Gs0RstK+90RBcO0ncXoXy/beYll1SXw846Nf2zdnEz0QQ==",
++      "cpu": [
++        "arm"
++      ],
++      "dev": true,
++      "license": "Apache-2.0",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">=16.20.0"
++      }
++    },
++    "node_modules/@typescript/typescript-linux-arm64": {
++      "version": "7.0.2",
++      "resolved": "https://registry.npmjs.org/@typescript/typescript-linux-arm64/-/typescript-linux-arm64-7.0.2.tgz",
++      "integrity": "sha512-Qh4eU4/y3yDjnfjjyPYihMj5/ODIlmt+Bzu17OI+fiSRDW57QmU5SiN63exPRNJPKUzcc1INa1NXdrJ+MqHjUQ==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "Apache-2.0",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">=16.20.0"
++      }
++    },
++    "node_modules/@typescript/typescript-linux-loong64": {
++      "version": "7.0.2",
++      "resolved": "https://registry.npmjs.org/@typescript/typescript-linux-loong64/-/typescript-linux-loong64-7.0.2.tgz",
++      "integrity": "sha512-uEHck9i8hoAzXPiYRib1O7miOnz23SxIeVl6F4LXox+qov1K35jHcEW6VHKvZI+pyvl7fZEP4MCU5LYvIq1GuQ==",
++      "cpu": [
++        "loong64"
++      ],
++      "dev": true,
++      "license": "Apache-2.0",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">=16.20.0"
++      }
++    },
++    "node_modules/@typescript/typescript-linux-mips64el": {
++      "version": "7.0.2",
++      "resolved": "https://registry.npmjs.org/@typescript/typescript-linux-mips64el/-/typescript-linux-mips64el-7.0.2.tgz",
++      "integrity": "sha512-R4KvAMnE43W5Qeqb0Ly56O3mWMWIAgsMyz36DCaycd5nbg/9kzm0liw3JocfRqyJY0KPmzFjbswozXyW0DnIYA==",
++      "cpu": [
++        "mips64el"
++      ],
++      "dev": true,
++      "license": "Apache-2.0",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">=16.20.0"
++      }
++    },
++    "node_modules/@typescript/typescript-linux-ppc64": {
++      "version": "7.0.2",
++      "resolved": "https://registry.npmjs.org/@typescript/typescript-linux-ppc64/-/typescript-linux-ppc64-7.0.2.tgz",
++      "integrity": "sha512-DORx5b3sd/4S7eayxm4FQv+A7CrkUIGRaHiwI8oiHTAI1fAPWhF4J0vAlkC8biAlHSVVwxMQ3tjZ2/DVbnQiiA==",
++      "cpu": [
++        "ppc64"
++      ],
++      "dev": true,
++      "license": "Apache-2.0",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">=16.20.0"
++      }
++    },
++    "node_modules/@typescript/typescript-linux-riscv64": {
++      "version": "7.0.2",
++      "resolved": "https://registry.npmjs.org/@typescript/typescript-linux-riscv64/-/typescript-linux-riscv64-7.0.2.tgz",
++      "integrity": "sha512-wf0jqEDOjrPRnKwYRyyJDRo11KMbvMFrU+q4zqKyChODBzvlkbhNQfKvLxQCcwTpdDaXSHZTVuh0JoCrKCUMHQ==",
++      "cpu": [
++        "riscv64"
++      ],
++      "dev": true,
++      "license": "Apache-2.0",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">=16.20.0"
++      }
++    },
++    "node_modules/@typescript/typescript-linux-s390x": {
++      "version": "7.0.2",
++      "resolved": "https://registry.npmjs.org/@typescript/typescript-linux-s390x/-/typescript-linux-s390x-7.0.2.tgz",
++      "integrity": "sha512-IkwJc3L7yhytWd/ewjyxNDfOmswCm9GWMJT/ue/dU4aZNbwZeYAetq42VyLmsmSjvoX7z74X6ZaYCtzAr0EuGw==",
++      "cpu": [
++        "s390x"
++      ],
++      "dev": true,
++      "license": "Apache-2.0",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">=16.20.0"
++      }
++    },
++    "node_modules/@typescript/typescript-linux-x64": {
++      "version": "7.0.2",
++      "resolved": "https://registry.npmjs.org/@typescript/typescript-linux-x64/-/typescript-linux-x64-7.0.2.tgz",
++      "integrity": "sha512-EYdf2cNg7rgCWJnxCdJ+F3V39O8ihb37eHAu1LK8oAFizgTQbPOK7zHHXbPt8rX24COqODXeI3sIf0fCXG7H/A==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "Apache-2.0",
++      "optional": true,
++      "os": [
++        "linux"
++      ],
++      "engines": {
++        "node": ">=16.20.0"
++      }
++    },
++    "node_modules/@typescript/typescript-netbsd-arm64": {
++      "version": "7.0.2",
++      "resolved": "https://registry.npmjs.org/@typescript/typescript-netbsd-arm64/-/typescript-netbsd-arm64-7.0.2.tgz",
++      "integrity": "sha512-+polYF4MF04aPpO5FTkHran9yUQDSXqy5GiSDKpsll5jy3l3+g9QLhpf39T+ePtefhXLOGrLl0QIjkQP6VnelA==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "Apache-2.0",
++      "optional": true,
++      "os": [
++        "netbsd"
++      ],
++      "engines": {
++        "node": ">=16.20.0"
++      }
++    },
++    "node_modules/@typescript/typescript-netbsd-x64": {
++      "version": "7.0.2",
++      "resolved": "https://registry.npmjs.org/@typescript/typescript-netbsd-x64/-/typescript-netbsd-x64-7.0.2.tgz",
++      "integrity": "sha512-8YIT0EHM/3dq10ZOVF/A7pc/YSMtbcecct4rWtexrnSCHOPcpC2KTLXfTCR6vDpnSiY12heNb1GiN/wu+T/FyA==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "Apache-2.0",
++      "optional": true,
++      "os": [
++        "netbsd"
++      ],
++      "engines": {
++        "node": ">=16.20.0"
++      }
++    },
++    "node_modules/@typescript/typescript-openbsd-arm64": {
++      "version": "7.0.2",
++      "resolved": "https://registry.npmjs.org/@typescript/typescript-openbsd-arm64/-/typescript-openbsd-arm64-7.0.2.tgz",
++      "integrity": "sha512-APT8+ClYnuYm1u9+kgGXoMj2VzWzcymwh2gNSQVySHfkRDGOTVkoWLjCmOQSaO+PoqQ57B0flRp9SA+7GnnkzQ==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "Apache-2.0",
++      "optional": true,
++      "os": [
++        "openbsd"
++      ],
++      "engines": {
++        "node": ">=16.20.0"
++      }
++    },
++    "node_modules/@typescript/typescript-openbsd-x64": {
++      "version": "7.0.2",
++      "resolved": "https://registry.npmjs.org/@typescript/typescript-openbsd-x64/-/typescript-openbsd-x64-7.0.2.tgz",
++      "integrity": "sha512-yX7s+Q0Dln0Dt9tEzZsAjXXR/+ytBM7AlglaqyeMPxQszJ1JhlJdZ6jLA+IzldHtflX81em7lDao1xXu+aRRkg==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "Apache-2.0",
++      "optional": true,
++      "os": [
++        "openbsd"
++      ],
++      "engines": {
++        "node": ">=16.20.0"
++      }
++    },
++    "node_modules/@typescript/typescript-sunos-x64": {
++      "version": "7.0.2",
++      "resolved": "https://registry.npmjs.org/@typescript/typescript-sunos-x64/-/typescript-sunos-x64-7.0.2.tgz",
++      "integrity": "sha512-dLJDGaLZ1D4HPQn62u1n8mBDkJREwMsAkCdkwd4Ieqw+x3TUyTsqY0YiBCtE6H6OzzgGk3iuZ3vFWRS+E8/d1g==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "Apache-2.0",
++      "optional": true,
++      "os": [
++        "sunos"
++      ],
++      "engines": {
++        "node": ">=16.20.0"
++      }
++    },
++    "node_modules/@typescript/typescript-win32-arm64": {
++      "version": "7.0.2",
++      "resolved": "https://registry.npmjs.org/@typescript/typescript-win32-arm64/-/typescript-win32-arm64-7.0.2.tgz",
++      "integrity": "sha512-Gyl1Vy6OsWesLzmq+EP0Fb7b4Nid5232AvcA2SFcdYreldpNtYFFofPjnt62y9hQy7VTaZp65ICJjuAQRaVcIQ==",
++      "cpu": [
++        "arm64"
++      ],
++      "dev": true,
++      "license": "Apache-2.0",
++      "optional": true,
++      "os": [
++        "win32"
++      ],
++      "engines": {
++        "node": ">=16.20.0"
++      }
++    },
++    "node_modules/@typescript/typescript-win32-x64": {
++      "version": "7.0.2",
++      "resolved": "https://registry.npmjs.org/@typescript/typescript-win32-x64/-/typescript-win32-x64-7.0.2.tgz",
++      "integrity": "sha512-0BQ3HkAHHlKLSp1qRvf3SUhGpGsDuhB/jgFw75guyqbxJqEaS0Cw/VFO8i2nHglJUzQCRtMMR/IBAKE3ETMC4g==",
++      "cpu": [
++        "x64"
++      ],
++      "dev": true,
++      "license": "Apache-2.0",
++      "optional": true,
++      "os": [
++        "win32"
++      ],
++      "engines": {
++        "node": ">=16.20.0"
++      }
++    },
++    "node_modules/typescript": {
++      "version": "7.0.2",
++      "resolved": "https://registry.npmjs.org/typescript/-/typescript-7.0.2.tgz",
++      "integrity": "sha512-8FYau96o3NKOhbjKi/qNvG/W5jhzxkbdm5sj9AbZ/5T5sWqn3hJgLfGx27sRKZWTvyzCP8dLRBTf5tBTSRVUNA==",
++      "dev": true,
++      "license": "Apache-2.0",
++      "bin": {
++        "tsc": "bin/tsc"
++      },
++      "engines": {
++        "node": ">=16.20.0"
++      },
++      "optionalDependencies": {
++        "@typescript/typescript-aix-ppc64": "7.0.2",
++        "@typescript/typescript-darwin-arm64": "7.0.2",
++        "@typescript/typescript-darwin-x64": "7.0.2",
++        "@typescript/typescript-freebsd-arm64": "7.0.2",
++        "@typescript/typescript-freebsd-x64": "7.0.2",
++        "@typescript/typescript-linux-arm": "7.0.2",
++        "@typescript/typescript-linux-arm64": "7.0.2",
++        "@typescript/typescript-linux-loong64": "7.0.2",
++        "@typescript/typescript-linux-mips64el": "7.0.2",
++        "@typescript/typescript-linux-ppc64": "7.0.2",
++        "@typescript/typescript-linux-riscv64": "7.0.2",
++        "@typescript/typescript-linux-s390x": "7.0.2",
++        "@typescript/typescript-linux-x64": "7.0.2",
++        "@typescript/typescript-netbsd-arm64": "7.0.2",
++        "@typescript/typescript-netbsd-x64": "7.0.2",
++        "@typescript/typescript-openbsd-arm64": "7.0.2",
++        "@typescript/typescript-openbsd-x64": "7.0.2",
++        "@typescript/typescript-sunos-x64": "7.0.2",
++        "@typescript/typescript-win32-arm64": "7.0.2",
++        "@typescript/typescript-win32-x64": "7.0.2"
++      }
++    },
++    "node_modules/undici-types": {
++      "version": "6.21.0",
++      "resolved": "https://registry.npmjs.org/undici-types/-/undici-types-6.21.0.tgz",
++      "integrity": "sha512-iwDZqg0QAGrg9Rav5H4n0M64c3mkR59cJ6wQp+7C4nI0gsmExaedaYLNO44eT4AtBBwjbTiGPMlt2Md0T9H9JQ==",
++      "dev": true,
++      "license": "MIT"
++    }
++  }
++}
+diff --git a/package.json b/package.json
+new file mode 100644
+index 0000000..3001529
+--- /dev/null
++++ b/package.json
+@@ -0,0 +1,14 @@
++{
++  "name": "claude-tdd",
++  "private": true,
++  "type": "module",
++  "description": "Dev tooling for the claude-tdd plugin's hooks — type checking only, no build step.",
++  "scripts": {
++    "typecheck": "tsc --noEmit",
++    "test": "node --test"
++  },
++  "devDependencies": {
++    "typescript": "^7.0.2",
++    "@types/node": "^22.20.1"
++  }
++}
+diff --git a/tests/agents.test.sh b/tests/agents.test.sh
+deleted file mode 100644
+index 95d7e84..0000000
+--- a/tests/agents.test.sh
++++ /dev/null
+@@ -1,26 +0,0 @@
+-# Sourced by tests/run.sh. Do not add a shebang, set -e, or exit.
+-#
+-# The guard identifies callers by agent_type, which is the agent file's `name:`
+-# field. If the two ever disagree, the guard stops constraining that role and
+-# says nothing. This test is the only thing standing between a rename and a
+-# silently disabled guard.
+-
+-_agent_dir="$REPO_ROOT/agents"
+-_guard="$REPO_ROOT/hooks/guard.sh"
+-
+-for _f in "$_agent_dir"/*.md; do
+-  [ -e "$_f" ] || continue
+-  _name=$(sed -n 's/^name:[[:space:]]*//p' "$_f" | head -1)
+-  assert_contains "$_name)" "$(cat "$_guard")" \
+-    "$(basename "$_f") declares name '$_name', which guard.sh dispatches on"
+-done
+-
+-# And the reverse: every role the guard knows about must have an agent file.
+-for _role in tdd-red tdd-green tdd-refactor tdd-mutate; do
+-  _found=no
+-  for _f in "$_agent_dir"/*.md; do
+-    [ -e "$_f" ] || continue
+-    [ "$(sed -n 's/^name:[[:space:]]*//p' "$_f" | head -1)" = "$_role" ] && _found=yes
+-  done
+-  assert_eq "yes" "$_found" "guard role $_role has an agent definition"
+-done
+diff --git a/tests/config-contract.test.sh b/tests/config-contract.test.sh
+deleted file mode 100644
+index 674f8b4..0000000
+--- a/tests/config-contract.test.sh
++++ /dev/null
+@@ -1,120 +0,0 @@
+-# Sourced by tests/run.sh. Do not add a shebang, set -e, or exit.
+-#
+-# Pins the .tdd/config.json schema that /tdd-init must produce and that
+-# guard.sh and the orchestrator consume. Update this list when the schema
+-# changes -- deliberately, not by discovering a null at runtime.
+-
+-_cfg="$REPO_ROOT/tests/fixtures/config.json"
+-
+-# Keys that must be present AND non-null.
+-for _k in version crapMode \
+-          commands.test commands.single \
+-          globs.test globs.source globs.ignore \
+-          refactorTriggers.maxCrap refactorTriggers.duplicateThreshold \
+-          refactorTriggers.maxFunctionLines \
+-          limits.greenAttempts limits.violationRetries \
+-          limits.mutationRounds limits.mutantsPerPass \
+-          coverageGates.greenMaxNewUncovered coverageGates.refactorMaxNewUncovered; do
+-  assert_eq "yes" "$(jq -r "if (.${_k} // null) == null then \"no\" else \"yes\" end" "$_cfg")" \
+-    "config has non-null ${_k}"
+-done
+-
+-# Keys that must be PRESENT but may be null -- absence and null mean different
+-# things here. Null is "this toolchain has no such tool, degrade explicitly";
+-# absent means /tdd-init forgot to decide.
+-for _k in coverage complexity mutation; do
+-  assert_eq "true" "$(jq -r ".commands | has(\"${_k}\")" "$_cfg")" \
+-    "config declares commands.${_k} (null is allowed, absent is not)"
+-done
+-
+-# The template inside commands/tdd-init.md is a SECOND copy of this schema, and
+-# two copies drift. It already did once: the template omitted crapMode,
+-# maxCrap, mutationRounds, mutantsPerPass, commands.complexity and
+-# commands.mutation, so an agent following it would have written a config whose
+-# primary refactor trigger threshold was null -- a comparison that never fires.
+-# Scope the haystack to the Step 7 JSON block, NOT the whole file. Seven of
+-# these key names also appear in surrounding prose (the detection table, the
+-# degradation table), so a whole-file grep passes even when the key is missing
+-# from the template a model actually copies from. Verified: deleting crapMode
+-# from the JSON block alone left the suite fully green under a whole-file
+-# match. That is the same defect this test exists to catch, one level up.
+-_init="$REPO_ROOT/commands/tdd-init.md"
+-_init_text=$(sed -n '/^## 7\. Write the files/,/^Append to/p' "$_init")
+-
+-# Both anchors have to be checked, and they fail differently.
+-#
+-# Start anchor broken -> sed returns empty -> every assertion below fails in a
+-# heap, which is loud but confusing. The first assertion names the real cause.
+-#
+-# End anchor broken -> sed runs to EOF instead, silently re-widening the
+-# haystack toward the whole-file behaviour this scoping was added to remove.
+-# That one passes quietly, so it needs its own check: nothing from step 8
+-# onward may appear in the extracted block.
+-assert_contains "version" "$_init_text" "the Step 7 JSON block was located at all"
+-case "$_init_text" in
+-  *"## 8"*) _bounded=no ;;
+-  *)        _bounded=yes ;;
+-esac
+-assert_eq "yes" "$_bounded" "the extracted block stops before step 8 (end anchor still matches)"
+-# DERIVE the expected keys from the fixture instead of hand-maintaining a
+-# second list. The previous hardcoded list was a strict SUBSET of the keys the
+-# fixture-side loop requires -- commands.test, commands.single,
+-# commands.coverage, globs.test and globs.source were never pinned on the
+-# template side at all, and both loops were green throughout. Renaming
+-# `"coverage":` in the template left the suite fully passing, and that is the
+-# key whose loss cascades into all three coverage gates.
+-#
+-# Two hand-maintained lists of the same thing drift. One derived from the other
+-# cannot.
+-#
+-# Multiplicity matters: "test" occurs twice (commands.test and globs.test), so
+-# a presence check would not prove both are declared.
+-# Count the iterations. A derived loop that enumerates nothing -- a broken jq
+-# filter, an unreadable fixture -- contributes zero assertions and the suite
+-# stays green while the check has silently disappeared. Verified: typing
+-# `strnig` for `string` in this filter dropped 46 assertions and the run
+-# reported 122 passed, 0 failed.
+-_tpl_seen=0
+-for _k in $(jq -r 'paths | .[-1] | select(type=="string")' "$_cfg" | sort -u); do
+-  _want=$(jq -r --arg k "$_k" '[paths | .[-1] | select(. == $k)] | length' "$_cfg")
+-  _have=$(printf '%s' "$_init_text" | grep -o "\"${_k}\":" | wc -l | tr -d ' ')
+-  assert_eq "$_want" "$_have" "tdd-init's template declares ${_k} (${_want}x)"
+-  _tpl_seen=$((_tpl_seen + 1))
+-done
+-# Floor, not an exact count: the fixture currently has 23 distinct key names,
+-# and a floor of 19 leaves room for the schema to shrink legitimately while
+-# still catching collapse. Do NOT derive the expected count from the same jq
+-# filter the loop uses -- one broken filter would then corrupt both sides of
+-# the comparison identically and the check would pass.
+-assert_eq "yes" "$([ "$_tpl_seen" -ge 19 ] && echo yes || echo no)" \
+-  "the derived template loop enumerated at least 19 keys (saw ${_tpl_seen})"
+-
+-# The spec holds a THIRD copy of this schema. Drift there misleads whoever
+-# reads the design next, which is how the template drifted in the first place.
+-_spec="$REPO_ROOT/docs/superpowers/specs/2026-07-30-tdd-subagent-workflow-design.md"
+-_spec_text=$(sed -n '/"version": 1,/,/^}/p' "$_spec")
+-assert_contains "crapMode" "$_spec_text" "the spec's schema block was located at all"
+-# Same end-anchor hazard the template block has: if `^}` stops matching, sed
+-# runs to EOF and silently sweeps in trailing prose, widening the haystack and
+-# corrupting the counts. Asserting the last line IS the closing brace is
+-# stronger than a content marker, because it does not depend on what happens to
+-# follow the block.
+-assert_eq "}" "$(printf '%s' "$_spec_text" | tail -1)" \
+-  "the spec's schema block ends at its closing brace (end anchor still matches)"
+-_spec_seen=0
+-for _k in $(jq -r 'paths | .[-1] | select(type=="string")' "$_cfg" | sort -u); do
+-  _want=$(jq -r --arg k "$_k" '[paths | .[-1] | select(. == $k)] | length' "$_cfg")
+-  _have=$(printf '%s' "$_spec_text" | grep -o "\"${_k}\":" | wc -l | tr -d ' ')
+-  assert_eq "$_want" "$_have" "the spec's schema declares ${_k} (${_want}x)"
+-  _spec_seen=$((_spec_seen + 1))
+-done
+-assert_eq "yes" "$([ "$_spec_seen" -ge 19 ] && echo yes || echo no)" \
+-  "the derived spec loop enumerated at least 19 keys (saw ${_spec_seen})"
+-
+-# The three glob lists must be arrays. A bare string would word-split in the
+-# guard into per-character globs and match almost nothing -- denying every
+-# write and, worse, permitting every read.
+-for _k in test source ignore; do
+-  assert_eq "array" "$(jq -r ".globs.${_k} | type" "$_cfg")" \
+-    "globs.${_k} is an array"
+-done
+diff --git a/tests/guard.test.mjs b/tests/guard.test.mjs
+index be44359..b4c673c 100644
+--- a/tests/guard.test.mjs
++++ b/tests/guard.test.mjs
+@@ -1,97 +1,489 @@
+-// node:test port of tests/guard.test.sh — PARTIAL.
++// node:test port of tests/guard.test.sh, extended for Task 3.
+ //
+-// guard.test.sh exercises hooks/guard.sh end-to-end: pipe a JSON payload in,
+-// read the exit code and stderr out. Its replacement, hooks/guard.mjs, does
+-// not exist yet — it is Task 3's deliverable, not Task 2's. Per the brief:
+-// "guard.test.mjs (payload → exit code, once hooks/guard.mjs exists — for
+-// now, write what you can that does not need it and skip the rest with a
+-// clear TODO naming Task 3)."
++// hooks/guard.mjs now exists, so every behaviour deferred by the Task 2 port
++// is promoted here from test.todo() to a real test that pipes a JSON payload
++// into a spawned `node hooks/guard.mjs` and reads its exit code and stderr —
++// the same black-box shape guard.test.sh used, translated to a subprocess
++// instead of a bash pipe.
+ //
+-// What does NOT need guard.mjs to exist: hooks/hooks.json's own registration
+-// shape. The plan requires it move to exec form before Task 3 is done
+-// ("Hook registration | Exec form — `"command": "node", "args":
+-// ["${CLAUDE_PLUGIN_ROOT}/hooks/guard.mjs"]`"), and hooks.json can be
+-// inspected today regardless of whether guard.mjs has been written. That
+-// test is expected to be RED right now for a genuine reason (the property
+-// does not hold yet), not because anything is missing to run it.
+-//
+-// Everything else in the retired guard.test.sh needs a running guard.mjs to
+-// pipe a payload into, and is recorded below as test.todo() with enough
+-// detail that Task 3 does not have to reconstruct intent from the bash
+-// original. Two fixtures are prepared now so Task 3 does not have to invent
+-// them: tests/fixtures/config.json (existing, commands.mutation: null) and
+-// tests/fixtures/config-mutation.json (new, commands.mutation: "mutmut run")
+-// — the plan names the null-mutation fixture as making "an entire branch of
+-// the Bash allowlist structurally dead in every test."
++// Two fixtures back this file: tests/fixtures/config.json (commands.mutation:
++// null) for the ordinary matrix, and tests/fixtures/config-mutation.json
++// (commands.mutation: "mutmut run") specifically so tdd-mutate's Bash
++// dispatch exercises the mutation-command branch at least once — the default
++// fixture's null makes that branch structurally dead in every other test.
+ 
+ import test from 'node:test';
+ import assert from 'node:assert/strict';
+ import fs from 'node:fs';
++import os from 'node:os';
+ import path from 'node:path';
++import { spawnSync } from 'node:child_process';
+ import { fileURLToPath } from 'node:url';
+ 
+ const HERE = path.dirname(fileURLToPath(import.meta.url));
+ const REPO_ROOT = path.join(HERE, '..');
+ const HOOKS_JSON_PATH = path.join(REPO_ROOT, 'hooks', 'hooks.json');
+ const GUARD_MJS_PATH = path.join(REPO_ROOT, 'hooks', 'guard.mjs');
++const FIXTURE_CONFIG_PATH = path.join(REPO_ROOT, 'tests', 'fixtures', 'config.json');
++const FIXTURE_CONFIG_MUTATION_PATH = path.join(REPO_ROOT, 'tests', 'fixtures', 'config-mutation.json');
+ 
+ test('hooks.json: PreToolUse is registered in EXEC form (node + guard.mjs args, no shell)', () => {
+   const hooksJson = JSON.parse(fs.readFileSync(HOOKS_JSON_PATH, 'utf8'));
+   const preToolUse = hooksJson?.hooks?.PreToolUse;
+   assert.ok(Array.isArray(preToolUse) && preToolUse.length > 0, 'hooks.json has no PreToolUse matcher entries');
+ 
+   const commandHooks = preToolUse.flatMap((entry) => entry.hooks ?? []).filter((h) => h.type === 'command');
+   assert.ok(commandHooks.length > 0, 'no command-type hook found under PreToolUse');
+ 
+   const guardHook = commandHooks.find((h) => JSON.stringify(h).includes('guard'));
+   assert.notEqual(guardHook, undefined, 'no hook entry appears to reference the guard at all');
+ 
+   // Exec form per the plan's global constraints table: spawn "node" directly
+   // with the script as an argv entry — no shell, no `${VAR}`-vs-`$env:VAR`
+-  // dialect problem. The shell-form spelling this repo currently ships
+-  // ("command": ".../guard.sh") fails this on both counts: it names the
+-  // script directly (requiring a shell to interpret the shebang and expand
+-  // ${CLAUDE_PLUGIN_ROOT}) rather than naming the interpreter, and it points
+-  // at guard.sh instead of guard.mjs.
++  // dialect problem.
+   assert.equal(guardHook.command, 'node', `expected the hook to spawn "node" directly (exec form), got "${guardHook.command}"`);
+   assert.ok(Array.isArray(guardHook.args), 'expected an "args" array carrying the script path (exec form)');
+   assert.ok(
+     guardHook.args.some((a) => typeof a === 'string' && a.includes('guard.mjs')),
+     `expected one of the args to reference guard.mjs, got ${JSON.stringify(guardHook.args)}`,
+   );
+ });
+ 
+-test('sanity: hooks/guard.mjs does not exist yet (Task 3) — the todos below are correctly deferred, not incorrectly skipped', () => {
+-  // This is an intentional TRIPWIRE, not a real assertion about design: the
+-  // moment Task 3 adds guard.mjs, this flips and is the signal to convert
+-  // every test.todo() below into a real test rather than leaving them
+-  // stranded. If this test starts failing, that is good news.
+-  assert.equal(fs.existsSync(GUARD_MJS_PATH), false, 'hooks/guard.mjs now exists — promote the test.todo() entries below to real tests (Task 3 has landed)');
+-});
+-
+-// ---------------------------------------------------------------------------
+-// Deferred to Task 3. Each entry names the specific behaviour from the
+-// retired guard.test.sh (or from the plan's "branches iteration 1 never
+-// covered" list) so nothing gets lost in the port.
+-// ---------------------------------------------------------------------------
+-
+-test.todo('guard: inert unless a constrained agent is calling — no agent_type (main thread), and an unrelated agent_type, both permit silently (exit 0, no stderr)');
+-test.todo('guard: red writing a test is permitted; red writing/reading source is denied (exit 2) and the systemMessage names the violated rule');
+-test.todo('guard: green reading a test is denied; green writing source is permitted');
+-test.todo('guard: the namespaced form ("claude-tdd:tdd-red") is what real dispatches send and must be judged identically to the bare form ("tdd-red") — the single most consequential defect in the project was this namespace strip being silently absent');
+-test.todo('guard: an agent whose name merely starts with "tdd-" but is not one of the four known roles (e.g. "tdd-bogus") permits — this plugin only constrains the roles it defines');
+-test.todo('guard: every file-writing tool is judged, not just Write/Edit — Write, Edit, MultiEdit, NotebookEdit all deny a red write to source (hook matchers are unanchored regex; a tool that fell through would let Red write source unchecked)');
+-test.todo('guard: NotebookEdit/NotebookRead are judged on notebook_path, not file_path — a payload carrying a benign decoy file_path alongside a real-target notebook_path must be judged on the field the tool actually acts on');
+-test.todo('guard: an unrecognized tool name denies rather than passing through');
+-test.todo('guard: an empty/missing file_path denies rather than permitting (cannot be classified)');
+-test.todo('guard: a ".." segment in an absolute payload path denies for both red (source) and green (a path it could otherwise read) — traversal must not escape classification');
+-test.todo('guard: relative payload paths classify identically to absolute ones (e.g. "src/a.py" denied to red exactly as the absolute form is)');
+-test.todo('guard: missing .tdd/config.json denies even an otherwise-legal write for a constrained role, but still permits the main thread (config absence must not widen the main-thread exemption)');
+-test.todo('guard: config-contract Task 10 — an EMPTY sandbox (.tdd/config.json absent entirely, not just malformed) produces exit 2 with a message naming /tdd-init, for a constrained role');
+-test.todo('guard: degenerate .tdd/config.json on-disk shapes deny rather than crash or permit — non-JSON content, an empty file (0 bytes), and a file containing only "{}"; distinct from the in-memory shape tests in rules.test.mjs, which do not touch the filesystem at all');
+-test.todo('guard: bash dispatch selects candidate command templates BY ROLE, trying each until one matches — red and green both get {single, coverage}; refactor gets {test, coverage, complexity}; mutation gets {test, mutation}. The retired suite exercised green\'s "single" and every role\'s "coverage" but never red\'s own "single" branch independently of green\'s');
+-test.todo('guard: every role may run the configured coverage command, but a role\'s own phase-scoped command stays scoped (e.g. green may not run the complexity command configured for refactor)');
+-test.todo('guard: metacharacters appended after a legitimately-matched command prefix are still denied (e.g. "pytest -q --cov; rm -rf src" — a coverage-prefix match must not waive the delta check)');
+-test.todo('guard: with tests/fixtures/config-mutation.json (commands.mutation non-null, unlike the default fixture), tdd-mutate\'s bash dispatch actually exercises the mutation command branch — the plan notes the default fixture\'s null makes this branch "structurally dead in every test"');
+-test.todo('guard: the version floor — process.versions.node is checked FIRST, before anything else can throw; below NODE_FLOOR denies with a setup-pointing message, and this is checked ahead of config/role/path evaluation entirely');
+-test.todo('guard: an uncaught exception anywhere in the guard body still exits 2 (wrap-the-whole-body requirement) — e.g. malformed JSON on stdin must not exit 1, which PreToolUse treats as a non-blocking permit');
++test('sanity: hooks/guard.mjs exists (Task 3 has landed) — the tests below exercise it directly', () => {
++  assert.equal(fs.existsSync(GUARD_MJS_PATH), true, 'hooks/guard.mjs is missing — Task 3 is expected to have created it');
++});
++
++// ---------------------------------------------------------------------------
++// Sandbox + payload helpers
++// ---------------------------------------------------------------------------
++
++/** A fresh sandbox directory with .tdd/config.json copied from `fixturePath`. */
++function makeSandbox(fixturePath = FIXTURE_CONFIG_PATH) {
++  const dir = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'tdd-guard-test-')));
++  fs.mkdirSync(path.join(dir, '.tdd'), { recursive: true });
++  fs.copyFileSync(fixturePath, path.join(dir, '.tdd', 'config.json'));
++  fs.mkdirSync(path.join(dir, 'src'), { recursive: true });
++  fs.mkdirSync(path.join(dir, 'tests'), { recursive: true });
++  fs.writeFileSync(path.join(dir, 'src', 'a.py'), '# source\n');
++  fs.writeFileSync(path.join(dir, 'tests', 'test_a.py'), '# test\n');
++  return dir;
++}
++
++function removeSandbox(dir) {
++  fs.rmSync(dir, { recursive: true, force: true });
++}
++
++/**
++ * Build a PreToolUse payload. `agentType` omitted entirely means a
++ * main-thread call — the key is genuinely ABSENT, not present-and-null,
++ * matching the measured payload shape.
++ */
++function payload({ agentType, tool, input }) {
++  /** @type {any} */
++  const body = { hook_event_name: 'PreToolUse', tool_name: tool, tool_input: input };
++  if (agentType) {
++    body.agent_id = 'a123';
++    body.agent_type = agentType;
++  }
++  return JSON.stringify(body);
++}
++
++/** Spawn `node hooks/guard.mjs`, feed it a payload on stdin, and report {status, stderr}. */
++function runGuard({ agentType, tool, input, sandbox, env = {} }) {
++  const result = spawnSync(process.execPath, [GUARD_MJS_PATH], {
++    input: payload({ agentType, tool, input }),
++    encoding: 'utf8',
++    env: { ...process.env, TDD_PROJECT_DIR: sandbox, ...env },
++  });
++  return { status: result.status, stderr: result.stderr ?? '' };
++}
++
++function readGuard(sandbox, filePath, agentType) {
++  return runGuard({ agentType, tool: 'Read', input: { file_path: filePath }, sandbox });
++}
++
++function writeGuard(sandbox, filePath, agentType) {
++  return runGuard({ agentType, tool: 'Write', input: { file_path: filePath }, sandbox });
++}
++
++function bashGuard(sandbox, command, agentType) {
++  return runGuard({ agentType, tool: 'Bash', input: { command }, sandbox });
++}
++
++// ---------------------------------------------------------------------------
++// Inert unless a constrained agent is calling
++// ---------------------------------------------------------------------------
++
++test('guard: no agent_type (main thread) and an unrelated agent_type both permit silently (exit 0, no stderr)', () => {
++  const sandbox = makeSandbox();
++  try {
++    const mainThread = writeGuard(sandbox, path.join(sandbox, 'src', 'a.py'), undefined);
++    assert.equal(mainThread.status, 0, 'main thread should exit 0');
++    assert.equal(mainThread.stderr, '', 'main thread should emit no stderr');
++
++    const unrelated = writeGuard(sandbox, path.join(sandbox, 'src', 'a.py'), 'general-purpose');
++    assert.equal(unrelated.status, 0, 'unrelated agent_type should exit 0');
++    assert.equal(unrelated.stderr, '', 'unrelated agent_type should emit no stderr');
++  } finally {
++    removeSandbox(sandbox);
++  }
++});
++
++test('guard: red writing a test is permitted; red writing/reading source is denied (exit 2) and the systemMessage names the violated rule', () => {
++  const sandbox = makeSandbox();
++  try {
++    const okWrite = writeGuard(sandbox, path.join(sandbox, 'tests', 'test_a.py'), 'tdd-red');
++    assert.equal(okWrite.status, 0, 'red writing a test should be permitted');
++
++    const badWrite = writeGuard(sandbox, path.join(sandbox, 'src', 'a.py'), 'tdd-red');
++    assert.equal(badWrite.status, 2, 'red writing source should be denied');
++    assert.match(badWrite.stderr, /"permissionDecision":"deny"/, 'denial JSON should carry a deny decision');
++    assert.match(badWrite.stderr, /only write test files/, 'denial should name the violated rule');
++
++    const badRead = readGuard(sandbox, path.join(sandbox, 'src', 'a.py'), 'tdd-red');
++    assert.equal(badRead.status, 2, 'red reading source should be denied');
++  } finally {
++    removeSandbox(sandbox);
++  }
++});
++
++test('guard: green reading a test is denied; green writing source is permitted', () => {
++  const sandbox = makeSandbox();
++  try {
++    const badRead = readGuard(sandbox, path.join(sandbox, 'tests', 'test_a.py'), 'tdd-green');
++    assert.equal(badRead.status, 2, 'green reading a test should be denied');
++
++    const okWrite = writeGuard(sandbox, path.join(sandbox, 'src', 'a.py'), 'tdd-green');
++    assert.equal(okWrite.status, 0, 'green writing source should be permitted');
++  } finally {
++    removeSandbox(sandbox);
++  }
++});
++
++// ---------------------------------------------------------------------------
++// Namespace strip — the single most consequential defect in the project
++// ---------------------------------------------------------------------------
++
++test('guard: the namespaced form ("claude-tdd:tdd-red") is judged identically to the bare form ("tdd-red")', () => {
++  const sandbox = makeSandbox();
++  try {
++    const bareDeny = writeGuard(sandbox, path.join(sandbox, 'src', 'a.py'), 'tdd-red');
++    const namespacedDeny = writeGuard(sandbox, path.join(sandbox, 'src', 'a.py'), 'claude-tdd:tdd-red');
++    assert.equal(bareDeny.status, 2, 'sanity: bare form denies red writing source');
++    assert.equal(namespacedDeny.status, 2, 'namespaced form must ALSO deny red writing source');
++
++    const bareAllow = writeGuard(sandbox, path.join(sandbox, 'tests', 'test_a.py'), 'tdd-red');
++    const namespacedAllow = writeGuard(sandbox, path.join(sandbox, 'tests', 'test_a.py'), 'claude-tdd:tdd-red');
++    assert.equal(bareAllow.status, 0, 'sanity: bare form allows red writing a test');
++    assert.equal(namespacedAllow.status, 0, 'namespaced form must ALSO allow red writing a test');
++
++    const namespacedGreenRead = readGuard(sandbox, path.join(sandbox, 'tests', 'test_a.py'), 'claude-tdd:tdd-green');
++    assert.equal(namespacedGreenRead.status, 2, 'namespaced green reading a test is denied');
++
++    const namespacedMutateBash = bashGuard(sandbox, 'pytest -q', 'claude-tdd:tdd-mutate');
++    assert.equal(namespacedMutateBash.status, 0, 'namespaced tdd-mutate may run the full suite');
++  } finally {
++    removeSandbox(sandbox);
++  }
++});
++
++test('guard: an agent whose name merely starts with "tdd-" but is not one of the four known roles permits', () => {
++  const sandbox = makeSandbox();
++  try {
++    const result = writeGuard(sandbox, path.join(sandbox, 'src', 'a.py'), 'tdd-bogus');
++    assert.equal(result.status, 0, 'an unrecognised tdd-* agent should permit — this plugin only constrains the roles it defines');
++  } finally {
++    removeSandbox(sandbox);
++  }
++});
++
++// ---------------------------------------------------------------------------
++// Every file-writing tool must be judged, not just Write/Edit
++// ---------------------------------------------------------------------------
++
++test('guard: every file-writing tool is judged, not just Write/Edit — Write, Edit, MultiEdit, NotebookEdit all deny a red write to source', () => {
++  const sandbox = makeSandbox();
++  try {
++    for (const tool of ['Write', 'Edit', 'MultiEdit']) {
++      const result = runGuard({ agentType: 'tdd-red', tool, input: { file_path: path.join(sandbox, 'src', 'a.py') }, sandbox });
++      assert.equal(result.status, 2, `red writing source via ${tool} should be denied`);
++    }
++    const notebook = runGuard({
++      agentType: 'tdd-red',
++      tool: 'NotebookEdit',
++      input: { notebook_path: path.join(sandbox, 'src', 'nb.ipynb') },
++      sandbox,
++    });
++    assert.equal(notebook.status, 2, 'red writing source via NotebookEdit should be denied');
++  } finally {
++    removeSandbox(sandbox);
++  }
++});
++
++test('guard: NotebookEdit/NotebookRead are judged on notebook_path, not file_path', () => {
++  const sandbox = makeSandbox();
++  try {
++    // A benign decoy file_path (a legal test write) alongside a real-target
++    // notebook_path (source) must be judged on the field the tool actually
++    // acts on — checking file_path here would validate something the tool
++    // ignores and permit the write it should have caught.
++    const editDecoy = runGuard({
++      agentType: 'tdd-red',
++      tool: 'NotebookEdit',
++      input: {
++        file_path: path.join(sandbox, 'tests', 'test_a.py'),
++        notebook_path: path.join(sandbox, 'src', 'nb.ipynb'),
++      },
++      sandbox,
++    });
++    assert.equal(editDecoy.status, 2, 'NotebookEdit must be judged on notebook_path, not a decoy file_path');
++
++    // NotebookRead's own path key, independently of NotebookEdit's — a
++    // recorded mutation survivor (review Appendix, "NotebookRead path key ->
++    // file_path": survived, "NotebookRead is never tested"). The decoy
++    // file_path here is a path red MAY read (unclassified, not under
++    // src/**), and the notebook_path is under src/** and must be denied — a
++    // guard that consulted file_path instead would wrongly permit this call.
++    const readDecoy = runGuard({
++      agentType: 'tdd-red',
++      tool: 'NotebookRead',
++      input: {
++        file_path: path.join(sandbox, 'README.md'),
++        notebook_path: path.join(sandbox, 'src', 'nb.ipynb'),
++      },
++      sandbox,
++    });
++    assert.equal(readDecoy.status, 2, 'NotebookRead must be judged on notebook_path, not a decoy file_path');
++  } finally {
++    removeSandbox(sandbox);
++  }
++});
++
++test('guard: an unrecognized tool name denies rather than passing through', () => {
++  const sandbox = makeSandbox();
++  try {
++    const result = runGuard({
++      agentType: 'tdd-red',
++      tool: 'SomeFutureTool',
++      input: { file_path: path.join(sandbox, 'src', 'a.py') },
++      sandbox,
++    });
++    assert.equal(result.status, 2, 'an unrecognized tool should deny rather than pass through');
++  } finally {
++    removeSandbox(sandbox);
++  }
++});
++
++test('guard: an empty/missing file_path denies rather than permitting', () => {
++  const sandbox = makeSandbox();
++  try {
++    const empty = writeGuard(sandbox, '', 'tdd-red');
++    assert.equal(empty.status, 2, 'empty file_path should deny rather than permit');
++
++    const missing = runGuard({ agentType: 'tdd-red', tool: 'Write', input: {}, sandbox });
++    assert.equal(missing.status, 2, 'a missing file_path key should deny rather than permit');
++  } finally {
++    removeSandbox(sandbox);
++  }
++});
++
++// ---------------------------------------------------------------------------
++// Traversal and path normalisation
++// ---------------------------------------------------------------------------
++
++test('guard: a ".." segment in an absolute payload path denies for both red (source) and green (a path it could otherwise read)', () => {
++  const sandbox = makeSandbox();
++  try {
++    // Built with plain string concatenation, not path.join/path.resolve —
++    // those normalise away '..' segments as part of joining, which would
++    // silently erase the very defect this row exists to reproduce.
++    const traversalPath = `${sandbox}/../${path.basename(sandbox)}/src/a.py`;
++    const redRead = readGuard(sandbox, traversalPath, 'tdd-red');
++    assert.equal(redRead.status, 2, 'a .. segment should deny rather than escape classification for red');
++
++    // A SOURCE path for green's traversal case: a traversal to a *test* path
++    // would be denied by the ordinary "green may not read tests" rule even
++    // with the traversal guard removed, so it would not prove the guard is
++    // live.
++    const greenRead = readGuard(sandbox, traversalPath, 'tdd-green');
++    assert.equal(greenRead.status, 2, 'a .. segment should deny for green even on a path it could otherwise read');
++  } finally {
++    removeSandbox(sandbox);
++  }
++});
++
++test('guard: relative payload paths classify identically to absolute ones', () => {
++  const sandbox = makeSandbox();
++  try {
++    const relRead = readGuard(sandbox, 'src/a.py', 'tdd-red');
++    assert.equal(relRead.status, 2, 'a relative source path should still be denied to red');
++
++    const relWrite = writeGuard(sandbox, 'tests/test_a.py', 'tdd-red');
++    assert.equal(relWrite.status, 0, 'a relative test path should still be allowed to red');
++  } finally {
++    removeSandbox(sandbox);
++  }
++});
++
++// ---------------------------------------------------------------------------
++// Config presence and shape
++// ---------------------------------------------------------------------------
++
++test('guard: missing .tdd/config.json denies even an otherwise-legal write for a constrained role, but still permits the main thread', () => {
++  const sandbox = makeSandbox();
++  try {
++    fs.renameSync(path.join(sandbox, '.tdd', 'config.json'), path.join(sandbox, '.tdd', 'config.json.bak'));
++
++    const constrained = writeGuard(sandbox, path.join(sandbox, 'tests', 'test_a.py'), 'tdd-red');
++    assert.equal(constrained.status, 2, 'missing config should deny even an otherwise-legal write');
++
++    const mainThread = writeGuard(sandbox, path.join(sandbox, 'src', 'a.py'), undefined);
++    assert.equal(mainThread.status, 0, 'missing config must not widen: the main thread stays permitted');
++
++    fs.renameSync(path.join(sandbox, '.tdd', 'config.json.bak'), path.join(sandbox, '.tdd', 'config.json'));
++  } finally {
++    removeSandbox(sandbox);
++  }
++});
++
++test('guard: an EMPTY sandbox (.tdd/config.json absent entirely) produces exit 2 with a message naming /tdd-init, for a constrained role', () => {
++  const sandbox = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'tdd-guard-empty-')));
++  try {
++    // No .tdd directory at all — not merely a malformed file.
++    const result = writeGuard(sandbox, path.join(sandbox, 'anything.py'), 'tdd-red');
++    assert.equal(result.status, 2, 'an empty sandbox should deny for a constrained role');
++    assert.match(result.stderr, /\/tdd-init/, 'the denial message should point at /tdd-init');
++  } finally {
++    removeSandbox(sandbox);
++  }
++});
++
++test('guard: degenerate .tdd/config.json on-disk shapes deny rather than crash or permit', () => {
++  const sandbox = makeSandbox();
++  try {
++    const configPath = path.join(sandbox, '.tdd', 'config.json');
++
++    fs.writeFileSync(configPath, 'this is not json{{{');
++    const nonJson = writeGuard(sandbox, path.join(sandbox, 'tests', 'test_a.py'), 'tdd-red');
++    assert.equal(nonJson.status, 2, 'non-JSON config content should deny');
++
++    fs.writeFileSync(configPath, '');
++    const empty = writeGuard(sandbox, path.join(sandbox, 'tests', 'test_a.py'), 'tdd-red');
++    assert.equal(empty.status, 2, 'a 0-byte config file should deny');
++
++    fs.writeFileSync(configPath, '{}');
++    const emptyObject = writeGuard(sandbox, path.join(sandbox, 'tests', 'test_a.py'), 'tdd-red');
++    assert.equal(emptyObject.status, 2, 'a config file containing only {} should deny (no globs to verify against)');
++  } finally {
++    removeSandbox(sandbox);
++  }
++});
++
++// ---------------------------------------------------------------------------
++// Bash dispatch: per-role command selection
++// ---------------------------------------------------------------------------
++
++test('guard: bash dispatch selects candidate command templates BY ROLE', () => {
++  const sandbox = makeSandbox();
++  try {
++    // Red's own "single" branch, independently of green's.
++    const redSingle = bashGuard(sandbox, 'pytest -q tests/test_a.py::test_x', 'tdd-red');
++    assert.equal(redSingle.status, 0, "red should be permitted its own configured 'single' command");
++
++    const greenSingle = bashGuard(sandbox, 'pytest -q tests/test_a.py::test_x', 'tdd-green');
++    assert.equal(greenSingle.status, 0, "green should be permitted the configured 'single' command");
++
++    const refactorFull = bashGuard(sandbox, 'pytest -q', 'tdd-refactor');
++    assert.equal(refactorFull.status, 0, "refactor should be permitted the configured full-suite 'test' command");
++
++    const refactorComplexity = bashGuard(sandbox, 'radon cc -j -s src', 'tdd-refactor');
++    assert.equal(refactorComplexity.status, 0, "refactor should be permitted the configured 'complexity' command");
++
++    const mutateFull = bashGuard(sandbox, 'pytest -q', 'tdd-mutate');
++    assert.equal(mutateFull.status, 0, "mutate should be permitted the configured full-suite 'test' command");
++  } finally {
++    removeSandbox(sandbox);
++  }
++});
++
++test("guard: every role may run the configured coverage command, but a role's own phase-scoped command stays scoped", () => {
++  const sandbox = makeSandbox();
++  try {
++    const coverage = 'pytest -q --cov --cov-report=json:.tdd/coverage.json';
++    for (const role of ['tdd-red', 'tdd-green', 'tdd-refactor']) {
++      const result = bashGuard(sandbox, coverage, role);
++      assert.equal(result.status, 0, `${role} should be permitted to run the coverage command`);
++    }
++
++    const greenComplexity = bashGuard(sandbox, 'radon cc -j -s src', 'tdd-green');
++    assert.equal(greenComplexity.status, 2, 'green must not be permitted the complexity command configured for refactor');
++  } finally {
++    removeSandbox(sandbox);
++  }
++});
++
++test('guard: metacharacters appended after a legitimately-matched command prefix are still denied', () => {
++  const sandbox = makeSandbox();
++  try {
++    const result = bashGuard(sandbox, 'pytest -q --cov; rm -rf src', 'tdd-green');
++    assert.equal(result.status, 2, 'a coverage-prefix match must not waive the delta check');
++  } finally {
++    removeSandbox(sandbox);
++  }
++});
++
++test('guard: with commands.mutation non-null, tdd-mutate\'s bash dispatch exercises the mutation command branch', () => {
++  const sandbox = makeSandbox(FIXTURE_CONFIG_MUTATION_PATH);
++  try {
++    const result = bashGuard(sandbox, 'mutmut run', 'tdd-mutate');
++    assert.equal(result.status, 0, 'tdd-mutate should be permitted the configured mutation command when one is configured');
++  } finally {
++    removeSandbox(sandbox);
++  }
++});
++
++// ---------------------------------------------------------------------------
++// The version floor
++// ---------------------------------------------------------------------------
++
++test('guard: the version floor is checked FIRST, before anything else can throw — below NODE_FLOOR denies with a setup-pointing message', () => {
++  const wrapperDir = fs.mkdtempSync(path.join(os.tmpdir(), 'tdd-guard-version-'));
++  try {
++    const wrapperPath = path.join(wrapperDir, 'below-floor-wrapper.mjs');
++    const guardUrl = new URL('file://' + GUARD_MJS_PATH.replace(/\\/g, '/')).href;
++    fs.writeFileSync(
++      wrapperPath,
++      [
++        "Object.defineProperty(process, 'version', { value: 'v18.0.0', configurable: true });",
++        "Object.defineProperty(process.versions, 'node', { value: '18.0.0', configurable: true });",
++        `await import(${JSON.stringify(guardUrl)});`,
++      ].join('\n'),
++    );
++
++    const result = spawnSync(process.execPath, [wrapperPath], {
++      // Deliberately no valid payload on stdin — the version check must fire
++      // before the guard ever tries to read or parse it.
++      input: '',
++      encoding: 'utf8',
++    });
++    assert.equal(result.status, 2, 'a below-floor runtime should deny, checked ahead of any payload evaluation');
++    assert.match(result.stderr, /Node/, 'the denial should point at the Node runtime as the setup problem');
++  } finally {
++    fs.rmSync(wrapperDir, { recursive: true, force: true });
++  }
++});
++
++test('guard: an uncaught exception anywhere in the guard body still exits 2 — malformed JSON on stdin must not exit 1', () => {
++  const sandbox = makeSandbox();
++  try {
++    const result = spawnSync(process.execPath, [GUARD_MJS_PATH], {
++      input: 'this is not { valid json',
++      encoding: 'utf8',
++      env: { ...process.env, TDD_PROJECT_DIR: sandbox },
++    });
++    assert.equal(result.status, 2, 'malformed JSON on stdin must exit 2 (deny), not 1 (which PreToolUse treats as a non-blocking permit)');
++    assert.notEqual(result.stderr, '', 'a wrapped exception should still emit a denial message');
++  } finally {
++    removeSandbox(sandbox);
++  }
++});
+diff --git a/tests/guard.test.sh b/tests/guard.test.sh
+deleted file mode 100644
+index 95781cc..0000000
+--- a/tests/guard.test.sh
++++ /dev/null
+@@ -1,206 +0,0 @@
+-# Sourced by tests/run.sh. Do not add a shebang, set -e, or exit.
+-
+-GUARD="$REPO_ROOT/hooks/guard.sh"
+-SANDBOX="$(mktemp -d)"
+-mkdir -p "$SANDBOX/.tdd"
+-cp "$REPO_ROOT/tests/fixtures/config.json" "$SANDBOX/.tdd/config.json"
+-
+-# AGENT is the payload's agent_type. Empty means a main-thread call, which
+-# omits the key entirely -- matching what the spike observed.
+-#
+-# Real dispatches carry the NAMESPACED form, "claude-tdd:tdd-red". Tests below
+-# exercise both that and the bare name: the bare name is what a hand-written
+-# payload or a differently-packaged install might send, and the namespaced one
+-# is what actually arrives. Testing only the bare form is how the namespace
+-# defect survived five tasks with a green suite.
+-AGENT=""
+-
+-payload() { # <tool> <key> <value>
+-  if [ -n "$AGENT" ]; then
+-    printf '{"hook_event_name":"PreToolUse","agent_id":"a123","agent_type":"%s","tool_name":"%s","tool_input":{"%s":"%s"}}' \
+-      "$AGENT" "$1" "$2" "$3"
+-  else
+-    printf '{"hook_event_name":"PreToolUse","tool_name":"%s","tool_input":{"%s":"%s"}}' "$1" "$2" "$3"
+-  fi
+-}
+-payload_read()  { payload Read  file_path "$1"; }
+-payload_write() { payload Write file_path "$1"; }
+-payload_bash()  { payload Bash  command   "$1"; }
+-
+-# run_guard <agent_type-or-empty> <payload-fn> <arg> ; echoes "<exit>|<stderr>"
+-run_guard() {
+-  AGENT="$1"
+-  local body err rc
+-  body=$("$2" "$3")
+-  err=$(printf '%s' "$body" | TDD_PROJECT_DIR="$SANDBOX" bash "$GUARD" 2>&1 >/dev/null)
+-  rc=$?
+-  printf '%s|%s' "$rc" "$err"
+-}
+-
+-# --- inert unless a constrained agent is calling ---
+-out=$(run_guard "" payload_write "$SANDBOX/src/a.py")
+-assert_eq "0|" "$out" "main thread (no agent_type): permits silently"
+-
+-out=$(run_guard "general-purpose" payload_write "$SANDBOX/src/a.py")
+-assert_eq "0|" "$out" "unrelated agent type: permits silently"
+-
+-out=$(run_guard "" payload_read "$SANDBOX/tests/test_a.py")
+-assert_eq "0|" "$out" "orchestrator may read tests"
+-
+-out=$(run_guard "" payload_bash "git diff --name-only")
+-assert_eq "0|" "$out" "orchestrator may run its own audit command"
+-
+-# red
+-out=$(run_guard "tdd-red" payload_write "$SANDBOX/tests/test_a.py")
+-assert_eq "0|" "$out" "red writing a test is permitted"
+-
+-out=$(run_guard "tdd-red" payload_write "$SANDBOX/src/a.py")
+-assert_contains "2|" "$out" "red writing source exits 2"
+-assert_contains "\"permissionDecision\":\"deny\"" "$out" "denial JSON has deny decision"
+-assert_contains "only write test files" "$out" "denial names the violated rule"
+-
+-out=$(run_guard "tdd-red" payload_read "$SANDBOX/src/a.py")
+-assert_contains "2|" "$out" "red reading source is denied"
+-
+-# green
+-out=$(run_guard "tdd-green" payload_read "$SANDBOX/tests/test_a.py")
+-assert_contains "2|" "$out" "green reading a test is denied"
+-
+-out=$(run_guard "tdd-green" payload_write "$SANDBOX/src/a.py")
+-assert_eq "0|" "$out" "green writing source is permitted"
+-
+-# bash
+-out=$(run_guard "tdd-green" payload_bash "pytest -q tests/test_a.py::test_x")
+-assert_eq "0|" "$out" "green running the configured single-test command is permitted"
+-
+-out=$(run_guard "tdd-green" payload_bash "rm -rf src")
+-assert_contains "2|" "$out" "green running an arbitrary command is denied"
+-
+-out=$(run_guard "tdd-refactor" payload_bash "pytest -q")
+-assert_eq "0|" "$out" "refactor running the full suite is permitted"
+-
+-# every role may measure its own coverage
+-COV="pytest -q --cov --cov-report=json:.tdd/coverage.json"
+-out=$(run_guard "tdd-red" payload_bash "$COV")
+-assert_eq "0|" "$out" "red may run the coverage command"
+-out=$(run_guard "tdd-green" payload_bash "$COV")
+-assert_eq "0|" "$out" "green may run the coverage command"
+-out=$(run_guard "tdd-refactor" payload_bash "$COV")
+-assert_eq "0|" "$out" "refactor may run the coverage command"
+-
+-# but the phase's own test command is still scoped
+-out=$(run_guard "tdd-green" payload_bash "pytest -q --cov; rm -rf src")
+-assert_contains "2|" "$out" "metacharacters after a coverage prefix are still denied"
+-
+-# phase-scoped measurement commands
+-out=$(run_guard "tdd-refactor" payload_bash "radon cc -j -s src")
+-assert_eq "0|" "$out" "refactor may run the complexity command"
+-out=$(run_guard "tdd-green" payload_bash "radon cc -j -s src")
+-assert_contains "2|" "$out" "green may not run the complexity command"
+-
+-# tdd-mutate writes source like refactor does
+-out=$(run_guard "tdd-mutate" payload_write "$SANDBOX/src/a.py")
+-assert_eq "0|" "$out" "tdd-mutate may write source"
+-out=$(run_guard "tdd-mutate" payload_read "$SANDBOX/tests/test_a.py")
+-assert_contains "2|" "$out" "tdd-mutate may not read tests"
+-out=$(run_guard "tdd-mutate" payload_bash "pytest -q")
+-assert_eq "0|" "$out" "tdd-mutate may run the full suite"
+-
+-# --- the namespaced form is what real dispatches actually send ---
+-out=$(run_guard "claude-tdd:tdd-red" payload_write "$SANDBOX/src/a.py")
+-assert_contains "2|" "$out" "namespaced tdd-red writing source is denied"
+-out=$(run_guard "claude-tdd:tdd-red" payload_write "$SANDBOX/tests/test_a.py")
+-assert_eq "0|" "$out" "namespaced tdd-red writing a test is allowed"
+-out=$(run_guard "claude-tdd:tdd-green" payload_read "$SANDBOX/tests/test_a.py")
+-assert_contains "2|" "$out" "namespaced tdd-green reading a test is denied"
+-out=$(run_guard "claude-tdd:tdd-mutate" payload_bash "pytest -q")
+-assert_eq "0|" "$out" "namespaced tdd-mutate may run the full suite"
+-
+-# An agent this plugin does not own is none of our business, even if its
+-# name happens to start with tdd-. Permitting is correct here; the guard
+-# constrains exactly the four roles it defines and nothing else.
+-out=$(run_guard "tdd-bogus" payload_write "$SANDBOX/src/a.py")
+-assert_eq "0|" "$out" "unrecognized tdd-* agent permits"
+-
+-# --- every file-writing tool must be judged, not just Write/Edit ---
+-#
+-# Hook matchers are unanchored regex, so `Edit` also delivers `MultiEdit` and
+-# `NotebookEdit`. A tool that fell through to `exit 0` would let Red write
+-# source with no check at all -- invisible, because nothing downstream can
+-# tell a permitted write from one that was never attempted.
+-for _t in Write Edit MultiEdit; do
+-  out=$(AGENT="tdd-red"; printf '{"hook_event_name":"PreToolUse","agent_id":"a123","agent_type":"tdd-red","tool_name":"%s","tool_input":{"file_path":"%s"}}' "$_t" "$SANDBOX/src/a.py" \
+-        | TDD_PROJECT_DIR="$SANDBOX" bash "$GUARD" 2>&1 >/dev/null; printf '%s' "|$?")
+-  assert_contains "|2" "$out" "red writing source via $_t is denied"
+-done
+-
+-# The path key must be chosen by tool. A NotebookEdit payload carrying a
+-# benign file_path alongside a real-target notebook_path must be judged on the
+-# field the tool actually acts on -- otherwise the guard validates something
+-# the tool ignores and permits the write it should have caught.
+-out=$(printf '{"hook_event_name":"PreToolUse","agent_id":"a123","agent_type":"tdd-red","tool_name":"NotebookEdit","tool_input":{"file_path":"%s","notebook_path":"%s"}}' "$SANDBOX/tests/test_a.py" "$SANDBOX/src/nb.ipynb" \
+-      | TDD_PROJECT_DIR="$SANDBOX" bash "$GUARD" 2>&1 >/dev/null; printf '%s' "|$?")
+-assert_contains "|2" "$out" "NotebookEdit is judged on notebook_path, not a decoy file_path"
+-
+-# NotebookEdit carries notebook_path, not file_path.
+-out=$(printf '{"hook_event_name":"PreToolUse","agent_id":"a123","agent_type":"tdd-red","tool_name":"NotebookEdit","tool_input":{"notebook_path":"%s"}}' "$SANDBOX/src/nb.ipynb" \
+-      | TDD_PROJECT_DIR="$SANDBOX" bash "$GUARD" 2>&1 >/dev/null; printf '%s' "|$?")
+-assert_contains "|2" "$out" "red writing source via NotebookEdit is denied"
+-
+-out=$(printf '{"hook_event_name":"PreToolUse","agent_id":"a123","agent_type":"tdd-red","tool_name":"SomeFutureTool","tool_input":{"file_path":"%s"}}' "$SANDBOX/src/a.py" \
+-      | TDD_PROJECT_DIR="$SANDBOX" bash "$GUARD" 2>&1 >/dev/null; printf '%s' "|$?")
+-assert_contains "|2" "$out" "an unrecognized tool denies rather than passing through"
+-
+-# --- a payload the guard cannot classify must deny, not pass ---
+-out=$(run_guard "tdd-red" payload_write "")
+-assert_contains "2|" "$out" "empty file_path denies rather than permitting"
+-
+-# Traversal: this resolves back inside the project but does not start with
+-# "$root/", so an unguarded strip would leave it absolute, match no glob, and
+-# permit the read.
+-out=$(run_guard "tdd-red" payload_read "$SANDBOX/../$(basename "$SANDBOX")/src/a.py")
+-assert_contains "2|" "$out" "a .. segment denies rather than escaping classification"
+-# Use a SOURCE path for green's traversal case. A traversal to a *test* path
+-# would be denied by the ordinary "green may not read tests" rule even with the
+-# traversal guard removed, so it would not prove the guard is live.
+-out=$(run_guard "tdd-green" payload_read "$SANDBOX/../$(basename "$SANDBOX")/src/a.py")
+-assert_contains "2|" "$out" "a .. segment denies for green even on a path it could otherwise read"
+-
+-# Repo-relative paths must classify identically to absolute ones.
+-out=$(run_guard "tdd-red" payload_read "src/a.py")
+-assert_contains "2|" "$out" "relative source path is still denied to red"
+-out=$(run_guard "tdd-red" payload_write "tests/test_a.py")
+-assert_eq "0|" "$out" "relative test path is still allowed to red"
+-
+-# An un-normalised `./x`, `x//y`, or trailing-slash root strips to something
+-# that matches no glob, and because reads are a denylist, no-match means
+-# allow. Verified against this repo's own live config before this fix
+-# landed: red was denied "e2e/src/calc/__init__.py" but permitted the same
+-# file spelled "./e2e/src/calc/__init__.py" or "e2e//src/calc/__init__.py".
+-#
+-# The green case below deliberately uses a filename that is NOT test_*.py.
+-# "**/test_*.py" is a catch-all glob permissive enough to match an
+-# un-normalised "./tests/test_a.py" by coincidence (it matches anything
+-# ending in "/test_<x>.py" regardless of what precedes it), which would make
+-# that assertion pass whether or not normalization actually ran -- the same
+-# trap that let "a .. segment denies for green too" pass for the wrong
+-# reason in an earlier round. "helpers.py" only matches via "tests/**", so
+-# it genuinely exercises the fix.
+-out=$(run_guard "tdd-red" payload_read "$SANDBOX/./src/a.py")
+-assert_contains "2|" "$out" "a leading ./ segment in an absolute path still denies red reading source"
+-out=$(run_guard "tdd-red" payload_read "$SANDBOX//src/a.py")
+-assert_contains "2|" "$out" "a doubled slash in an absolute path still denies red reading source"
+-out=$(run_guard "tdd-red" payload_read "./src/a.py")
+-assert_contains "2|" "$out" "a leading ./ segment in a relative path still denies red reading source"
+-out=$(run_guard "tdd-green" payload_read "./tests/helpers.py")
+-assert_contains "2|" "$out" "a leading ./ segment in a relative path still denies green reading a test"
+-
+-# --- fails closed once a role IS recognized ---
+-mv "$SANDBOX/.tdd/config.json" "$SANDBOX/.tdd/config.json.bak"
+-out=$(run_guard "tdd-red" payload_write "$SANDBOX/tests/test_a.py")
+-assert_contains "2|" "$out" "missing config denies even for an otherwise-legal write"
+-out=$(run_guard "" payload_write "$SANDBOX/src/a.py")
+-assert_eq "0|" "$out" "missing config still permits the main thread"
+-mv "$SANDBOX/.tdd/config.json.bak" "$SANDBOX/.tdd/config.json"
+-
+-rm -rf "$SANDBOX"
+diff --git a/tests/rules.test.mjs b/tests/rules.test.mjs
+index bcca93c..f7b8bf6 100644
+--- a/tests/rules.test.mjs
++++ b/tests/rules.test.mjs
+@@ -366,22 +366,39 @@ test('case-fold: a wrong-case READ of an uppercase test file still denies for gr
+ 
+ test('case-fold: a wrong-case WRITE is DENIED, not folded into an allow (allowlist must not widen)', () => {
+   // 'SRC/a.py' case-folds to something 'src/**' would match, but a write
+   // matches the allowlist on the LITERAL path only. Folding here would
+   // permit more than the config actually authorised — the exact asymmetry
+   // the spec calls out as "a false denial ... loud and safe" being the
+   // correct, deliberate outcome.
+   assertDeny(pathVerdict({ role: GREEN, mode: 'write', relPath: 'SRC/a.py', testGlobs: TEST_GLOBS, sourceGlobs: SOURCE_GLOBS }));
+ });
+ 
+-test('case-fold: a wrong-case WRITE of a test file is DENIED for red too', () => {
+-  assertDeny(pathVerdict({ role: RED, mode: 'write', relPath: 'TESTS/test_a.py', testGlobs: TEST_GLOBS, sourceGlobs: SOURCE_GLOBS }));
++test('case-fold: a wrong-case WRITE of a test file is DENIED for red too, against a directory-anchored glob', () => {
++  // The shared TEST_GLOBS cannot demonstrate this property: its second entry,
++  // '**/test_*.py', is DIRECTORY-AGNOSTIC by construction — a leading '**/'
++  // consumes whatever segment precedes the basename, including 'TESTS',
++  // without regard to case, because there is no literal character in '**' to
++  // be case-sensitive about. 'TESTS/test_a.py' therefore matches
++  // '**/test_*.py' LITERALLY, with no folding involved at all, and the
++  // config genuinely authorises that write — asserting DENY against
++  // TEST_GLOBS would pin a false property, not a folding bug (ruled: the
++  // TEST_GLOBS-based version of this test was wrong, not the implementation;
++  // bash's tdd_glob_match has the identical directory-agnostic behaviour).
++  //
++  // A DIRECTORY-ANCHORED glob (tests/**-shaped, no leading **/) is what
++  // actually exercises "the allowlist matches the literal path only": the
++  // wrong-case 'TESTS' segment fails a literal 'tests/**' match, so the
++  // write must stay denied rather than being folded into an allow — the
++  // same asymmetry the 'SRC/a.py' sibling test above pins for green/source.
++  const DIRECTORY_ANCHORED_TEST_GLOBS = ['tests/**'];
++  assertDeny(pathVerdict({ role: RED, mode: 'write', relPath: 'TESTS/test_a.py', testGlobs: DIRECTORY_ANCHORED_TEST_GLOBS, sourceGlobs: SOURCE_GLOBS }));
+ });
+ 
+ test('case-fold: literal-case WRITE still allows (sanity baseline — folding is additive for reads only, not a break of the ordinary case)', () => {
+   assertAllow(pathVerdict({ role: GREEN, mode: 'write', relPath: 'src/a.py', testGlobs: TEST_GLOBS, sourceGlobs: SOURCE_GLOBS }));
+ });
+ 
+ // ---------------------------------------------------------------------------
+ // Bash allowlist: bashVerdict(command, template)
+ // ---------------------------------------------------------------------------
+ 
+diff --git a/tests/rules.test.sh b/tests/rules.test.sh
+deleted file mode 100644
+index 228d5ab..0000000
+--- a/tests/rules.test.sh
++++ /dev/null
+@@ -1,185 +0,0 @@
+-# Sourced by tests/run.sh. Do not add a shebang, set -e, or exit.
+-# shellcheck disable=SC1091
+-. "$REPO_ROOT/hooks/lib/rules.sh"
+-
+-TG="tests/** **/test_*.py"
+-SG="src/**"
+-
+-# --- glob matching ---
+-tdd_glob_match "tests/**" "tests/a/b.py" && r=yes || r=no
+-assert_eq "yes" "$r" "** normalizes and matches across directories"
+-
+-tdd_glob_match "src/**" "tests/a.py" && r=yes || r=no
+-assert_eq "no" "$r" "non-matching glob returns 1"
+-
+-tdd_glob_match "**/test_*.py" "pkg/sub/test_thing.py" && r=yes || r=no
+-assert_eq "yes" "$r" "leading ** matches nested path"
+-
+-# --- red ---
+-assert_eq "allow" "$(tdd_path_verdict red write tests/test_a.py "$TG" "$SG")" \
+-  "red may write a test file"
+-assert_contains "deny" "$(tdd_path_verdict red write src/a.py "$TG" "$SG")" \
+-  "red may not write source"
+-assert_contains "deny" "$(tdd_path_verdict red read src/a.py "$TG" "$SG")" \
+-  "red may not read source"
+-assert_eq "allow" "$(tdd_path_verdict red read README.md "$TG" "$SG")" \
+-  "red may read an unclassified file"
+-assert_eq "allow" "$(tdd_path_verdict red read tests/test_a.py "$TG" "$SG")" \
+-  "red may read its own tests"
+-
+-# --- green ---
+-assert_eq "allow" "$(tdd_path_verdict green write src/a.py "$TG" "$SG")" \
+-  "green may write source"
+-assert_contains "deny" "$(tdd_path_verdict green write tests/test_a.py "$TG" "$SG")" \
+-  "green may not write tests"
+-assert_contains "deny" "$(tdd_path_verdict green read tests/test_a.py "$TG" "$SG")" \
+-  "green may not read tests"
+-assert_eq "allow" "$(tdd_path_verdict green read src/a.py "$TG" "$SG")" \
+-  "green may read source"
+-
+-# --- refactor ---
+-assert_eq "allow" "$(tdd_path_verdict refactor write src/a.py "$TG" "$SG")" \
+-  "refactor may write source"
+-assert_contains "deny" "$(tdd_path_verdict refactor read tests/test_a.py "$TG" "$SG")" \
+-  "refactor may not read tests"
+-
+-# --- mutation: same path rules as refactor; the revert discipline is the
+-# agent's and the orchestrator's job, not the guard's ---
+-assert_eq "allow" "$(tdd_path_verdict mutation write src/a.py "$TG" "$SG")" \
+-  "mutation may write source"
+-assert_contains "deny" "$(tdd_path_verdict mutation write tests/test_a.py "$TG" "$SG")" \
+-  "mutation may not write tests"
+-assert_contains "deny" "$(tdd_path_verdict mutation read tests/test_a.py "$TG" "$SG")" \
+-  "mutation may not read tests"
+-
+-# --- fail closed ---
+-assert_contains "deny" "$(tdd_path_verdict "" write src/a.py "$TG" "$SG")" \
+-  "empty role denies"
+-assert_contains "deny" "$(tdd_path_verdict bogus write src/a.py "$TG" "$SG")" \
+-  "unknown role denies"
+-assert_contains "deny" "$(tdd_path_verdict red read src/a.py "$TG" "")" \
+-  "empty source globs deny a read rather than permitting it"
+-assert_contains "deny" "$(tdd_path_verdict green read tests/test_a.py "" "$SG")" \
+-  "empty test globs deny a read rather than permitting it"
+-assert_contains "deny" "$(tdd_path_verdict red write tests/test_a.py "" "$SG")" \
+-  "empty test globs deny a write"
+-
+-# --- REGRESSION: alternative spellings of the same path must agree ---
+-#
+-# guard.sh strips the project root by literal prefix, so an un-normalised
+-# `./x` or `x//y` fails to strip and then matches no glob. On a READ that
+-# means ALLOW, because reads are a denylist. Verified live before the fix:
+-# red was denied `e2e/src/calc/__init__.py` and permitted the identical file
+-# spelled `./e2e/src/calc/__init__.py`.
+-assert_eq "e2e/src/a.py" "$(tdd_normalize_path "./e2e/src/a.py")" \
+-  "leading ./ is stripped"
+-assert_eq "e2e/src/a.py" "$(tdd_normalize_path "e2e//src/a.py")" \
+-  "repeated slashes collapse"
+-assert_eq "e2e/src/a.py" "$(tdd_normalize_path "e2e/./src/a.py")" \
+-  "/./ segments collapse"
+-assert_eq "e2e/src/a.py" "$(tdd_normalize_path ".//e2e/./src//a.py")" \
+-  "all three at once"
+-assert_eq "/abs/e2e/src/a.py" "$(tdd_normalize_path "/abs//e2e/./src/a.py")" \
+-  "an absolute path keeps its leading slash"
+-assert_eq "" "$(tdd_normalize_path "")" \
+-  "empty input stays empty rather than erroring"
+-
+-# --- REGRESSION: the verdict must not depend on what is on disk ---
+-#
+-# An unquoted glob string undergoes pathname expansion as well as word
+-# splitting, so `src/**` would be replaced by whatever files exist. That made
+-# `red read src/pkg/module.py` return "allow" from a directory containing
+-# src/, and "deny" from anywhere else -- a silent fail-open on the one rule
+-# nothing else in the design can enforce.
+-#
+-# These run inside a scratch tree whose shape would trigger the bug.
+-_glob_sandbox="$(mktemp -d)"
+-mkdir -p "$_glob_sandbox/src/pkg" "$_glob_sandbox/tests"
+-touch "$_glob_sandbox/src/a.py" "$_glob_sandbox/src/pkg/module.py" \
+-      "$_glob_sandbox/tests/test_a.py"
+-_glob_prevpwd="$PWD"
+-cd "$_glob_sandbox" || return
+-
+-assert_contains "deny" "$(tdd_path_verdict red read src/pkg/module.py "$TG" "$SG")" \
+-  "red may not read nested source even when src/ exists on disk"
+-assert_contains "deny" "$(tdd_path_verdict red read src/a.py "$TG" "$SG")" \
+-  "red may not read top-level source even when it exists on disk"
+-assert_contains "deny" "$(tdd_path_verdict green read tests/test_a.py "$TG" "$SG")" \
+-  "green may not read an existing test file"
+-assert_eq "allow" "$(tdd_path_verdict green write src/pkg/module.py "$TG" "$SG")" \
+-  "green may write nested source that exists on disk"
+-assert_eq "allow" "$(tdd_path_verdict green write src/pkg/brand_new.py "$TG" "$SG")" \
+-  "green may write nested source that does NOT exist yet"
+-
+-cd "$_glob_prevpwd" || return
+-rm -rf "$_glob_sandbox"
+-
+-# The caller's noglob setting must survive unchanged.
+-set +f
+-tdd_matches_any "src/a.py" "$SG" || true
+-case "$-" in *f*) _noglob_leaked=yes ;; *) _noglob_leaked=no ;; esac
+-assert_eq "no" "$_noglob_leaked" "tdd_matches_any restores the caller's noglob flag"
+-
+-# --- bash allowlist ---
+-T_SINGLE="pytest -q {testId}"
+-T_FULL="pytest -q"
+-T_COV="pytest -q --cov --cov-report=json:.tdd/coverage.json"
+-
+-assert_eq "allow" "$(tdd_bash_verdict "pytest -q tests/test_a.py::test_x" "$T_SINGLE")" \
+-  "substituted test id is allowed"
+-assert_eq "allow" "$(tdd_bash_verdict "pytest -q" "$T_FULL")" \
+-  "exact template match is allowed"
+-assert_eq "allow" "$(tdd_bash_verdict "$T_COV" "$T_COV")" \
+-  "template containing a colon path is allowed verbatim"
+-
+-assert_contains "deny" "$(tdd_bash_verdict "rm -rf src" "$T_FULL")" \
+-  "unrelated command is denied"
+-assert_contains "deny" "$(tdd_bash_verdict "pytest -q; rm -rf src" "$T_FULL")" \
+-  "semicolon in delta is denied"
+-assert_contains "deny" "$(tdd_bash_verdict "pytest -q | tee out.txt" "$T_FULL")" \
+-  "pipe in delta is denied"
+-assert_contains "deny" "$(tdd_bash_verdict "pytest -q > out.txt" "$T_FULL")" \
+-  "redirect in delta is denied"
+-assert_contains "deny" "$(tdd_bash_verdict 'pytest -q $(whoami)' "$T_FULL")" \
+-  "command substitution in delta is denied"
+-assert_contains "deny" "$(tdd_bash_verdict "pytest -q && rm -rf src" "$T_FULL")" \
+-  "and-chain in delta is denied"
+-assert_contains "deny" "$(tdd_bash_verdict "sed -i s/a/b/ src/a.py" "$T_SINGLE")" \
+-  "in-place edit via bash is denied"
+-assert_contains "deny" "$(tdd_bash_verdict "pytest -q" "")" \
+-  "empty template denies"
+-
+-# --- REGRESSION: a template with no static prefix must not wave everything
+-# through. An empty prefix makes the prefix test `case "$cmd" in *)`, which
+-# matches any string, leaving only the metacharacter ban -- so an arbitrary
+-# command with clean punctuation would be permitted.
+-assert_contains "deny" "$(tdd_bash_verdict "cp -r /etc /tmp/exfil" "   ")" \
+-  "whitespace-only template denies rather than allowing any clean command"
+-assert_contains "deny" "$(tdd_bash_verdict "rm -rf /tmp/pwned" "{cmd}")" \
+-  "placeholder-only template denies"
+-assert_contains "deny" "$(tdd_bash_verdict "anything at all" "{a} {b}")" \
+-  "template starting with a placeholder denies"
+-
+-# A tab before the placeholder must be trimmed like a space, or every normal
+-# invocation would fail the prefix match.
+-assert_eq "allow" "$(tdd_bash_verdict "pytest -q tests/t.py::x" "$(printf 'pytest -q\t{testId}')")" \
+-  "trailing tab is trimmed from the static prefix"
+-
+-# --- REGRESSION: glob characters in the agent-supplied portion are data,
+-# not a pattern. `case` only reinterprets the pattern side of a match, never
+-# the subject, but this pins it directly rather than trusting that reasoning
+-# -- pytest parametrized node ids routinely contain `[` and `-k` expressions
+-# routinely contain `*`.
+-assert_eq "allow" "$(tdd_bash_verdict "pytest -q tests/test_a.py::test_x[case-1]" "$T_SINGLE")" \
+-  "glob characters in a parametrized test id are treated as data, not a pattern"
+-assert_eq "allow" "$(tdd_bash_verdict "pytest -q -k test_*" "$T_FULL")" \
+-  "glob characters after the prefix are treated as literal data, not a pattern"
+-
+-# --- REGRESSION: a missing (not just empty) template must not crash the
+-# sourcing script under `set -u`. An unset positional in a bare `$2` aborts
+-# the caller with a non-blocking exit code, which lets the tool call through
+-# instead of denying it -- the same fail-open class as Task 3's unquoted
+-# glob bug. Run through a subshell so a crash here is visible as an empty
+-# result rather than killing the whole suite.
+-assert_contains "deny" "$(tdd_bash_verdict "pytest -q" 2>/dev/null)" \
+-  "missing template argument denies rather than crashing"
+diff --git a/tests/run.sh b/tests/run.sh
+deleted file mode 100755
+index a9b8673..0000000
+--- a/tests/run.sh
++++ /dev/null
+@@ -1,48 +0,0 @@
+-#!/usr/bin/env bash
+-# Zero-dependency test harness. Sources every *.test.sh in this directory.
+-set -uo pipefail
+-
+-PASS=0
+-FAIL=0
+-
+-assert_eq() { # expected actual name
+-  if [ "$1" = "$2" ]; then
+-    printf '  PASS: %s\n' "$3"; PASS=$((PASS + 1))
+-  else
+-    printf '  FAIL: %s\n    expected: %s\n    actual:   %s\n' "$3" "$1" "$2"
+-    FAIL=$((FAIL + 1))
+-  fi
+-}
+-
+-assert_contains() { # needle haystack name
+-  case "$2" in
+-    *"$1"*) printf '  PASS: %s\n' "$3"; PASS=$((PASS + 1)) ;;
+-    *) printf '  FAIL: %s\n    expected to contain: %s\n    actual: %s\n' "$3" "$1" "$2"
+-       FAIL=$((FAIL + 1)) ;;
+-  esac
+-}
+-
+-TESTS_DIR="$(cd "$(dirname "$0")" && pwd)"
+-export REPO_ROOT="$(cd "$TESTS_DIR/.." && pwd)"
+-
+-FOUND=0
+-for t in "$TESTS_DIR"/*.test.sh; do
+-  [ -e "$t" ] || continue
+-  FOUND=1
+-  printf '\n--- %s ---\n' "$(basename "$t")"
+-  BEFORE=$((PASS + FAIL))
+-  # shellcheck disable=SC1090
+-  . "$t"
+-  if [ "$((PASS + FAIL))" -eq "$BEFORE" ]; then
+-    printf '  FAIL: %s contributed no assertions\n' "$(basename "$t")"
+-    FAIL=$((FAIL + 1))
+-  fi
+-done
+-
+-if [ "$FOUND" -eq 0 ]; then
+-  printf '\n  FAIL: no *.test.sh files found in %s\n' "$TESTS_DIR"
+-  FAIL=$((FAIL + 1))
+-fi
+-
+-printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
+-[ "$FAIL" -eq 0 ]
+diff --git a/tests/smoke.test.sh b/tests/smoke.test.sh
+deleted file mode 100644
+index d36dbdc..0000000
+--- a/tests/smoke.test.sh
++++ /dev/null
+@@ -1,4 +0,0 @@
+-# Sourced by tests/run.sh. Do not add a shebang, set -e, or exit.
+-
+-assert_eq "hello" "$(printf 'hello')" "harness compares equal strings"
+-assert_contains "ell" "hello" "harness finds a substring"
+diff --git a/tsconfig.json b/tsconfig.json
+new file mode 100644
+index 0000000..5a7a3b0
+--- /dev/null
++++ b/tsconfig.json
+@@ -0,0 +1,14 @@
++{
++  "compilerOptions": {
++    "target": "ES2023",
++    "lib": ["ES2023"],
++    "module": "nodenext",
++    "moduleResolution": "nodenext",
++    "types": ["node"],
++    "allowJs": true,
++    "checkJs": true,
++    "noEmit": true,
++    "strict": true
++  },
++  "include": ["hooks/**/*.mjs"]
++}

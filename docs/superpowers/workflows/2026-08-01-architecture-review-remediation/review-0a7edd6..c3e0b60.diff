@@ -1,0 +1,187 @@
+# Review package: 0a7edd6..c3e0b60
+
+## Commits
+c3e0b60 fix(spec): correct the revert pathspec claim to match the fix
+9722bae fix(skill): scope revert to the check's full path list, not a subset
+5e23898 fix(skill): scope dispatch revert to the audit's offending paths
+
+## Files changed
+ .../2026-07-30-tdd-subagent-workflow-design.md     |  2 +-
+ skills/run-tdd-cycle/SKILL.md                      | 48 ++++++++++++++++------
+ 2 files changed, 37 insertions(+), 13 deletions(-)
+
+## Diff
+diff --git a/docs/superpowers/specs/2026-07-30-tdd-subagent-workflow-design.md b/docs/superpowers/specs/2026-07-30-tdd-subagent-workflow-design.md
+index e525298..6978c33 100644
+--- a/docs/superpowers/specs/2026-07-30-tdd-subagent-workflow-design.md
++++ b/docs/superpowers/specs/2026-07-30-tdd-subagent-workflow-design.md
+@@ -296,21 +296,21 @@ Several branches discard an agent's work. **`git checkout -- .` does not do it**
+ 
+ Revert means both:
+ 
+ ```
+ git checkout -- <pathspec>     # restore tracked edits
+ git clean -fd -- <pathspec>    # remove new files
+ ```
+ 
+ Only `clean` takes a pathspec; `git reset --hard -- <path>` fails outright. Reset is therefore tree-wide, which is safe only because preflight requires a clean tree and exactly one agent writes per dispatch.
+ 
+-**The pathspec is the offending paths the audit reported, not the role's write globs** *(iteration 2)*. Scoping to the role's globs was wrong in the one scenario the revert exists for: a guardrail violation is *by definition* a write to a path that does not match the role's globs — that is what makes it a violation rather than ordinary work. In the backstop case the audit exists to catch, the rogue file sits outside the glob by construction, and a glob-scoped `clean` cannot touch it. Fall back to the role's globs only when the audit named no offending path, which is the ordinary discard case (a rejected `passing-flat` test) rather than a violation.
++**The pathspec is every path the triggering check found, not the role's write globs** *(iteration 2)*. Scoping to the role's globs was wrong in the one scenario the revert exists for: a guardrail violation is *by definition* a write to a path that does not match the role's globs — that is what makes it a violation rather than ordinary work. In the backstop case the audit exists to catch, the rogue file sits outside the glob by construction, and a glob-scoped `clean` cannot touch it. Nor is the pathspec only the paths that broke the match: a violating dispatch usually also writes legitimate in-glob files alongside the rogue one, and scoping to the offending subset alone leaves those behind — reproducing this section's founding bug (a rejected file surviving to be swept into a later commit) for the half of the dispatch that happened to pass. Fall back to the role's globs only when the triggering check named nothing at all, which is the ordinary discard case (a rejected `passing-flat` test) rather than a violation.
+ 
+ This is the third instance of the same class — a revert that does not revert. The first two were command choice (`git checkout -- .` leaving untracked files; `git reset --hard` with the same blind spot); this one is scoping.
+ 
+ ### Paths are canonicalised before matching *(iteration 2 — was "normalised")*
+ 
+ The guard strips the project root by literal prefix, and the glob match then needs the relative path to start with a glob's prefix. Any spelling that defeats that lexical match reaches no glob — and because reads are a denylist, **no match means allow**. Every such spelling is therefore a read-isolation bypass, silent and invisible in any diff.
+ 
+ Note the asymmetry that makes this dangerous rather than merely wrong: `Write E2E/src/...` is correctly *denied*, because writes are an allowlist and fail closed. Only reads leak.
+ 
+ **Lexical normalisation cannot establish path identity, and the project proved it the expensive way.** Path identity on a real filesystem involves case-folding rules, symlinks, hardlinks, and mount aliases — none of them lexical properties. Four separate one-spelling fixes shipped (`./x`, `x//y`, a root ending `/.`, traversal), and the review still reproduced live bypasses in every remaining spelling: `E2E/src/...` and `e2e/SRC/...` resolve to the same files on a case-insensitive filesystem while the matcher treats them as different, in both directions; and a root spelled `$ROOT/.` defeated the prefix strip entirely. **That last one is the fix the ledger recorded as complete: it landed in the plan and the spec, and never in the code.** A direct diff of the plan's embedded `rules.sh` against the shipped file showed exactly one missing line.
+diff --git a/skills/run-tdd-cycle/SKILL.md b/skills/run-tdd-cycle/SKILL.md
+index ba1db2c..5d240c5 100644
+--- a/skills/run-tdd-cycle/SKILL.md
++++ b/skills/run-tdd-cycle/SKILL.md
+@@ -134,38 +134,60 @@ An interrupted run resumes from this file, not from your context — the branch
+ 
+ ## Reverting a dispatch
+ 
+ Several branches below say to discard an agent's work. **`git checkout -- .` is not sufficient on its own** — it restores tracked
+ files but leaves untracked ones in place, and Red's tests are almost always new files. Verified during the first live run: after
+ `git checkout -- .`, a rejected `passing-flat` test was still sitting in the tree, where the next item's commit would have swept it
+ up.
+ 
+ Revert means both:
+ 
+-    git checkout -- <the role's write globs>     # restore tracked edits
+-    git clean -fd -- <the role's write globs>    # remove new files
++    git checkout -- <pathspec>     # restore tracked edits
++    git clean -fd -- <pathspec>    # remove new files
+ 
+ **`git reset --hard HEAD` has the identical blind spot** and appears wherever a branch resets to the last commit rather than
+ discarding working-tree edits — Refactor's coverage gate, Refactor's incomplete-restore check, and the mutation pass's tree-clean
+ recovery. Verified: `reset --hard` leaves untracked files exactly as `checkout` does. Those sites mean:
+ 
+     git reset --hard HEAD
+-    git clean -fd -- <the role's write globs>
++    git clean -fd -- <pathspec>
+ 
+ The mutation-pass case is the sharpest: that reset is the safety net for an agent that failed to revert its own mutations. It
+ detects the problem with `git status --porcelain`, which *does* show untracked files, and then applies a command that cannot remove
+ them.
+ 
+-**Only the `clean` half takes a pathspec.** Scope it to the globs that role may write — `globs.test` for Red, `globs.source` for
+-Green, Refactor and Mutate — because an unscoped `git clean -fd` would delete legitimately untracked work elsewhere in the tree.
+-(`clean` without `-x` spares gitignored paths, so the venv, the checklist and the coverage report survive either way; do not add
+-`-x`.)
++**Only the `clean` half takes a pathspec — and that pathspec is every path the triggering check actually found, not the role's
++write globs.** A guardrail violation is *by definition* a write to a path that does not match the role's globs — that is what
++makes it a violation rather than ordinary work. So in the scenario this backstop exists for, the rogue file sits outside the
++glob by construction, and a `clean` scoped to the glob can never reach it. Two cases, not one; do not collapse them:
++
++- **A check found concrete paths responsible for the discard.** Red's audit and Green's each name the paths that failed the glob
++  match (see *Per item*). Refactor's incomplete-restore check and the mutation pass's tree-clean recovery each re-run `git status
++  --porcelain` (and `git diff HEAD`) and find it non-empty when it was supposed to be clean — that finding **is** a list of
++  concrete paths, the same way an audit's is. In every one of these, scope `clean` to **every path the check found**, not only
++  the subset that broke the glob match. A dispatch that violated the glob usually also wrote legitimate in-glob files alongside
++  the rogue one — leaving those behind after `clean` reproduces the exact bug this section opens with (a rejected file surviving
++  to be swept into a later commit), just for the half of the dispatch that happened to pass the glob check. And a dirty tree
++  after Refactor's or Mutate's own restore is not automatically confined to `globs.source`: the guard that normally keeps them
++  inside it is the same fallible mechanism Preflight item 7 exists to probe, so a dirty path outside the glob at these two sites
++  is the backstop scenario, not a hypothetical one.
++- **No check found anything — the discard follows a judgment made from an already-clean audit.** Red's `passing-flat` outcome,
++  Green's unreproducible pass or full-suite regression, and either coverage gate's overrun are decisions made *after* that
++  dispatch's own audit already passed with nothing flagged. There is no list of problem paths to name here, only the earlier
++  confirmation that everything this dispatch touched was inside the role's glob. Fall back to `globs.test` for Red, `globs.source`
++  for Green, Refactor and Mutate.
++
++Either way, an unscoped `git clean -fd` would delete legitimately untracked work elsewhere in the tree, so never run `clean`
++without one of these two pathspecs. (`clean` without `-x` spares gitignored paths, so the venv, the checklist and the coverage
++report survive either way; do not add `-x`.) When the pathspec names a path this dispatch only ever created new, `git checkout`
++has nothing tracked to restore and errors with `fatal: pathspec '<path>' did not match any file(s) known to git` — expected, and
++harmless: `clean` is the half that actually removes a new file, and it still runs.
+ 
+ `git reset --hard` is tree-wide and **cannot** be scoped: `git reset --hard -- <path>` fails with `fatal: Cannot do hard reset with
+ paths.` That is safe here only because preflight requires a clean tree and exactly one agent writes per dispatch, so the only
+ tracked changes to discard are that dispatch's own.
+ 
+ Branches below say **revert** or **reset and clean** and point here. They do not name the bare git command, deliberately: an
+ orchestrator reading `git checkout -- .` at the point of use will run exactly that, which is the defect this section exists to fix.
+ 
+ ## Coverage baselines
+ 
+@@ -193,22 +215,23 @@ itself. You then re-measure to confirm, exactly as you re-run Green's test rathe
+ 
+ For Green and Refactor, measuring is your job. They may check themselves to self-correct before handing over, which is cheaper than
+ a re-dispatch, but your measurement is the one that decides.
+ 
+ ## Per item
+ 
+ ### Red
+ 
+ 1. Dispatch `tdd-red` with: the spec path, the one item, the configured commands, and the current coverage baseline.
+ 2. On return, **audit**: `git diff --name-only` plus `git status --porcelain`. Every touched path must match `globs.test`.
+-   Violation → **revert** (see *Reverting a dispatch*), re-dispatch quoting the rule and the offending path, up to
+-   `limits.violationRetries` times. Beyond that → stop, escalate.
++   Violation → **revert** (see *Reverting a dispatch*) scoped to every path this audit found touched, not only the ones that
++   broke the glob match — the whole dispatch is rejected, not just its out-of-glob half. Re-dispatch quoting the rule and the
++   specific paths that broke the match, up to `limits.violationRetries` times. Beyond that → stop, escalate.
+ 
+    **An empty diff is not a passing audit.** "Every touched path matched" is vacuously true when nothing was touched. If Red reports
+    `failing`, `passing-covered`, or `passing-flat`, it claims to have written a test — so at least one path must have changed. Zero
+    changed paths alongside any of those outcomes means the agent reported work it did not do: treat it as `blocked` and escalate
+    rather than committing an empty commit and moving on. The same applies to Green's audit below.
+ 3. Branch on `outcome`:
+    - `failing` → record the handover's `testId` on the item, commit `red: <behavior>`, status `red`, continue to Green.
+    - `passing-covered` → **re-measure coverage yourself before committing.** This branch writes a commit and skips Green entirely on
+      the strength of a number the agent computed about its own work; it is the one place nothing else would catch a wrong answer.
+      Delta confirmed → commit `test: <behavior>`, status `done`, next item. Delta not confirmed → treat as `passing-flat`.
+@@ -298,21 +321,22 @@ Branch on all four outcomes:
+ - `no-change-needed` → commit nothing, record it, continue. This is a good outcome, not a failure; the trigger fired and the agent
+   judged there was nothing worth doing.
+ - `reverted` → record it and continue. A refactor that backed out cleanly is not a failed cycle.
+ - `blocked` → **stop and escalate.** Refactor reports `blocked` when it could not evaluate its own work — typically a suite that was
+   already failing. That is a broken precondition, not a judgement call, and continuing past it means every later Refactor dispatch
+   hits the same wall silently. This is the same rule as the Escalation section below; there is no Refactor exemption.
+ 
+ **On `reverted`, verify the tree rather than trusting the report.** Refactor restores by rewriting recorded text with
+ `Edit`/`Write`, not `git checkout`, so an imperfect restore is possible and the coverage gate would not catch one whose
+ uncovered-line count happened to match. Require `git status --porcelain` and `git diff HEAD` to both be empty; if either is not,
+-**reset and clean** (see *Reverting a dispatch*) yourself and record that the agent's restore was incomplete.
++**reset and clean** (see *Reverting a dispatch*) yourself, scoped to whatever those two commands just reported, and record that
++the agent's restore was incomplete.
+ 
+ Then status `done`, next item.
+ 
+ ## Mutation pass
+ 
+ **An empty checklist does not end the run.** When no item is `pending`, run the hardening pass — unless you have already run
+ `limits.mutationRounds` of them.
+ 
+ Coverage gates prove code was executed. They cannot prove any test would notice if that code were wrong. This pass finds the tests
+ that execute without asserting.
+@@ -332,22 +356,22 @@ that execute without asserting.
+ caches are gitignored, while the interpreter still holds bytecode compiled from the *mutated* source. Observed on the first live
+ pass: after a kill verification the suite reported a failure whose traceback showed source that could not produce it, and clearing
+ `__pycache__` returned it to green. A false red is the lucky outcome; the same mechanism can serve a false green from a cache
+ compiled before a bad restore, and step 5 below is exactly where that would be believed.
+ 
+ For Python, prefix the configured commands with `PYTHONDONTWRITEBYTECODE=1` so no cache is written at all — verified to suppress
+ `__pycache__` and to still satisfy the guard's Bash allowlist. Other toolchains have their own caches; whatever the language, the
+ rule is that a restore is not complete until the cache is too.
+ 
+ 4. On return, **verify the tree is clean**: `git status --porcelain` must be empty and `git diff HEAD` must be empty. Not clean →
+-   **reset and clean** (see *Reverting a dispatch*), record it, and do not trust the report — an agent that failed to revert may also
+-   have failed to run the suite honestly between mutants.
++   **reset and clean** (see *Reverting a dispatch*) scoped to whatever those two commands just reported, record it, and do not
++   trust the report — an agent that failed to revert may also have failed to run the suite honestly between mutants.
+ 5. Re-run the full suite, **subtracting `knownRed`**. Every test outside that list must pass. This is the last orchestrator-side
+    suite check that did not subtract it, and leaving it flat would dead-end every mutation pass on any run where preflight recorded a
+    non-empty `knownRed` — reproducing the exact failure the threading rule above was added to prevent.
+ 6. **Group survivors by `missingBehavior` first**, then append one checklist item per distinct behavior. Several mutants routinely
+    map to a single gap — the first live pass returned four survivors of which three were "nothing asserts divide's error message"
+    (mutated to `None`, to an `XX`-wrapped string, and to upper case). One test closes all three, so queueing three Red cycles wastes
+    two of them. Keep every mutant in the item's `mutant` field as evidence, and report the survivor count, not the item count.
+ 
+    For each distinct behavior, append:
+ 

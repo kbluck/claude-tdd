@@ -1,0 +1,198 @@
+# Review package: 2a3a566..527b3b8
+
+## Commits
+527b3b8 fix(plugin): close remaining gaps from independent smoke-check review
+
+## Files changed
+ e2e/fixtures/prepare-resume-scratch.mjs | 55 +++++++++++++++++++++------------
+ e2e/smoke.mjs                           | 26 ++++++++++++++--
+ 2 files changed, 59 insertions(+), 22 deletions(-)
+
+## Diff
+diff --git a/e2e/fixtures/prepare-resume-scratch.mjs b/e2e/fixtures/prepare-resume-scratch.mjs
+index 221826c..f2d8d98 100644
+--- a/e2e/fixtures/prepare-resume-scratch.mjs
++++ b/e2e/fixtures/prepare-resume-scratch.mjs
+@@ -42,54 +42,69 @@ function git(args, cwd) {
+  */
+ export function prepareResumeScratch(targetDir) {
+   const dir = targetDir ?? fs.mkdtempSync(path.join(os.tmpdir(), 'tdd-resume-scratch-'));
+ 
+   // A linked worktree at HEAD, detached so it never contends with whatever
+   // branch the main working tree has checked out. Only tracked files come
+   // across -- .tdd/config.json and .tdd/checklist.json are gitignored, so
+   // the worktree starts with neither, matching a fresh clone.
+   git(['worktree', 'add', '--detach', '--quiet', dir, 'HEAD'], REPO_ROOT);
+ 
+-  const calcPath = path.join(dir, 'e2e', 'src', 'calc', '__init__.py');
+-  fs.writeFileSync(calcPath, 'def add(a, b):\n    return a + b\n');
+-
+-  const dividePath = path.join(dir, 'e2e', 'tests', 'test_divide.py');
+-  fs.rmSync(dividePath, { force: true });
+-
+-  git(['add', '-A'], dir);
+-  git(
+-    [
+-      'commit',
+-      '-q',
+-      '-m',
+-      'scratch: roll back e2e/ to the interrupted state checklist-resume-seed.json describes (local resume test only)',
+-    ],
+-    dir,
+-  );
+-
+-  fs.mkdirSync(path.join(dir, '.tdd'), { recursive: true });
+-  fs.copyFileSync(SEED_PATH, path.join(dir, '.tdd', 'checklist.json'));
+-
++  // From this point on, the worktree is registered in the REAL repository's
++  // .git/worktrees/ -- an entry that does not show up in `git status
++  // --short`, only in `git worktree list`, so it accumulates silently if
++  // left behind. Everything below can throw (a full disk, a permissions
++  // error, a `git commit` with nothing to commit if the fixture ever drifts),
++  // so `cleanup` is built now, immediately after the thing it tears down
++  // exists, and any throw from here on routes through it before propagating.
+   const cleanup = () => {
+     try {
+       git(['worktree', 'remove', '--force', dir], REPO_ROOT);
+     } finally {
+       // Deliberately NOT `git worktree prune`: `remove --force` above already
+       // deregisters *this* worktree, and `prune` sweeps every worktree entry
+       // whose directory is currently unreachable -- including a developer's
+       // own unrelated worktree if its volume happens to be unmounted at this
+       // moment. This script must never touch state it did not create in the
+       // real repository's .git.
+       fs.rmSync(dir, { recursive: true, force: true });
+     }
+   };
+ 
++  try {
++    const calcPath = path.join(dir, 'e2e', 'src', 'calc', '__init__.py');
++    fs.writeFileSync(calcPath, 'def add(a, b):\n    return a + b\n');
++
++    const dividePath = path.join(dir, 'e2e', 'tests', 'test_divide.py');
++    fs.rmSync(dividePath, { force: true });
++
++    // Explicit paths, not `-A`: the file set touched above is fully known
++    // and fixed, so naming it costs nothing, and this repository has a
++    // recorded incident of a broad `git add` sweeping up pytest bytecode.
++    git(['add', 'e2e/src/calc/__init__.py', 'e2e/tests/test_divide.py'], dir);
++    git(
++      [
++        'commit',
++        '-q',
++        '-m',
++        'scratch: roll back e2e/ to the interrupted state checklist-resume-seed.json describes (local resume test only)',
++      ],
++      dir,
++    );
++
++    fs.mkdirSync(path.join(dir, '.tdd'), { recursive: true });
++    fs.copyFileSync(SEED_PATH, path.join(dir, '.tdd', 'checklist.json'));
++  } catch (err) {
++    cleanup();
++    throw err;
++  }
++
+   return { scratchDir: dir, cleanup };
+ }
+ 
+ if (import.meta.url === `file://${process.argv[1]}`) {
+   const target = process.argv[2];
+   const { scratchDir } = prepareResumeScratch(target);
+   const invariantsPath = path.join(REPO_ROOT, 'e2e', 'lib', 'checklist-invariants.mjs');
+   const resultPath = path.join(scratchDir, '.tdd', 'checklist.json');
+   console.log(scratchDir);
+   console.log('');
+diff --git a/e2e/smoke.mjs b/e2e/smoke.mjs
+index 8459a3a..d1e46be 100644
+--- a/e2e/smoke.mjs
++++ b/e2e/smoke.mjs
+@@ -86,20 +86,42 @@ function check(name, fn) {
+ 
+ /** @returns {import('node:child_process').SpawnSyncReturns<string>} */
+ function runFixturePytest(cwd = REPO_ROOT) {
+   return spawnSync(PYTEST, ['-q', '--ignore=e2e/mutants', 'e2e'], {
+     cwd,
+     encoding: 'utf8',
+     env: { ...process.env, PYTHONDONTWRITEBYTECODE: '1' },
+   });
+ }
+ 
++/**
++ * Assert a spawnSync result represents a process that actually RAN and
++ * exited with a non-zero status -- not a process that never started.
++ * `spawnSync` returns `status: null` when the executable could not be
++ * spawned at all (bad path, missing interpreter) or was killed by a signal,
++ * and `null !== 0` is true -- so a bare `assert.notEqual(result.status, 0,
++ * ...)` reports "ok" identically for a real failure and for a spawn that
++ * never happened. Every check in this file that means "the command failed"
++ * must go through this, not a raw `assert.notEqual`.
++ * @param {import('node:child_process').SpawnSyncReturns<string>} result
++ * @param {string} message
++ */
++function assertRanAndFailed(result, message) {
++  assert.equal(result.error, undefined, `process failed to spawn (${message}): ${result.error}`);
++  assert.equal(
++    typeof result.status,
++    'number',
++    `process did not report a numeric exit status (${message}); status=${JSON.stringify(result.status)} signal=${JSON.stringify(result.signal)}`,
++  );
++  assert.notEqual(result.status, 0, message);
++}
++
+ check('e2e fixture: the pytest venv is present (provision e2e/.venv before running this)', () => {
+   assert.ok(fs.existsSync(PYTEST), `expected a pytest executable at ${PYTEST}`);
+ });
+ 
+ check(`e2e fixture: recorded outcome — pytest reports exactly "${EXPECTED.testCount} passed"`, () => {
+   const result = runFixturePytest();
+   assert.equal(result.status, 0, `pytest exited ${result.status}\n${result.stdout}\n${result.stderr}`);
+   assert.match(
+     result.stdout,
+     new RegExp(`\\b${EXPECTED.testCount} passed\\b`),
+@@ -133,21 +155,21 @@ check('seeded regression: breaking subtract() fails the configured test command,
+     restore();
+     process.exit(143);
+   };
+   process.once('exit', restore);
+   process.once('SIGINT', onSigint);
+   process.once('SIGTERM', onSigterm);
+ 
+   try {
+     fs.writeFileSync(CALC_SRC, mutated);
+     const redResult = runFixturePytest();
+-    assert.notEqual(redResult.status, 0, 'seeded regression did not fail the suite — the seeded mutation is not being exercised');
++    assertRanAndFailed(redResult, 'seeded regression did not fail the suite — the seeded mutation is not being exercised');
+     assert.match(
+       redResult.stdout,
+       /test_subtract_returns_difference/,
+       `expected the subtract test to be named as a failure, got:\n${redResult.stdout}`,
+     );
+   } finally {
+     restore();
+     process.removeListener('SIGINT', onSigint);
+     process.removeListener('SIGTERM', onSigterm);
+     // The 'exit' listener is intentionally left registered: it is idempotent
+@@ -335,21 +357,21 @@ check('resume scratch prep: prepare-resume-scratch.mjs produces a clean, genuine
+     assert.equal(fs.existsSync(path.join(scratchDir, 'e2e', 'tests', 'test_divide.py')), false, 'divide test should not exist yet');
+     assert.equal(fs.existsSync(path.join(scratchDir, 'e2e', 'tests', 'test_subtract.py')), true, 'subtract test should already exist (Red already ran)');
+ 
+     const checklist = JSON.parse(fs.readFileSync(path.join(scratchDir, '.tdd', 'checklist.json'), 'utf8'));
+     assert.deepEqual(checklist, RESUME_SEED, 'seeded .tdd/checklist.json does not match the committed resume-seed fixture');
+ 
+     const status = git(['status', '--porcelain'], scratchDir);
+     assert.equal(status.trim(), '', `scratch worktree is not clean (Preflight #1 requires this):\n${status}`);
+ 
+     const result = runFixturePytest(scratchDir);
+-    assert.notEqual(result.status, 0, 'expected the scratch suite to be red (subtract test exists, subtract() is unimplemented)');
++    assertRanAndFailed(result, 'expected the scratch suite to be red (subtract test exists, subtract() is unimplemented)');
+     assert.match(result.stdout, /test_subtract/, `expected a subtract-related failure, got:\n${result.stdout}`);
+   } finally {
+     cleanup();
+   }
+ });
+ 
+ // ---------------------------------------------------------------------------
+ 
+ const total = passed + failed;
+ console.log('');

@@ -1,0 +1,126 @@
+# Review package: d57c791..0d33cad
+
+## Commits
+0d33cad fix(spec): correct which node failure actually fails open
+fe76ac9 fix(command): resolve the node floor path via CLAUDE_PLUGIN_ROOT
+bd5561a fix(skill): resolve the node floor path via CLAUDE_PLUGIN_ROOT
+
+## Files changed
+ commands/tdd-init.md                                   | 18 +++++++++++-------
+ .../specs/2026-07-30-tdd-subagent-workflow-design.md   |  2 +-
+ skills/run-tdd-cycle/SKILL.md                          | 10 +++++++---
+ 3 files changed, 19 insertions(+), 11 deletions(-)
+
+## Diff
+diff --git a/commands/tdd-init.md b/commands/tdd-init.md
+index 5157e5d..548b11a 100644
+--- a/commands/tdd-init.md
++++ b/commands/tdd-init.md
+@@ -1,34 +1,38 @@
+ ---
+ description: Detect the project's toolchain and write .tdd/config.json for the TDD cycle
+ ---
+ 
+ Set up `.tdd/config.json` for this project. Work through these steps in order
+ and do not skip the verification — a config that passes here is trusted by the
+ guard hook on every subsequent tool call.
+ 
+ ## 1. Check prerequisites
+ 
+-- Node is on `PATH` and is at least the floor `hooks/lib/rules.mjs` exports as `NODE_FLOOR` — a floor, not a pin; a newer major is
+-  fine. Check with `node --version` through the `Bash` tool. Missing, or below the floor → stop and tell the user to install or
+-  upgrade it. This is a hard stop, not a degradation: with no interpreter, or too old an interpreter, there is no
+-  reduced-guarantee mode to fall back to — the guard cannot be trusted to run at all.
++- Node is on `PATH` and is at least the floor `${CLAUDE_PLUGIN_ROOT}/hooks/lib/rules.mjs` exports as `NODE_FLOOR` — a floor, not
++  a pin; a newer major is fine. `hooks/lib/rules.mjs` lives inside the plugin's own directory, not the project you are
++  initializing, so read it by the `${CLAUDE_PLUGIN_ROOT}`-relative path — a bare `hooks/lib/rules.mjs` resolves against the wrong
++  cwd and will not exist there. Check with `node --version` through the `Bash` tool and compare it against `NODE_FLOOR`. Missing,
++  or below the floor → stop and tell the user to install or upgrade it. **If `NODE_FLOOR` itself cannot be read, stop** — the
++  same as a missing interpreter; do not skip the comparison, guess a number, or treat the miss as a pass. This is a hard stop,
++  not a degradation: with no interpreter, or too old an interpreter, there is no reduced-guarantee mode to fall back to — the
++  guard cannot be trusted to run at all.
+ 
+   **The two failures are not the same shape.** A too-old-but-*present* Node does launch `guard.mjs`, which checks its own version
+   first and denies loudly with exit 2 — that path is genuinely fail-closed on its own. A missing Node never launches the guard at
+   all: `PreToolUse` sees a non-2 exit and silently *permits* the call — a missing interpreter fails open, exactly like a missing
+   shell did. Catching both here, at setup, is what turns the open failure into a loud one.
+ 
+   This only proves node is on the `Bash` tool's `PATH`, not on the `PATH` Claude Code spawns the hook with — the two can disagree
+-  under a per-shell version manager (`fnm`, `nvm`). `/tdd`'s preflight (item 7) is what actually proves the guard can start, by
+-  dispatching a probe subagent and observing a denial. Report both results to the user; a green version check here is not proof
+-  by itself.
++  under a per-shell version manager (`fnm`, `nvm`). This step cannot resolve that gap by itself; only `/tdd`'s preflight item 7,
++  which dispatches a probe subagent and observes a denial, proves the guard can actually start. Tell the user this check is
++  necessary but not sufficient, and that the first `/tdd` run is what confirms the rest.
+ - The project is a git repository with at least one commit.
+ 
+ ## 2. Detect the toolchain
+ 
+ | Marker | Toolchain | test | single | coverage |
+ |---|---|---|---|---|
+ | `pytest.ini`, or `pyproject.toml` mentioning pytest | pytest | `pytest -q` | `pytest -q {testId}` | `pytest -q --cov --cov-report=json:.tdd/coverage.json` |
+ | `package.json` with `jest` | jest | `npx jest` | `npx jest -t {testId}` | `npx jest --coverage --coverageReporters=json-summary` |
+ | `package.json` with `vitest` | vitest | `npx vitest run` | `npx vitest run -t {testId}` | `npx vitest run --coverage` |
+ | `Cargo.toml` | cargo | `cargo test` | `cargo test {testId}` | `cargo llvm-cov --json` |
+diff --git a/docs/superpowers/specs/2026-07-30-tdd-subagent-workflow-design.md b/docs/superpowers/specs/2026-07-30-tdd-subagent-workflow-design.md
+index 44742be..e525298 100644
+--- a/docs/superpowers/specs/2026-07-30-tdd-subagent-workflow-design.md
++++ b/docs/superpowers/specs/2026-07-30-tdd-subagent-workflow-design.md
+@@ -187,21 +187,21 @@ There is no phase marker. The hook learns the caller's role from the payload's `
+ ### Preflight
+ 
+ `/tdd <spec-path>` refuses to start unless all seven hold. Each is a precondition some later step silently depends on.
+ 
+ 1. **Target is a git repo with a clean tree.** Reverting a dispatch destroys working-tree state — see *Reverting a dispatch* below.
+ 2. **`.tdd/config.json` exists**, else run `/tdd-init` first.
+ 3. **The full suite passes.** Refactor's stop condition is "all tests still pass" and Green's is "this test now passes"; both are meaningless against an already-red suite. If red, record the failing test IDs in `checklist.json` as `knownRed` and **pass that list into every Refactor and Mutate dispatch**. Both roles stop on a suite that is not green, so an allowlist that only exists in the file makes them refuse to run for the rest of the session. Every later suite comparison subtracts it.
+ 4. **Spec file is readable and non-empty.**
+ 
+ 5. **The glob partition is still exhaustive** — `git ls-files` produces no file matching neither `test`, `source`, nor `ignore`. Catches drift from edits made between runs. See *Writes are an allowlist; reads are a denylist* below for why this is load-bearing.
+-6. **Node is on `PATH` and is at least the supported LTS** — `guard.mjs` runs under it. Check the version, not merely the presence: an interpreter too old to run the guard fails exactly like a missing one, and both fail open.
++6. **Node is on `PATH` and is at least the supported LTS** — `guard.mjs` runs under it. Check the version, not merely the presence: an interpreter too old to run the guard denies loudly on its own — `guard.mjs` checks `process.version` before anything else can throw and exits 2 below the floor. Only a *missing* interpreter fails open, because the hook process never starts at all.
+ 
+    **This check proves less than it appears to, and item 7 is what closes the gap.** Preflight runs `node --version` through the orchestrator's `Bash` tool, which proves node is on the *Bash tool's* `PATH`. The hook is spawned by Claude Code directly, in exec form, with no shell — so it resolves `node` against a different environment. The two can disagree, and when they do this check passes while the guard cannot launch.
+ 
+    That is not hypothetical. Per-shell Node version managers make it the normal case: `fnm` and `nvm` put node on a `PATH` assembled by an interactive shell profile, and `fnm` in particular resolves to a per-session directory keyed by shell PID. Observed on the development machine: no node existed anywhere outside that ephemeral directory, and a non-interactive spawn found none at all. A user who launches Claude Code from a desktop icon rather than an fnm-active terminal gets a guard that cannot start — and a hook that cannot start exits non-2, which permits.
+ 7. **The guard sees `agent_type`** — dispatch a trivial probe subagent and confirm the hook observed a non-empty `agent_type`. If it did not, the guard silently permits everything a subagent does; stop rather than run unenforced. This is the one check that verifies the enforcement mechanism itself is alive.
+ 
+ ### Decompose
+ 
+ The orchestrator reads the spec once and writes an ordered checklist of test-sized behaviors, then presents it for approval before the first dispatch. Bad decomposition is cheap to correct here and expensive to correct on cycle 9.
+ 
+diff --git a/skills/run-tdd-cycle/SKILL.md b/skills/run-tdd-cycle/SKILL.md
+index 34160fc..2c60656 100644
+--- a/skills/run-tdd-cycle/SKILL.md
++++ b/skills/run-tdd-cycle/SKILL.md
+@@ -21,23 +21,27 @@ Announce: "Using run-tdd-cycle to implement `<spec>`."
+    to proceed, and if so record them in `checklist.json` as `knownRed`.
+ 
+    **`knownRed` is not a note to yourself; it must be threaded or it is a lie.** Every later suite comparison is against "the baseline
+    you were given", never against zero failures — and `tdd-refactor` and `tdd-mutate` both stop on a suite that is not green, so they
+    must receive the list or they will refuse to run for the rest of the session. Pass `knownRed` in every Refactor and Mutate dispatch.
+    When you check a suite yourself, subtract it before judging. If you find yourself unable to thread it somewhere, stop and say so
+    rather than proceeding with an allowlist that only exists in the file.
+ 4. **Spec file readable and non-empty.** Unreadable or empty → stop; there is nothing to decompose.
+ 5. **The glob partition is still exhaustive.** `git ls-files`; every path must match `test`, `source`, or `ignore`. Drift since
+    init → stop and tell the user to re-run `/tdd-init`. This is what makes the guard's read denylist sound.
+-6. **Node is on `PATH` and is at least the floor `hooks/lib/rules.mjs` exports as `NODE_FLOOR`** — a floor, not a pin; a newer
+-   major passes. Run `node --version` through the `Bash` tool. Missing, or below the floor → stop and tell the user to install or
+-   upgrade Node.
++6. **Node is on `PATH` and is at least the floor `${CLAUDE_PLUGIN_ROOT}/hooks/lib/rules.mjs` exports as `NODE_FLOOR`** — a floor,
++   not a pin; a newer major passes. `hooks/lib/rules.mjs` is inside the plugin's own directory, not the target project you are
++   running against, so read it by the `${CLAUDE_PLUGIN_ROOT}`-relative path — a bare `hooks/lib/rules.mjs` resolves against the
++   wrong cwd and will not exist there. Run `node --version` through the `Bash` tool and compare it against `NODE_FLOOR`. Missing,
++   or below the floor → stop and tell the user to install or upgrade Node. **If `NODE_FLOOR` itself cannot be read, stop** —
++   the same as a missing interpreter. Do not skip the comparison, guess a number, or treat the miss as a pass; an unevaluable
++   check must not reach `allow`.
+ 
+    **The two failures are not the same shape.** A too-old-but-*present* Node does launch `guard.mjs`, which checks its own
+    version first, before anything else can throw, and denies loudly with exit 2 — that path is genuinely fail-closed on its own.
+    A missing Node never launches the guard at all: `PreToolUse` sees a non-2 exit and silently *permits* the call, exactly like a
+    missing shell did. Preflight exists to catch both loudly, at setup, rather than let either reach a live dispatch.
+ 
+    **This proves less than it looks like it proves — item 7 is what closes the gap.** This check only shows that node is on the
+    *`Bash` tool's* `PATH`. The hook itself is spawned by Claude Code directly, in exec form, with no shell, so it resolves `node`
+    against a different environment — and under a per-shell version manager (`fnm`, `nvm`) the two routinely disagree. Measured on
+    the development machine: an IDE-hosted session resolved the hook's `node` to a bundled 24.13.0 while `fnm` gave the `Bash` tool

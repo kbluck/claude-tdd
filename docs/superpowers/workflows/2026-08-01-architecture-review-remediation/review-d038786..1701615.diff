@@ -1,0 +1,42 @@
+# Review package: d038786..1701615
+
+## Commits
+1701615 fix(spec): retire checkout in the revert mechanism, matching SKILL.md
+
+## Files changed
+ docs/superpowers/specs/2026-07-30-tdd-subagent-workflow-design.md | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+## Diff
+diff --git a/docs/superpowers/specs/2026-07-30-tdd-subagent-workflow-design.md b/docs/superpowers/specs/2026-07-30-tdd-subagent-workflow-design.md
+index 6978c33..da2e81b 100644
+--- a/docs/superpowers/specs/2026-07-30-tdd-subagent-workflow-design.md
++++ b/docs/superpowers/specs/2026-07-30-tdd-subagent-workflow-design.md
+@@ -290,25 +290,25 @@ Guardrails are enforced twice, at different surfaces.
+ | **Refactor** | source files, runner output | source globs only | configured full-suite + coverage + complexity commands |
+ | **Mutate** (`tdd-mutate`) | source files, runner output | source globs only — every write must be reverted before handover | full-suite + mutation commands |
+ 
+ ### Reverting a dispatch
+ 
+ Several branches discard an agent's work. **`git checkout -- .` does not do it**, and neither does `git reset --hard` — both restore or reset *tracked* files and leave untracked ones in place, and Red's tests are almost always new files. Found on the first live run: after a rejected `passing-flat` test, `git checkout -- .` left the test sitting in the tree, where the next item's commit would have swept it up.
+ 
+ Revert means both:
+ 
+ ```
+-git checkout -- <pathspec>     # restore tracked edits
++git reset --hard HEAD          # restore every tracked file to HEAD — no pathspec, nothing to abort on
+ git clean -fd -- <pathspec>    # remove new files
+ ```
+ 
+-Only `clean` takes a pathspec; `git reset --hard -- <path>` fails outright. Reset is therefore tree-wide, which is safe only because preflight requires a clean tree and exactly one agent writes per dispatch.
++**`checkout` is retired from this mechanism** *(iteration 2)*. `git checkout -- <path1> <path2>` validates every pathspec before touching anything, and if any one of them does not match a file git already tracks, the whole command aborts and restores *nothing* — not even the paths that would have matched. A pathspec built from what a check found routinely mixes a tracked-modified path with an untracked-new one (Red's tests are almost always new files), which is exactly the shape that triggers this. `reset --hard` has no such failure mode: it takes no pathspec at all — `git reset --hard -- <path>` fails outright with `fatal: Cannot do hard reset with paths` — so there is nothing for it to fail to match. Only `clean` takes a pathspec; reset is therefore tree-wide, which is safe only because preflight requires a clean tree and exactly one agent writes per dispatch.
+ 
+ **The pathspec is every path the triggering check found, not the role's write globs** *(iteration 2)*. Scoping to the role's globs was wrong in the one scenario the revert exists for: a guardrail violation is *by definition* a write to a path that does not match the role's globs — that is what makes it a violation rather than ordinary work. In the backstop case the audit exists to catch, the rogue file sits outside the glob by construction, and a glob-scoped `clean` cannot touch it. Nor is the pathspec only the paths that broke the match: a violating dispatch usually also writes legitimate in-glob files alongside the rogue one, and scoping to the offending subset alone leaves those behind — reproducing this section's founding bug (a rejected file surviving to be swept into a later commit) for the half of the dispatch that happened to pass. Fall back to the role's globs only when the triggering check named nothing at all, which is the ordinary discard case (a rejected `passing-flat` test) rather than a violation.
+ 
+ This is the third instance of the same class — a revert that does not revert. The first two were command choice (`git checkout -- .` leaving untracked files; `git reset --hard` with the same blind spot); this one is scoping.
+ 
+ ### Paths are canonicalised before matching *(iteration 2 — was "normalised")*
+ 
+ The guard strips the project root by literal prefix, and the glob match then needs the relative path to start with a glob's prefix. Any spelling that defeats that lexical match reaches no glob — and because reads are a denylist, **no match means allow**. Every such spelling is therefore a read-isolation bypass, silent and invisible in any diff.
+ 
+ Note the asymmetry that makes this dangerous rather than merely wrong: `Write E2E/src/...` is correctly *denied*, because writes are an allowlist and fail closed. Only reads leak.

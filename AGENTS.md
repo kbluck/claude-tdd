@@ -8,7 +8,7 @@ Read before changing anything substantial:
 - `docs/**/specs/*.md` — the design contract.
 - `docs/**/plans/*.md` — task-by-task detail. The current iteration is `2026-08-01-architecture-review-remediation.md`.
 - `docs/**/reviews/*.md` — independent review findings.
-- `.superpowers/**/progress.md` — the ledger: every defect found, how, and what it cost.
+- `docs/**/workflows/*/progress.md` — the ledger: every defect found, how, and what it cost.
 - `.claude/.remember/*.md` — memories from prior sessions.
 
 ## Repository state you will trip over
@@ -19,6 +19,12 @@ reading `e2e/src/**` is denied. It does **not** deny everything with "run /tdd-i
 
 The suite does not depend on any of this: it copies `tests/fixtures/config.json` into a sandbox and points the guard there with
 `TDD_PROJECT_DIR`.
+
+**The ledger exists twice, and only one copy is in git.** `docs/superpowers/workflows/<iteration>/` is the committed archive —
+what a fresh clone gets, and what to cite. `.superpowers/sdd/<iteration>/` is the live scratch directory the SDD skill writes to
+during a run, and it is gitignored (`.gitignore:22`). The two were identical the moment the archive landed and nothing keeps them
+in sync afterwards, so an iteration in progress diverges from its archive until it is committed again. Cite the committed path;
+read the scratch copy only when you are the one mid-run.
 
 ## Commits
 
@@ -66,8 +72,8 @@ deliberately not part of `node --test`: it needs the pytest venv and spawns real
 to stay under a second, not to shell out. It diffs the fixture's recorded outcome (`e2e/expected-outcome.json`) against a fresh
 run, seeds a real regression and confirms the configured test command catches it, and exercises the Task 6 (resume) and Task 7
 (out-of-glob revert) fixes this review added — see the header comment in `e2e/smoke.mjs` for exactly which cases are automated
-versus scaffolded for a live session, and `.superpowers/sdd/2026-08-01-architecture-review-remediation/task-12-report.md` for the
-full breakdown.
+versus scaffolded for a live session, and `docs/superpowers/workflows/2026-08-01-architecture-review-remediation/task-12-report.md`
+for the full breakdown.
 
 **A subagent cannot dispatch `tdd-*` subagents, so the resume case needs a human (or a main-thread session) to actually run it.**
 

@@ -1,0 +1,111 @@
+# Review package: 5753fcb..0e352b9
+
+## Commits
+0e352b9 test(command): assert tdd-init's step 8 verifies its own commit
+21fdd4d fix(command): verify tdd-init's config commit actually landed
+
+## Files changed
+ commands/tdd-init.md           | 15 +++++++++++++++
+ tests/config-contract.test.mjs | 40 ++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 55 insertions(+)
+
+## Diff
+diff --git a/commands/tdd-init.md b/commands/tdd-init.md
+index b2e9c91..5bbe610 100644
+--- a/commands/tdd-init.md
++++ b/commands/tdd-init.md
+@@ -227,14 +227,29 @@ Append to `.gitignore` if not already present:
+ 
+ ## 8. Commit
+ 
+     git add .tdd/config.json .gitignore
+     git commit -m "chore: configure TDD subagent workflow"
+ 
+ Commit is mandatory, not optional. `/tdd`'s preflight refuses to start against
+ a dirty tree, so leaving these files uncommitted makes the very next command
+ fail on this command's side effects.
+ 
++**Verify the commit actually tracked the file — do not trust the commit's
++exit code alone.** `git add` on a path matched by an existing `.gitignore`
++rule is a silent no-op unless forced with `-f`: the `git commit` above still
++reports success, but `.tdd/config.json` stays untracked, and the very
++first-run path this step exists to protect breaks again on the next `/tdd`
++preflight. Confirm with:
++
++    git ls-files .tdd/config.json
++
++Empty output means the file did not get tracked. Do not silently `-f` past
++this — find out *why* it is ignored first (`git check-ignore -v
++.tdd/config.json`) and tell the user. A stray `.gitignore` rule inherited from
++a template or a prior project is a real possibility, and forcing the add
++without asking could commit something the user deliberately excluded.
++
+ ## 9. Confirm
+ 
+ Tell the user the config is written and committed, and that `/tdd <spec-path>`
+ is ready to run.
+diff --git a/tests/config-contract.test.mjs b/tests/config-contract.test.mjs
+index e29299f..e23c0d9 100644
+--- a/tests/config-contract.test.mjs
++++ b/tests/config-contract.test.mjs
+@@ -152,20 +152,60 @@ for (const key of [...fixtureKeyCounts.keys()].sort()) {
+   test(`tdd-init.md's template declares ${key} (${fixtureKeyCounts.get(key)}x)`, () => {
+     assert.equal(countKeyDeclarations(initBlock ?? '', key), fixtureKeyCounts.get(key));
+   });
+   initKeysChecked++;
+ }
+ 
+ test('tdd-init.md: the derived template loop enumerated at least 19 keys (a broken jq/regex filter must not silently shrink the check)', () => {
+   assert.ok(initKeysChecked >= 19, `expected at least 19 distinct keys derived from the fixture, saw ${initKeysChecked}`);
+ });
+ 
++// ---------------------------------------------------------------------------
++// Step 8 (Commit) must verify its own commit landed, not just report success.
++// `git add` on a gitignored path is a silent no-op without `-f`: the commit
++// still exits 0, but .tdd/config.json stays untracked and the first-run path
++// this step exists to protect breaks again on the very next /tdd preflight.
++// Plan Task 10 ("config-committed contradiction and the missing-config
++// test"); spec line ~588 names the exact check: `git ls-files
++// .tdd/config.json` must be non-empty after the commit.
++//
++// Scoped to the Step 8 block, not the whole file — the same reasoning as the
++// Step 7 scoping above: "git" and "commit" both appear elsewhere in this
++// document's prose (step 1's git-repo prerequisite, the closing summary in
++// step 9), so a whole-file match would pass even if the verification command
++// were missing from the block a model actually acts on.
++// ---------------------------------------------------------------------------
++
++const step8Block = extractLineRange(initText, /^## 8\. Commit/, /^## 9\./);
++
++test('tdd-init.md: the Step 8 (Commit) block was located at all (start anchor holds)', () => {
++  assert.notEqual(step8Block, null, "'## 8. Commit' heading not found — every assertion below would fail in a heap for this one reason");
++  assert.ok(step8Block.includes('git commit'), 'the located block does not look like the commit step');
++});
++
++test('tdd-init.md: the extracted Step 8 block stops before step 9 (end anchor still matches)', () => {
++  // If the end anchor stopped matching, extractLineRange runs to EOF instead
++  // of the intended boundary, silently sweeping in step 9's prose (which also
++  // mentions "committed") and corrupting the assertion below into a
++  // whole-file-equivalent check.
++  assert.ok(!step8Block.includes('/tdd <spec-path>'), 'the extracted block reached step 9\'s closing summary — the end anchor is no longer matching');
++});
++
++test('tdd-init.md: Step 8 verifies its own commit landed via `git ls-files .tdd/config.json`', () => {
++  assert.ok(
++    (step8Block ?? '').includes('git ls-files .tdd/config.json'),
++    'Step 8 must run `git ls-files .tdd/config.json` after committing and confirm it is non-empty — ' +
++      'a silent `git add` no-op on a gitignored path would otherwise leave .tdd/config.json untracked ' +
++      'with no error, breaking the first-run path this step exists to protect',
++  );
++});
++
+ // ---------------------------------------------------------------------------
+ // The spec holds a THIRD copy of this schema. Drift there misleads whoever
+ // reads the design next — which is how the template drifted in the first
+ // place (see the singleTerse check at the bottom of this file).
+ // ---------------------------------------------------------------------------
+ 
+ const specText = fs.readFileSync(SPEC_PATH, 'utf8');
+ // NOTE: the start pattern intentionally has NO leading `^` — the block is
+ // indented inside a fenced code sample, so the line reads `  "version": 1,`.
+ // This mirrors the bash original's `sed -n '/"version": 1,/,/^}/p'` exactly.

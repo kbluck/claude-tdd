@@ -1,0 +1,78 @@
+# Review package: 79b7f7a..6cce7b9
+
+## Commits
+6cce7b9 fix(plugin): correct misattribution in the CLAUDE_PLUGIN_ROOT lesson
+
+## Files changed
+ AGENTS.md | 22 +++++++++++++---------
+ 1 file changed, 13 insertions(+), 9 deletions(-)
+
+## Diff
+diff --git a/AGENTS.md b/AGENTS.md
+index 98afe57..77acd2b 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -94,23 +94,23 @@ surfaced four distinct defects from a change that was one paragraph on paper. Th
+ `node:test`, `jq` is gone, the guard is a module instead of a sourced script — but the shape of what gets missed did not: found
+ late, found by running or by an independent reviewer, rarely by a first read.
+ 
+ ## A green suite is not evidence
+ 
+ **The principle underlying this section (M2), stated once so it does not have to be rediscovered:** "green" from a harness that
+ cannot distinguish "no assertion failed" from "no assertion ran" is not evidence. History, from the retired bash harness: a
+ one-character `jq` filter typo once deleted 46 assertions from a run, and the suite reported "122 passed, 0 failed" —
+ healthy-looking. The root cause — a harness with no notion of what the count *should* be — was identified early in iteration 1's
+ build and then carried as a deferred minor for five tasks while that class of defect recurred six more times before a structural
+-fix landed. `node --test` is a different harness with its own version of the same trap; see the empty-match paragraph below —
+-several of the other items in this section are the same family, one layer removed: a count that cannot move even though the
+-tests behind it changed completely.
++fix landed. `node --test` is a different harness with its own version of the same trap; see the empty-match paragraph below.
++*Compare failing identities, not failing counts*, further down this section, is the same family one layer removed: a count that
++cannot move even though the tests behind it changed completely.
+ 
+ `node --test` is more robust than the retired bash harness in one respect worth naming: a file that throws before registering any
+ tests does **not** take the rest of the suite down with it. Verified — a three-file run where the middle file threw at collection
+ time still ran the other two and reported `pass 2 / fail 1`, exit 1. The old harness's `set -uo pipefail` failure mode, where one
+ unbound reference silently killed every file after it, does not have a `node:test` equivalent as far as this project has measured.
+ Do not assume further than that; nobody has fuzzed the runner's other edges.
+ 
+ What `node --test` does **not** guard against: an empty match. `node --test` given a glob or path that resolves to zero files
+ prints `tests 0 / pass 0 / fail 0` and **exits 0** — verified directly. That is the exact "empty glob reports success" failure the
+ retired harness used to catch on purpose; `node:test` itself does not, so a typo'd `--test-name-pattern` or a moved file that
+@@ -228,26 +228,30 @@ Every one of these produced a confident wrong answer:
+   Measured drift on the same machine without any restart: `fnm`'s per-session directory is keyed to a shell PID and is
+   garbage-collectable once that shell exits — reaping it would move the hook from 22 to a stable-alias 26 with nothing in the
+   repository changing. **The guard's version check is a floor, not a pin** — 26 passing is correct, not a bug — and it is the
+   *only* thing that actually enforces the floor; `.node-version` only makes the *test suite* run on it. A green preflight version
+   check (Preflight item 6) proves node is on the **`Bash` tool's** `PATH` only — it says nothing about the interpreter the hook
+   itself gets. Preflight item 7 (dispatch a probe, confirm an observed denial) is the only check that exercises the real spawn
+   path; do not let a green item 6 read as proof the guard can start.
+ 
+ ## The scope of a measured fact is part of the fact
+ 
+-A different failure from the ones above: not a wrong measurement, but a correct one generalised past what it covered. The Tier 0
+-spike proved `CLAUDE_PLUGIN_ROOT` is set **for the hook process** Claude Code spawns — that is what was actually measured. Task
+-4's brief read that as "set for the plugin's code" and ordered preflight to read the Node-version floor from
+-`${CLAUDE_PLUGIN_ROOT}/hooks/lib/rules.mjs`. It is unset in the orchestrator's own shell — `/tdd-init` and `/tdd` run with cwd in
+-the *user's* project, verified directly — so the fix reproduced the exact "unreadable floor → stop" failure it was meant to
+-close, the same one a bare relative path had already been rejected for.
++A different failure from the ones above: not a wrong measurement, but a correct one generalised past what it covered — and,
++unlike the brief errors elsewhere in this file, generalised in a **fix ruling**, not in the original brief. The Tier 0 spike
++proved `CLAUDE_PLUGIN_ROOT` is set **for the hook process** Claude Code spawns — that is what was actually measured. Task 4's
++original brief and shipped text had preflight read the Node-version floor from a bare relative `hooks/lib/rules.mjs`; a reviewer
++correctly flagged that as unresolvable, since `/tdd-init` and `/tdd` run with cwd set to the *user's* project, not the plugin's.
++**The round-1 fix ruling — ordered by the controller in response to that finding, not written by the implementer** — routed the
++read through `${CLAUDE_PLUGIN_ROOT}/hooks/lib/rules.mjs` instead, reading the spike's finding as "set for the plugin's code."
++`CLAUDE_PLUGIN_ROOT` turned out to be unset in the orchestrator's own shell too — verified directly — so the round-1 fix
++reproduced the exact same "orchestrator cannot read the file" failure the reviewer had just flagged, only behind a different
++broken path.
+ 
+ Caught by a reviewer's refusal to assume the resolution worked, not by a fresh measurement: the round-1 re-review flagged, as an
+ explicitly non-blocking, out-of-scope observation, that it had not verified orchestrator-side `${CLAUDE_PLUGIN_ROOT}` resolution —
+ which turned out to be the most valuable line in that report. The fix that followed removed the dependency rather than trying to
+ resolve it: state the floor as a literal in both prompts, with a test asserting the literal matches `NODE_FLOOR` so drift fails at
+ test time instead of mid-preflight in a user's project.
+ 
+ When a measurement licenses a rule, restate exactly what was measured — which process, which environment, one file, one run —
+ before writing the rule down. "It's set" is not a fact; "it's set for the hook process, unconfirmed anywhere else" is.
+ 
